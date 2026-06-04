@@ -1,4 +1,4 @@
-"""Run a simple Fiji + CellProfiler-style analysis on one image."""
+"""Visual validation workflow without a GUI."""
 
 from pathlib import Path
 
@@ -9,21 +9,21 @@ from bioimage_pipeline.export import (
     export_mask_tiff,
     export_measurements_csv,
 )
-from bioimage_pipeline.io import read_tiff, save_tiff
+from bioimage_pipeline.io import save_tiff
 from bioimage_pipeline.measure import measure_objects
 from bioimage_pipeline.preprocess import gaussian_blur
 from bioimage_pipeline.segment import label_objects, remove_small_objects_from_mask
 from bioimage_pipeline.threshold import otsu_threshold
 
 
-def make_synthetic_image(shape: tuple[int, int] = (128, 128)) -> np.ndarray:
-    """Create a test image with two bright circular objects and noise."""
+def make_synthetic_image(shape: tuple[int, int] = (160, 160)) -> np.ndarray:
+    """Create a test image with bright circular objects and noise."""
     image = np.random.randint(0, 15, size=shape, dtype=np.uint16)
     rows, cols = np.ogrid[: shape[0], : shape[1]]
 
     for center_y, center_x, radius, intensity in (
-        (40, 40, 12, 220),
-        (85, 90, 10, 200),
+        (50, 50, 14, 230),
+        (110, 105, 12, 210),
     ):
         circle = (rows - center_y) ** 2 + (cols - center_x) ** 2 <= radius**2
         image[circle] = intensity
@@ -31,9 +31,12 @@ def make_synthetic_image(shape: tuple[int, int] = (128, 128)) -> np.ndarray:
     return image
 
 
-def run_pipeline(image: np.ndarray, output_dir: Path) -> None:
-    """Process one image and save mask, labels, and measurements."""
+def main() -> None:
+    output_dir = Path("output") / "visual_check"
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    image = make_synthetic_image(shape=(160, 160))
+    save_tiff(output_dir / "original.tif", image)
 
     processed = gaussian_blur(image, sigma=1)
     mask = otsu_threshold(processed)
@@ -45,20 +48,8 @@ def run_pipeline(image: np.ndarray, output_dir: Path) -> None:
     export_label_tiff(output_dir / "labels.tif", labels)
     export_measurements_csv(output_dir / "measurements.csv", measurements)
 
-
-def main() -> None:
-    output_dir = Path("output") / "basic_pipeline"
-    image_path = output_dir / "synthetic_input.tif"
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    synthetic_image = make_synthetic_image()
-    save_tiff(image_path, synthetic_image)
-
-    image = read_tiff(image_path)
-    run_pipeline(image, output_dir)
-
-    print(f"Saved results to: {output_dir.resolve()}")
-    print("Open mask.tif and labels.tif in Fiji to inspect the segmentation.")
+    print(f"Saved outputs to: {output_dir.resolve()}")
+    print("Open the output TIFF files in Fiji to visually inspect the result.")
 
 
 if __name__ == "__main__":

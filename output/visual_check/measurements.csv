@@ -1,0 +1,3 @@
+label,area,centroid-0,centroid-1,bbox-0,bbox-1,bbox-2,bbox-3,mean_intensity,max_intensity
+1,611.0,50.02291325695581,49.97708674304419,37,36,65,64,230.0,230.0
+2,437.0,110.0,105.0,99,94,122,117,210.0,210.0

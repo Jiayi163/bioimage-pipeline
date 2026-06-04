@@ -1,13 +1,64 @@
 """Thresholding algorithms."""
 
-from typing import Any
+import numpy as np
+from skimage import filters
 
 
-def otsu_threshold(image: Any) -> Any:
-    """Create a binary mask using Otsu thresholding."""
-    raise NotImplementedError("Otsu thresholding is not implemented yet.")
+def manual_threshold(image: np.ndarray, value: float) -> np.ndarray:
+    """Create a binary mask using a fixed intensity threshold.
+
+    Args:
+        image: Input image array.
+        value: Pixels at or above this value are True in the mask.
+
+    Returns:
+        A boolean mask with the same shape as the input.
+    """
+    image_arr = np.asarray(image)
+    return (image_arr >= value).astype(bool)
 
 
-def adaptive_threshold(image: Any, block_size: int = 35) -> Any:
-    """Create a binary mask using adaptive thresholding."""
-    raise NotImplementedError("Adaptive thresholding is not implemented yet.")
+def otsu_threshold(image: np.ndarray) -> np.ndarray:
+    """Create a binary mask using Otsu's automatic threshold.
+
+    Args:
+        image: Input image array.
+
+    Returns:
+        A boolean mask with the same shape as the input.
+    """
+    image_arr = np.asarray(image)
+    threshold = filters.threshold_otsu(image_arr)
+    return (image_arr > threshold).astype(bool)
+
+
+def adaptive_threshold(
+    image: np.ndarray,
+    block_size: int = 51,
+    offset: float = 0,
+) -> np.ndarray:
+    """Create a binary mask using local adaptive thresholding.
+
+    Args:
+        image: Input image array.
+        block_size: Odd window size for the local neighborhood.
+        offset: Constant subtracted from the local threshold.
+
+    Returns:
+        A boolean mask with the same shape as the input.
+
+    Raises:
+        ValueError: If block_size is not a positive odd integer.
+    """
+    if block_size < 1:
+        raise ValueError("block_size must be at least 1")
+    if block_size % 2 == 0:
+        raise ValueError("block_size must be odd")
+
+    image_arr = np.asarray(image)
+    local_thresh = filters.threshold_local(
+        image_arr,
+        block_size=block_size,
+        offset=offset,
+    )
+    return (image_arr > local_thresh).astype(bool)

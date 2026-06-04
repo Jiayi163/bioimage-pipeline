@@ -123,124 +123,161 @@ Requirements:
 - Preserve image shape.
 - Handle invalid `block_size` clearly.
 
-Status: `PHASE NOT COMPLETE`
+Status: `PHASE COMPLETE` ✔
 
 ## Phase 4: Segmentation
 
 Goal: convert binary masks into labeled objects.
+
+Inspiration:
+
+- **Fiji:** binary mask cleanup before analysis (no GUI).
+- **CellProfiler:** simplified IdentifyPrimaryObjects (cleanup + labeling).
 
 Files:
 
 - `bioimage_pipeline/segment.py`
 - `tests/test_segment.py`
 
-Functions:
+Inputs / outputs:
 
-- `remove_small_objects_from_mask(mask, min_size=20) -> bool mask`
-- `label_objects(mask) -> labeled image`
+- Input: `bool` mask `(H, W)`.
+- Output: cleaned `bool` mask; labeled `int` image with background `0`.
 
-Requirements:
+Tasks:
 
-- Background should be `0`.
-- Each object should have a unique integer label.
-- Support 2D images first.
+- Implement `remove_small_objects_from_mask(mask, min_size=20)`.
+- Implement `label_objects(mask)` with `skimage.measure.label`.
+- Support 2D only; raise `ValueError` for non-2D masks.
 
-Status: `PHASE NOT COMPLETE`
+Acceptance tests:
+
+- Label `0` is background.
+- Objects have unique integer labels.
+- Tiny noise objects are removed.
+- Returned label image is integer type.
+
+Fiji visual check: deferred until Phase 6 export.
+
+Deferred: 3D volumes, watershed splitting, GUI.
+
+Status: `PHASE COMPLETE` ✔
 
 ## Phase 5: Measurement
 
 Goal: measure segmented objects.
+
+Inspiration:
+
+- **Fiji:** Analyze Particles–style region properties (via scikit-image).
+- **CellProfiler:** MeasureObjectIntensity / region props table.
 
 Files:
 
 - `bioimage_pipeline/measure.py`
 - `tests/test_measure.py`
 
-Function:
+Inputs / outputs:
 
-- `measure_objects(label_image, intensity_image=None) -> pandas.DataFrame`
+- Input: `labels` `(H, W)` int; optional `intensity_image` (original, not mask).
+- Output: `pandas.DataFrame` with one row per object.
+- Pipeline dict key: `"measurements"`.
 
-Measurements:
+Tasks:
 
-- `label`
-- `area`
-- `centroid`
-- `bbox`
-- `mean_intensity` if `intensity_image` is provided
-- `max_intensity` if `intensity_image` is provided
-
-Requirements:
-
+- Implement `measure_objects(label_image, intensity_image=None)`.
 - Use `skimage.measure.regionprops_table`.
-- Return a pandas `DataFrame`.
-- Each object should be one row.
-- Intensity measurements must come from the original image.
+- Columns: `label`, `area`, `centroid`, `bbox`; add `mean_intensity`, `max_intensity` when intensity provided.
 
-Status: `PHASE NOT COMPLETE`
+Acceptance tests:
+
+- One row per object.
+- Area values are reasonable.
+- Intensity columns use `intensity_image`, not the mask.
+
+Deferred: custom measurement plugins, 3D props.
+
+Status: `PHASE COMPLETE` ✔
 
 ## Phase 6: Export
 
-Goal: export masks, labeled images, and measurements.
+Goal: export masks, labeled images, and measurements for Fiji and spreadsheets.
+
+Inspiration:
+
+- **Fiji:** save masks and label images as TIFF for visual inspection.
+- **CellProfiler:** export measurements to CSV.
 
 Files:
 
 - `bioimage_pipeline/export.py`
 - `tests/test_export.py`
 
-Functions:
+Inputs / outputs:
 
-- `export_mask_tiff(path, mask)`
-- `export_label_tiff(path, labels)`
-- `export_measurements_csv(path, dataframe)`
+- `export_mask_tiff(path, mask)` — bool mask → `uint8` 0/255 TIFF.
+- `export_label_tiff(path, labels)` — integer label TIFF.
+- `export_measurements_csv(path, dataframe)` — Excel-friendly CSV.
 
-Requirements:
+Tasks:
 
-- Boolean masks should save as `0/255` `uint8` TIFF.
-- Labeled images should save as integer TIFF.
-- CSV should be readable by Excel.
-- Create output folders if needed.
+- Reuse `save_tiff` from `io.py` where appropriate.
+- Create parent directories automatically.
 
-Status: `PHASE NOT COMPLETE`
+Acceptance tests:
+
+- Mask TIFF dtype `uint8`, values 0 or 255.
+- Label TIFF preserves integer labels.
+- CSV round-trip readable.
+
+Fiji visual check: mask and label TIFFs open in Fiji without error.
+
+Deferred: ROI sets, multi-channel stacks.
+
+Status: `PHASE COMPLETE` ✔
 
 ## Phase 7: Pipeline Core
 
 Goal: implement a simple CellProfiler-style pipeline system.
+
+Inspiration:
+
+- **Fiji:** N/A (macro chaining is separate).
+- **CellProfiler:** ordered modules sharing an image workspace.
 
 Files:
 
 - `bioimage_pipeline/pipeline.py`
 - `tests/test_pipeline.py`
 
-Design:
+Inputs / outputs:
 
-Each pipeline step receives and returns a dictionary.
+- Shared dict, e.g. `image`, `processed`, `mask`, `labels`, `measurements`, `filename`.
+- Each step: `Callable[[dict], dict]`.
 
-Example data dictionary:
+Tasks:
 
-```python
-{
-    "image": image,
-    "processed": processed_image,
-    "mask": mask,
-    "labels": labels,
-    "measurements": dataframe,
-}
-```
+- Implement `Pipeline` with `__init__(steps)` and `run(data)`.
+- Run steps in order; clear errors on bad return types.
 
-Class:
+Acceptance tests:
 
-- `Pipeline`
+- Later steps see keys from earlier steps.
+- Non-dict return raises `TypeError`.
+- Step exception wraps as `RuntimeError` with step index.
 
-Methods:
+Deferred: parallel runs, module GUI, branching logic.
 
-- `__init__(steps)`
-- `run(data)`
-
-Status: `PHASE NOT COMPLETE`
+Status: `PHASE COMPLETE` ✔
 
 ## Phase 8: Batch Processing
 
 Goal: run the pipeline on a folder of TIFF images.
+
+Inspiration:
+
+- **Fiji:** N/A (batch via scripts).
+- **CellProfiler:** batch mode over image folders.
 
 Files:
 
@@ -251,19 +288,31 @@ Function:
 
 - `run_pipeline_on_folder(pipeline, input_folder, output_folder, pattern="*.tif")`
 
-Requirements:
+Tasks:
 
-- Process all TIFF images in a folder.
-- Save output masks.
-- Save one CSV per image or one combined CSV.
-- Track image filename in results.
-- Do not crash the entire batch if one image fails.
+- Discover TIFF files (`*.tif` and `*.tiff`).
+- Per image: run pipeline, save mask/labels/measurements.
+- Add `filename` column to measurements.
+- Return `processed` and `failed` lists; do not stop on single failure.
 
-Status: `PHASE NOT COMPLETE`
+Acceptance tests:
+
+- Multiple files processed.
+- Outputs named by image stem.
+- Combined CSV optional; failures reported.
+
+Deferred: distributed cluster batch, database output.
+
+Status: `PHASE COMPLETE` ✔
 
 ## Phase 9: Example Workflow
 
 Goal: create one runnable beginner-friendly example.
+
+Inspiration:
+
+- **Fiji:** inspect outputs after running a script.
+- **CellProfiler:** single-image analysis pipeline template.
 
 File:
 
@@ -271,50 +320,63 @@ File:
 
 Workflow:
 
-1. Read TIFF.
-2. Gaussian blur.
-3. Otsu threshold.
-4. Remove small objects.
-5. Label objects.
-6. Measure objects.
-7. Save mask TIFF.
-8. Save CSV.
+1. Read TIFF (or generate synthetic image).
+2. Gaussian blur → Otsu threshold → remove small objects → label → measure.
+3. Export mask TIFF, label TIFF, measurements CSV.
 
-Requirements:
+Tasks:
 
-- Easy for a beginner to read.
-- Use clear variable names.
-- Include comments.
-- Do not require real lab data.
-- Optionally generate a synthetic test image.
+- Clear variable names and comments.
+- No real lab data required.
 
-Status: `PHASE NOT COMPLETE`
+Acceptance tests:
+
+- Script runs from terminal without error.
+- Output files exist in a chosen output directory.
+
+Status: `PHASE COMPLETE` ✔
 
 ## Phase 10: Visual Check Without GUI
 
 Goal: create a simple visual validation script without building a GUI.
 
+Inspiration:
+
+- **Fiji:** manual QC of masks and labels.
+- **CellProfiler:** N/A.
+
+File:
+
+- `examples/visual_check.py`
+
 Requirements:
 
-- Generate a synthetic image with bright circular objects and noise.
-- Save the original image as TIFF.
-- Run the basic pipeline.
-- Save mask TIFF.
-- Save labeled TIFF.
-- Save measurements CSV.
-- Print this instruction:
-  `"Open the output TIFF files in Fiji to visually inspect the result."`
+- Synthetic image with bright circles and noise.
+- Save original, mask, labels, CSV.
+- Print: `Open the output TIFF files in Fiji to visually inspect the result.`
 
-Self-check:
+Acceptance tests:
 
-- Does the script run from terminal?
-- Are TIFF files created?
-- Can the TIFF files be opened in Fiji?
-- Does the mask show the expected objects?
-- Does the CSV contain object measurements?
+- All expected output files created.
+- Script exits successfully from terminal.
 
-Expected result:
+Fiji visual check: user opens TIFFs in Fiji.
 
-- `PHASE COMPLETE` only if the example creates all expected output files.
+Status: `PHASE COMPLETE` ✔
 
-Status: `PHASE NOT COMPLETE`
+## Phase 11: Advanced / Self-Adaptive Thresholding (Future)
+
+Goal: document future threshold improvements; do not implement until Phases 4–10 are complete.
+
+Inspiration:
+
+- **Fiji:** Auto Threshold, rolling-ball background correction.
+- **CellProfiler:** advanced threshold modules.
+
+Deferred examples:
+
+- Auto-tuned block size / offset.
+- Rolling-ball or morphological background subtraction before threshold.
+- Multi-scale or learned thresholds.
+
+Status: `PHASE NOT COMPLETE` (future — not started)
