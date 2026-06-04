@@ -9,8 +9,6 @@ from typing import Sequence
 
 import pandas as pd
 
-CELLPROFILER_EXECUTABLE = "cellprofiler"
-
 
 def _resolve_existing_path(path: str | Path, label: str) -> Path:
     resolved = Path(path)
@@ -19,14 +17,28 @@ def _resolve_existing_path(path: str | Path, label: str) -> Path:
     return resolved
 
 
+def _validate_cellprofiler_executable(cellprofiler_executable: str) -> None:
+    executable_path = Path(cellprofiler_executable)
+    if executable_path.is_file():
+        return
+    if shutil.which(cellprofiler_executable) is not None:
+        return
+
+    raise RuntimeError(
+        f"CellProfiler executable not found: {cellprofiler_executable}. "
+        "Install CellProfiler or pass a valid path via cellprofiler_executable."
+    )
+
+
 def _build_cellprofiler_command(
+    cellprofiler_executable: str,
     cppipe_path: Path,
     input_dir: Path,
     output_dir: Path,
     extra_args: Sequence[str] | None = None,
 ) -> list[str]:
     command = [
-        CELLPROFILER_EXECUTABLE,
+        cellprofiler_executable,
         "-c",
         "-r",
         "-p",
@@ -46,6 +58,7 @@ def run_cellprofiler_pipeline(
     input_dir: str | Path,
     output_dir: str | Path,
     extra_args: Sequence[str] | None = None,
+    cellprofiler_executable: str = "cellprofiler",
 ) -> Path:
     """Run a CellProfiler pipeline in headless mode.
 
@@ -54,6 +67,9 @@ def run_cellprofiler_pipeline(
         input_dir: Folder containing input images.
         output_dir: Folder where CellProfiler writes outputs.
         extra_args: Optional extra CLI arguments appended to the command.
+        cellprofiler_executable: CellProfiler command name or full path to the
+            executable (for example ``cellprofiler`` or
+            ``C:\\Program Files\\CellProfiler\\CellProfiler.exe``).
 
     Returns:
         Resolved path to the output directory.
@@ -70,13 +86,10 @@ def run_cellprofiler_pipeline(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    if shutil.which(CELLPROFILER_EXECUTABLE) is None:
-        raise RuntimeError(
-            "CellProfiler is not installed or not on PATH. "
-            "Install CellProfiler and ensure the 'cellprofiler' command is available."
-        )
+    _validate_cellprofiler_executable(cellprofiler_executable)
 
     command = _build_cellprofiler_command(
+        cellprofiler_executable,
         pipeline_path,
         input_path,
         output_path,

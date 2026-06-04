@@ -79,9 +79,9 @@ python examples/visual_check.py
 
 ## CellProfiler integration
 
-Install [CellProfiler](https://cellprofiler.org/) separately and ensure the
-`cellprofiler` command is on your PATH. Prepare a `.cppipe` pipeline file and
-folders of input images.
+Install [CellProfiler](https://cellprofiler.org/) separately. By default the
+runner uses the `cellprofiler` command on your PATH. On Windows you can pass the
+full path to `CellProfiler.exe` via `cellprofiler_executable`.
 
 ```python
 from bioimage_pipeline.cellprofiler_runner import (
@@ -90,9 +90,17 @@ from bioimage_pipeline.cellprofiler_runner import (
 )
 
 output_dir = run_cellprofiler_pipeline(
-    "pipelines/basic.cppipe",
-    "input_images",
-    "cellprofiler_output",
+    cppipe_path="pipelines/basic.cppipe",
+    input_dir="input_images",
+    output_dir="cellprofiler_output",
+)
+
+# Windows example with explicit executable path:
+output_dir = run_cellprofiler_pipeline(
+    cppipe_path="pipelines/basic.cppipe",
+    input_dir="input_images",
+    output_dir="cellprofiler_output",
+    cellprofiler_executable=r"C:\Program Files\CellProfiler\CellProfiler.exe",
 )
 
 measurements = read_cellprofiler_csv(output_dir / "MyMeasurements.csv")

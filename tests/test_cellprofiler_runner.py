@@ -39,6 +39,7 @@ def test_missing_input_dir_raises_file_not_found(tmp_path) -> None:
 
 def test_build_cellprofiler_command_includes_required_flags(tmp_path) -> None:
     command = _build_cellprofiler_command(
+        "cellprofiler",
         tmp_path / "pipeline.cppipe",
         tmp_path / "input",
         tmp_path / "output",
@@ -99,7 +100,7 @@ def test_run_cellprofiler_pipeline_raises_when_not_installed(
     input_dir = tmp_path / "input"
     input_dir.mkdir()
 
-    with pytest.raises(RuntimeError, match="not installed"):
+    with pytest.raises(RuntimeError, match="executable not found"):
         run_cellprofiler_pipeline(cppipe, input_dir, tmp_path / "output")
 
 
@@ -119,6 +120,54 @@ def test_run_cellprofiler_pipeline_raises_on_nonzero_exit(
 
     with pytest.raises(RuntimeError, match="CellProfiler command failed"):
         run_cellprofiler_pipeline(cppipe, input_dir, tmp_path / "output")
+
+
+@patch("bioimage_pipeline.cellprofiler_runner.subprocess.run")
+def test_run_cellprofiler_pipeline_uses_custom_executable(
+    mock_run: MagicMock,
+    tmp_path: Path,
+) -> None:
+    cppipe = tmp_path / "pipeline.cppipe"
+    cppipe.write_text("pipeline", encoding="utf-8")
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    output_dir = tmp_path / "output"
+    executable = tmp_path / "CellProfiler.exe"
+    executable.write_text("", encoding="utf-8")
+
+    mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+    run_cellprofiler_pipeline(
+        cppipe,
+        input_dir,
+        output_dir,
+        cellprofiler_executable=str(executable),
+    )
+
+    command = mock_run.call_args[0][0]
+    assert command[0] == str(executable)
+    assert "-c" in command
+    assert "-r" in command
+    assert "-p" in command
+    assert "-i" in command
+    assert "-o" in command
+
+
+def test_run_cellprofiler_pipeline_custom_executable_missing_raises(
+    tmp_path: Path,
+) -> None:
+    cppipe = tmp_path / "pipeline.cppipe"
+    cppipe.write_text("pipeline", encoding="utf-8")
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+
+    with pytest.raises(RuntimeError, match="executable not found"):
+        run_cellprofiler_pipeline(
+            cppipe,
+            input_dir,
+            tmp_path / "output",
+            cellprofiler_executable=tmp_path / "missing.exe",
+        )
 
 
 def test_read_cellprofiler_csv_returns_dataframe(tmp_path) -> None:
