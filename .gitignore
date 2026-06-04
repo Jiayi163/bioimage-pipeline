@@ -11,3 +11,11 @@ dist/
 
 .venv/
 venv/
+
+# Local CellProfiler run artifacts (keep out of the repo)
+cellprofiler_output/
+cellprofiler_output*/
+input_images/
+
+# Stray pytest cache directories
+pytest-cache-files-*/

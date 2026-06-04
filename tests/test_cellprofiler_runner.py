@@ -8,9 +8,14 @@ import pytest
 
 from bioimage_pipeline.cellprofiler_runner import (
     _build_cellprofiler_command,
+    load_cellprofiler_measurements,
+    merge_cellprofiler_tables,
     read_cellprofiler_csv,
     run_cellprofiler_pipeline,
+    validate_cellprofiler_columns,
 )
+
+FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "cellprofiler"
 
 
 def test_missing_cppipe_path_raises_file_not_found(tmp_path) -> None:
@@ -184,3 +189,77 @@ def test_read_cellprofiler_csv_returns_dataframe(tmp_path) -> None:
 def test_read_cellprofiler_csv_missing_file_raises_file_not_found(tmp_path) -> None:
     with pytest.raises(FileNotFoundError, match="CSV file"):
         read_cellprofiler_csv(tmp_path / "missing.csv")
+
+
+def test_validate_cellprofiler_columns_passes_when_present() -> None:
+    dataframe = pd.DataFrame({"Image_Number": [1], "ObjectNumber": [1]})
+    validate_cellprofiler_columns(
+        dataframe,
+        ["Image_Number", "ObjectNumber"],
+        table_name="objects",
+    )
+
+
+def test_validate_cellprofiler_columns_raises_when_missing() -> None:
+    dataframe = pd.DataFrame({"Image_Number": [1]})
+    with pytest.raises(ValueError, match="missing required columns"):
+        validate_cellprofiler_columns(
+            dataframe,
+            ["Image_Number", "ObjectNumber"],
+            table_name="objects",
+        )
+
+
+def test_load_cellprofiler_measurements_reads_fixture_csvs() -> None:
+    tables = load_cellprofiler_measurements(FIXTURES_DIR)
+
+    assert set(tables) == {
+        "MyExpt_Image",
+        "MyExpt_Experiment",
+        "MyExpt_IdentifyPrimaryObjects",
+    }
+    assert tables["MyExpt_Image"].loc[0, "FileName"] == "testimage.tif"
+    assert len(tables["MyExpt_IdentifyPrimaryObjects"]) == 2
+
+
+def test_load_cellprofiler_measurements_empty_dir_raises(tmp_path) -> None:
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+
+    with pytest.raises(FileNotFoundError, match="No CSV files"):
+        load_cellprofiler_measurements(empty_dir)
+
+
+def test_load_cellprofiler_measurements_missing_dir_raises(tmp_path) -> None:
+    with pytest.raises(FileNotFoundError, match="Output directory"):
+        load_cellprofiler_measurements(tmp_path / "missing")
+
+
+def test_merge_cellprofiler_tables_combines_object_and_image_tables() -> None:
+    tables = load_cellprofiler_measurements(FIXTURES_DIR)
+    merged = merge_cellprofiler_tables(tables)
+
+    assert len(merged) == 2
+    assert "AreaShape_Area" in merged.columns
+    assert "FileName" in merged.columns
+    assert "Plate_Name" in merged.columns
+    assert merged.loc[0, "AreaShape_Area"] == 120
+
+
+def test_merge_cellprofiler_tables_empty_dict_raises() -> None:
+    with pytest.raises(ValueError, match="No CellProfiler tables"):
+        merge_cellprofiler_tables({})
+
+
+def test_merge_cellprofiler_tables_image_only() -> None:
+    tables = {
+        "MyExpt_Image": pd.DataFrame(
+            {"Image_Number": [1], "FileName": ["a.tif"]}
+        ),
+        "MyExpt_Experiment": pd.DataFrame(
+            {"Image_Number": [1], "Plate_Name": ["Plate1"]}
+        ),
+    }
+    merged = merge_cellprofiler_tables(tables)
+
+    assert list(merged.columns) == ["Image_Number", "FileName", "Plate_Name"]

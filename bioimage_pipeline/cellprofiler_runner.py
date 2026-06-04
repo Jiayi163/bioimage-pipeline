@@ -9,6 +9,9 @@ from typing import Sequence
 
 import pandas as pd
 
+_OBJECT_MERGE_KEYS = ("Image_Number", "ObjectNumber")
+_IMAGE_MERGE_KEY = "Image_Number"
+
 
 def _resolve_existing_path(path: str | Path, label: str) -> Path:
     resolved = Path(path)
@@ -134,3 +137,148 @@ def read_cellprofiler_csv(csv_path: str | Path) -> pd.DataFrame:
         raise FileNotFoundError(f"CSV file not found: {csv_file}")
 
     return pd.read_csv(csv_file)
+
+
+def validate_cellprofiler_columns(
+    dataframe: pd.DataFrame,
+    required_columns: Sequence[str],
+    *,
+    table_name: str = "table",
+) -> None:
+    """Raise ``ValueError`` when expected CellProfiler columns are missing."""
+    missing = [
+        column
+        for column in required_columns
+        if column not in dataframe.columns
+    ]
+    if missing:
+        joined = ", ".join(missing)
+        raise ValueError(
+            f"{table_name} is missing required columns: {joined}"
+        )
+
+
+def load_cellprofiler_measurements(
+    output_dir: str | Path,
+    *,
+    pattern: str = "*.csv",
+) -> dict[str, pd.DataFrame]:
+    """Load all CellProfiler CSV exports from an output directory.
+
+    Args:
+        output_dir: Directory containing ``ExportToSpreadsheet`` CSV files.
+        pattern: Glob pattern for CSV discovery (default: all ``*.csv``).
+
+    Returns:
+        Mapping of file stem (e.g. ``MyExpt_Image``) to DataFrame.
+
+    Raises:
+        FileNotFoundError: If the directory or any CSV file is missing.
+    """
+    output_path = _resolve_existing_path(output_dir, "Output directory")
+    if not output_path.is_dir():
+        raise FileNotFoundError(f"Output directory not found: {output_path}")
+
+    csv_files = sorted(output_path.glob(pattern))
+    if not csv_files:
+        raise FileNotFoundError(
+            f"No CSV files matching {pattern!r} in {output_path}"
+        )
+
+    return {
+        csv_file.stem: read_cellprofiler_csv(csv_file) for csv_file in csv_files
+    }
+
+
+def merge_cellprofiler_tables(
+    tables: dict[str, pd.DataFrame],
+) -> pd.DataFrame:
+    """Merge CellProfiler export tables into one DataFrame.
+
+    Object-level tables (containing ``ObjectNumber``) are merged on
+    ``Image_Number`` and ``ObjectNumber``. Image-level tables are left-joined
+    on ``Image_Number``. When only image-level tables exist, they are merged
+    on ``Image_Number``.
+
+    Args:
+        tables: Mapping of table name to DataFrame (as returned by
+            :func:`load_cellprofiler_measurements`).
+
+    Returns:
+        Combined measurement table.
+
+    Raises:
+        ValueError: If ``tables`` is empty or lacks merge keys.
+    """
+    if not tables:
+        raise ValueError("No CellProfiler tables to merge")
+
+    object_tables = {
+        name: dataframe
+        for name, dataframe in tables.items()
+        if _OBJECT_MERGE_KEYS[1] in dataframe.columns
+    }
+    image_tables = {
+        name: dataframe
+        for name, dataframe in tables.items()
+        if _OBJECT_MERGE_KEYS[1] not in dataframe.columns
+    }
+
+    if object_tables:
+        names = list(object_tables.keys())
+        merged = object_tables[names[0]]
+        validate_cellprofiler_columns(
+            merged,
+            _OBJECT_MERGE_KEYS,
+            table_name=names[0],
+        )
+        for name in names[1:]:
+            table = object_tables[name]
+            validate_cellprofiler_columns(
+                table,
+                _OBJECT_MERGE_KEYS,
+                table_name=name,
+            )
+            merged = merged.merge(
+                table,
+                on=list(_OBJECT_MERGE_KEYS),
+                how="outer",
+                suffixes=("", f"_{name}"),
+            )
+        for name, table in image_tables.items():
+            if _IMAGE_MERGE_KEY not in table.columns:
+                raise ValueError(
+                    f"{name} is missing required column: {_IMAGE_MERGE_KEY}"
+                )
+            merged = merged.merge(
+                table,
+                on=_IMAGE_MERGE_KEY,
+                how="left",
+                suffixes=("", f"_{name}"),
+            )
+        return merged
+
+    if not image_tables:
+        raise ValueError("No CellProfiler tables to merge")
+
+    names = list(image_tables.keys())
+    merged = image_tables[names[0]]
+    validate_cellprofiler_columns(
+        merged,
+        (_IMAGE_MERGE_KEY,),
+        table_name=names[0],
+    )
+    for name in names[1:]:
+        table = image_tables[name]
+        validate_cellprofiler_columns(
+            table,
+            (_IMAGE_MERGE_KEY,),
+            table_name=name,
+        )
+        merged = merged.merge(
+            table,
+            on=_IMAGE_MERGE_KEY,
+            how="outer",
+            suffixes=("", f"_{name}"),
+        )
+    return merged

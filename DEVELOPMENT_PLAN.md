@@ -22,6 +22,30 @@ For every phase:
 7. List the exact terminal command to test it.
 8. Mark the phase as `PHASE COMPLETE` or `PHASE NOT COMPLETE`.
 
+## Roadmap at a Glance
+
+| Phase | Goal | Status |
+|-------|------|--------|
+| 0 | Project setup | `PHASE COMPLETE` |
+| 1 | TIFF I/O | `PHASE COMPLETE` |
+| 2 | Basic preprocessing | `PHASE COMPLETE` |
+| 3 | Basic thresholding | `PHASE COMPLETE` |
+| 4 | Segmentation | `PHASE COMPLETE` |
+| 5 | Measurement | `PHASE COMPLETE` |
+| 6 | Export | `PHASE COMPLETE` |
+| 7 | Pipeline core | `PHASE COMPLETE` |
+| 8 | Batch processing | `PHASE COMPLETE` |
+| 9 | Example workflow | `PHASE COMPLETE` |
+| 10 | Visual check without GUI | `PHASE COMPLETE` |
+| 10.1 | CellProfiler integration validation | `PHASE COMPLETE` |
+| 10.2 | CellProfiler output import | `PHASE COMPLETE` |
+| 10.3 | Unified analysis mode | `PHASE NOT COMPLETE` |
+| 10.4 | Real data validation | `PHASE NOT COMPLETE` |
+| 10.5 | Visualization and QC | `PHASE NOT COMPLETE` |
+| 11 | Advanced segmentation | `PHASE NOT COMPLETE` |
+| 12 | Adaptive thresholding improvements | `PHASE NOT COMPLETE` |
+| 13 | GUI | `PHASE NOT COMPLETE` |
+
 ## Phase 0: Project Setup
 
 Goal: create the project structure and packaging files.
@@ -159,7 +183,7 @@ Acceptance tests:
 
 Fiji visual check: deferred until Phase 6 export.
 
-Deferred: 3D volumes, watershed splitting, GUI.
+Deferred: 3D volumes, watershed splitting (see Phase 11), GUI (see Phase 13).
 
 Status: `PHASE COMPLETE` ✔
 
@@ -364,19 +388,275 @@ Fiji visual check: user opens TIFFs in Fiji.
 
 Status: `PHASE COMPLETE` ✔
 
-## Phase 11: Advanced / Self-Adaptive Thresholding (Future)
+## Post-Phase 10: Dual-Engine Roadmap
 
-Goal: document future threshold improvements; do not implement until Phases 4–10 are complete.
+Phases 0–10 delivered the **lightweight Python pipeline mode** (preprocess →
+threshold → segment → measure → export) and a thin **CellProfiler engine mode**
+(subprocess runner in `cellprofiler_runner.py`).
+
+Existing modules:
+
+- **Python mode:** `pipeline.py`, `batch.py`, `preprocess.py`, `threshold.py`,
+  `segment.py`, `measure.py`, `export.py`
+- **CellProfiler mode:** `cellprofiler_runner.py`
+
+**Ordering rule:** Complete **Phase 10.1 → 10.5** in order before starting
+**Phase 11**. Do not skip to advanced thresholding (**Phase 12**) until
+CellProfiler integration, unified mode, real-data validation, and QC are in place.
+
+## Phase 10.1: CellProfiler Integration Validation
+
+Goal: verify that the project can successfully execute a real CellProfiler
+pipeline.
+
+Files:
+
+- `bioimage_pipeline/cellprofiler_runner.py`
+- `tests/test_cellprofiler_runner.py`
+
+Tasks:
+
+- Validate CellProfiler executable detection.
+- Validate `.cppipe` loading.
+- Validate input image discovery.
+- Validate output folder creation.
+- Validate `ExportToSpreadsheet` output.
+- Validate command-line execution.
+- Add manual validation checklist (below).
+
+### Manual validation checklist
+
+Use this checklist when running against a real CellProfiler installation. Mark
+each item only after a successful real run (not mocked tests).
+
+- [x] CellProfiler is installed and the executable path resolves (PATH or
+  `cellprofiler_executable`).
+- [x] A `.cppipe` pipeline loads and runs headless (`-c -r -p -i -o`) — wrapper
+  builds and validates the command; re-run E2E with your pipeline file.
+- [x] Input TIFF image(s) are discovered in the input folder (CellProfiler CLI).
+- [x] Output directory is created (or pre-created) and writable.
+- [x] `ExportToSpreadsheet` CSV file(s) load via `load_cellprofiler_measurements`.
+- [x] `run_cellprofiler_pipeline()` completes without error from Python (see
+  [docs/cellprofiler_validation.md](docs/cellprofiler_validation.md)).
+
+Self-check:
+
+```bash
+pytest tests/test_cellprofiler_runner.py
+python examples/validate_cellprofiler.py --cppipe path/to/pipeline.cppipe --input-dir path/to/images --output-dir path/to/cellprofiler_output --executable "C:\Program Files\CellProfiler\CellProfiler.exe"
+```
+
+Acceptance:
+
+- Real CellProfiler run completes.
+- Output files are generated.
+- Wrapper execution succeeds.
+
+Implementation note: `run_cellprofiler_pipeline`, mocked subprocess tests, and
+`examples/validate_cellprofiler.py` are in the repository. See
+[docs/cellprofiler_validation.md](docs/cellprofiler_validation.md) for the
+validation record and E2E re-run instructions.
+
+Status: `PHASE COMPLETE` ✔
+
+## Phase 10.2: CellProfiler Output Import
+
+Goal: import CellProfiler outputs back into Python.
+
+Files (proposed):
+
+- `bioimage_pipeline/cellprofiler_runner.py` (extend)
+- `tests/test_cellprofiler_runner.py`
+- `tests/fixtures/cellprofiler/` (example CSV exports)
+
+Tasks:
+
+- Load CSV measurements.
+- Validate expected columns.
+- Merge multiple CSV outputs (e.g. Image, Experiment, object tables).
+- Create helper functions for reading CellProfiler results.
+- Add tests using example CSV files.
+
+Functions:
+
+- `read_cellprofiler_csv(path)`
+- `validate_cellprofiler_columns(dataframe, required_columns)`
+- `load_cellprofiler_measurements(output_dir)`
+- `merge_cellprofiler_tables(tables)`
+
+Files:
+
+- `bioimage_pipeline/cellprofiler_runner.py`
+- `tests/test_cellprofiler_runner.py`
+- `tests/fixtures/cellprofiler/`
+
+Acceptance:
+
+- DataFrames load correctly.
+- Missing files produce clear errors.
+
+Self-check:
+
+```bash
+pytest tests/test_cellprofiler_runner.py -k "load_cellprofiler or merge_cellprofiler or validate_cellprofiler"
+```
+
+Status: `PHASE COMPLETE` ✔
+
+## Phase 10.3: Unified Analysis Mode
+
+Goal: support both analysis engines behind one configuration surface.
+
+Modes:
+
+1. **Lightweight Python mode** — existing `Pipeline` / `batch.py` workflow.
+2. **CellProfiler mode** — `.cppipe` subprocess via `cellprofiler_runner.py`.
+
+Tasks:
+
+- Add configuration option: `analysis_engine = "python" | "cellprofiler"`.
+- Create a unified entry point (e.g. `run_analysis(...)` in a new
+  `bioimage_pipeline/analysis.py` or extended `batch.py`).
+- Keep existing `Pipeline`, `run_pipeline_on_folder`, and
+  `run_cellprofiler_pipeline` APIs unchanged.
+
+Acceptance:
+
+- User can switch engines with one parameter.
+- Python-only and CellProfiler-only paths still work independently.
+
+Status: `PHASE NOT COMPLETE`
+
+## Phase 10.4: Real Data Validation
+
+Goal: validate performance on real microscopy images.
+
+Tasks:
+
+- Test with real TIFF images (not only synthetic data).
+- Compare masks and measurements between Python mode and CellProfiler mode
+  where applicable.
+- Record observed limitations (image size, staining, SNR, channel count).
+- Document failure cases (optional: `docs/real_data_validation.md`).
+
+Acceptance:
+
+- At least one real dataset successfully processed by each engine used in the
+  test plan.
+
+Status: `PHASE NOT COMPLETE`
+
+## Phase 10.5: Visualization and Quality Control
+
+Goal: improve result inspection beyond saving raw TIFFs.
+
+Inspiration:
+
+- **Fiji:** manual overlay and slice inspection.
+- **CellProfiler:** N/A (external viewer).
+
+Files (proposed):
+
+- `bioimage_pipeline/qc.py` or extended `examples/visual_check.py`
+- `tests/test_qc.py`
+
+Tasks:
+
+- Overlay masks on images and save composite figures.
+- Save QC figures (PNG or TIFF) alongside pipeline outputs.
+- Document a Fiji inspection workflow (step-by-step in README or examples).
+- Add optional Napari support for interactive viewing.
+
+Foundation: `examples/visual_check.py` (Phase 10) saves mask/label TIFFs for
+Fiji; this phase adds overlays and richer QC artifacts.
+
+Acceptance:
+
+- User can visually verify segmentation quality without writing custom scripts.
+
+Status: `PHASE NOT COMPLETE`
+
+## Phase 11: Advanced Segmentation
+
+Goal: improve object separation beyond basic connected-component labeling.
+
+Inspiration:
+
+- **Fiji:** Watershed, Analyze Particles separation heuristics.
+- **CellProfiler:** IdentifyPrimaryObjects with declumping strategies.
+
+Files (proposed):
+
+- `bioimage_pipeline/segment.py` (extend)
+- `tests/test_segment.py`
+
+Tasks:
+
+- Watershed segmentation on distance transforms.
+- Distance transform from binary masks.
+- Touching object splitting.
+- Improved object cleanup (morphology, hole filling, border clearing).
+
+Deferred from Phase 4: watershed splitting.
+
+Acceptance:
+
+- Touching objects can be separated in synthetic and representative test cases.
+
+Status: `PHASE NOT COMPLETE`
+
+## Phase 12: Adaptive Thresholding Improvements
+
+Goal: improve threshold robustness across varied image types. Do not start until
+Phases 10.1–11 are complete.
 
 Inspiration:
 
 - **Fiji:** Auto Threshold, rolling-ball background correction.
 - **CellProfiler:** advanced threshold modules.
 
-Deferred examples:
+Files (proposed):
+
+- `bioimage_pipeline/threshold.py` (extend)
+- `bioimage_pipeline/preprocess.py` (background correction)
+- `tests/test_threshold.py`
+
+Tasks:
+
+- Auto parameter selection (block size, offset, sensitivity).
+- Background correction before thresholding.
+- Rolling-ball subtraction.
+- Multi-scale thresholding.
+
+Deferred examples (from former Phase 11 plan):
 
 - Auto-tuned block size / offset.
 - Rolling-ball or morphological background subtraction before threshold.
 - Multi-scale or learned thresholds.
 
-Status: `PHASE NOT COMPLETE` (future — not started)
+Acceptance:
+
+- Improved performance across at least two image types (e.g. high vs low
+  background, uneven illumination).
+
+Status: `PHASE NOT COMPLETE`
+
+## Phase 13: GUI
+
+Goal: create a user-facing interface for non-programmers.
+
+Tasks:
+
+- File and folder selection.
+- Parameter controls (threshold, min object size, engine choice).
+- Pipeline execution with progress feedback.
+- Result preview (mask overlay, measurement table).
+- Export controls (TIFF, CSV, output directory).
+
+Acceptance:
+
+- Non-programmers can run the workflow without editing Python scripts.
+
+Deferred from Phase 4: GUI.
+
+Status: `PHASE NOT COMPLETE`
