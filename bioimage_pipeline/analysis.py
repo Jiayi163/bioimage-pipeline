@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Sequence
 
 import pandas as pd
 
+from bioimage_pipeline.adaptive_import import run_self_adaptive_threshold_on_folder
 from bioimage_pipeline.batch import run_pipeline_on_folder
 from bioimage_pipeline.cellprofiler_runner import (
     RESULTS_LABELS_DIR,
@@ -48,6 +50,8 @@ LabelingMethod = Literal["connected", "watershed"]
 _SUPPORTED_ENGINES = frozenset({"python", "cellprofiler"})
 _SUPPORTED_LABELING = frozenset({"connected", "watershed"})
 
+RESULTS_STAGING_DIR = "staging"
+
 
 def _validate_labeling_method(labeling_method: str) -> LabelingMethod:
     if labeling_method not in _SUPPORTED_LABELING:
@@ -74,6 +78,10 @@ def build_default_pipeline(
     optional morphological cleanup → labeling → region measurement.
 
     Use ``labeling_method="watershed"`` to split touching objects (Phase 11).
+
+    For the experimental self-adaptive import pipeline (Phase 17, deferred),
+    call :func:`bioimage_pipeline.adaptive_import.run_self_adaptive_threshold`
+    directly or use ``run_cellprofiler_workflow(..., adaptive_threshold=True)``.
     """
 
     validated_labeling = _validate_labeling_method(labeling_method)
@@ -131,6 +139,9 @@ class CellProfilerWorkflowConfig:
     export_fiji_tiffs: bool = True
     generate_qc: bool = True
     fiji_image_pattern: str = "*.tif"
+    adaptive_threshold: bool = False
+    adaptive_min_object_size: int = 20
+    adaptive_image_pattern: str = "*.tif"
 
 
 @dataclass
@@ -153,6 +164,8 @@ class CellProfilerWorkflowResult:
     qc_artifacts: dict[str, dict[str, Path]]
     log_files: dict[str, Path]
     cellprofiler_run: CellProfilerRunResult
+    adaptive_threshold_summary: dict[str, Any] | None = None
+    import_warnings: list[str] | None = None
 
     @property
     def output_dir(self) -> Path:
@@ -188,6 +201,8 @@ class CellProfilerWorkflowResult:
             },
             "log_files": {key: str(path) for key, path in self.log_files.items()},
             "cellprofiler_returncode": self.cellprofiler_run.returncode,
+            "adaptive_threshold_summary": self.adaptive_threshold_summary,
+            "import_warnings": list(self.import_warnings or []),
         }
 
 
@@ -260,18 +275,24 @@ def _run_cellprofiler_analysis(config: AnalysisConfig) -> dict[str, Any]:
         extra_args=config.cellprofiler_extra_args,
         cellprofiler_executable=config.cellprofiler_executable,
     )
-    tables = load_cellprofiler_measurements(output_dir)
-    measurements = (
-        merge_cellprofiler_tables(tables) if config.merge_measurements else None
-    )
+    load_result = load_cellprofiler_measurements(output_dir)
+    measurements = None
+    import_warnings = list(load_result.warnings)
+    if config.merge_measurements:
+        measurements, merge_warnings = merge_cellprofiler_tables(
+            load_result.tables,
+            metadata=load_result.metadata,
+        )
+        import_warnings.extend(merge_warnings)
 
     return {
         "analysis_engine": "cellprofiler",
         "output_dir": output_dir,
         "processed": None,
         "failed": None,
-        "tables": tables,
+        "tables": load_result.tables,
         "measurements": measurements,
+        "import_warnings": import_warnings,
     }
 
 
@@ -390,11 +411,15 @@ def run_cellprofiler_workflow(
     export_fiji_tiffs: bool = True,
     generate_qc: bool = True,
     fiji_image_pattern: str = "*.tif",
+    adaptive_threshold: bool = False,
+    adaptive_min_object_size: int = 20,
+    adaptive_image_pattern: str = "*.tif",
 ) -> CellProfilerWorkflowResult:
     """Run the CellProfiler-to-Fiji workflow and organize all outputs.
 
-    Steps: headless CellProfiler run → capture logs → collect CSV/TIFF outputs
-    → write Fiji-compatible masks and labels → generate QC overlays.
+    Steps: optional self-adaptive Python threshold staging → headless
+    CellProfiler run → capture logs → collect CSV/TIFF outputs → write
+    Fiji-compatible masks and labels → generate QC overlays.
 
     Args:
         input_dir: Folder containing input images for CellProfiler.
@@ -408,6 +433,11 @@ def run_cellprofiler_workflow(
             files under ``masks/`` and ``labels/``.
         generate_qc: Create mask/label overlay figures under ``qc/``.
         fiji_image_pattern: Glob pattern for TIFF discovery in raw CP output.
+        adaptive_threshold: When ``True``, run experimental Phase 17 self-adaptive
+            Python thresholding into ``staging/`` before CellProfiler (opt-in;
+            prototype — see DEVELOPMENT_PLAN.md Phase 17).
+        adaptive_min_object_size: Minimum object size for adaptive threshold cleanup.
+        adaptive_image_pattern: Glob pattern for adaptive threshold input TIFFs.
 
     Returns:
         :class:`CellProfilerWorkflowResult` with organized paths and summaries.
@@ -422,6 +452,9 @@ def run_cellprofiler_workflow(
         export_fiji_tiffs=export_fiji_tiffs,
         generate_qc=generate_qc,
         fiji_image_pattern=fiji_image_pattern,
+        adaptive_threshold=adaptive_threshold,
+        adaptive_min_object_size=adaptive_min_object_size,
+        adaptive_image_pattern=adaptive_image_pattern,
     )
     return run_cellprofiler_workflow_from_config(config)
 
@@ -431,6 +464,21 @@ def run_cellprofiler_workflow_from_config(
 ) -> CellProfilerWorkflowResult:
     """Run :func:`run_cellprofiler_workflow` from a config object."""
     directories = _prepare_workflow_directories(Path(config.output_dir))
+
+    adaptive_summary: dict[str, Any] | None = None
+    if config.adaptive_threshold:
+        staging_dir = directories["results"] / RESULTS_STAGING_DIR
+        adaptive_summary = run_self_adaptive_threshold_on_folder(
+            config.input_dir,
+            staging_dir,
+            pattern=config.adaptive_image_pattern,
+            min_object_size=config.adaptive_min_object_size,
+            logs_dir=directories["logs"],
+        )
+        for mask_path in (staging_dir / "masks").glob("*.tif"):
+            shutil.copy2(mask_path, directories["masks"] / mask_path.name)
+        for label_path in (staging_dir / "labels").glob("*.tif"):
+            shutil.copy2(label_path, directories["labels"] / label_path.name)
 
     run_result = run_cellprofiler_pipeline_logged(
         cppipe_path=config.cppipe_path,
@@ -476,10 +524,16 @@ def run_cellprofiler_workflow_from_config(
         directories["raw"],
         directories["measurements"],
     )
-    tables = load_cellprofiler_measurements(directories["measurements"])
-    measurements = (
-        merge_cellprofiler_tables(tables) if config.merge_measurements else None
-    )
+    load_result = load_cellprofiler_measurements(directories["measurements"])
+    tables = load_result.tables
+    import_warnings = list(load_result.warnings)
+    measurements = None
+    if config.merge_measurements:
+        measurements, merge_warnings = merge_cellprofiler_tables(
+            tables,
+            metadata=load_result.metadata,
+        )
+        import_warnings.extend(merge_warnings)
     if measurements is not None:
         export_measurements_csv(
             directories["measurements"] / "merged_measurements.csv",
@@ -491,23 +545,30 @@ def run_cellprofiler_workflow_from_config(
     mask_exports: list[Path] = []
     label_exports: list[Path] = []
     if config.export_fiji_tiffs:
-        organized = organize_cellprofiler_tiffs_for_fiji(
-            directories["raw"],
-            directories["masks"],
-            directories["labels"],
-            pattern=config.fiji_image_pattern,
-        )
-        mask_exports = organized.masks
-        label_exports = organized.labels
+        if config.adaptive_threshold:
+            mask_exports = sorted(directories["masks"].glob("*.tif"))
+            label_exports = sorted(directories["labels"].glob("*.tif"))
+        else:
+            organized = organize_cellprofiler_tiffs_for_fiji(
+                directories["raw"],
+                directories["masks"],
+                directories["labels"],
+                pattern=config.fiji_image_pattern,
+            )
+            mask_exports = organized.masks
+            label_exports = organized.labels
 
     qc_artifacts: dict[str, dict[str, Path]] = {}
-    if config.generate_qc and processed_images:
+    qc_image_names = processed_images
+    if config.adaptive_threshold and adaptive_summary is not None:
+        qc_image_names = adaptive_summary.get("processed", processed_images)
+    if config.generate_qc and qc_image_names:
         qc_artifacts = generate_qc_for_cellprofiler_results(
             config.input_dir,
             directories["masks"],
             directories["labels"],
             directories["qc"],
-            processed_images,
+            qc_image_names,
         )
 
     result = CellProfilerWorkflowResult(
@@ -527,6 +588,8 @@ def run_cellprofiler_workflow_from_config(
         qc_artifacts=qc_artifacts,
         log_files=run_result.log_files,
         cellprofiler_run=run_result,
+        adaptive_threshold_summary=adaptive_summary,
+        import_warnings=import_warnings or None,
     )
     summary_path = _write_workflow_summary(directories["logs"], result)
     result.log_files["workflow_summary"] = summary_path

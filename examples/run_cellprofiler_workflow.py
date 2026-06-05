@@ -51,6 +51,14 @@ def main() -> int:
         help="Skip QC overlay generation.",
     )
     parser.add_argument(
+        "--adaptive-threshold",
+        action="store_true",
+        help=(
+            "Experimental Phase 17: self-adaptive Python thresholding into "
+            "staging/ before CellProfiler (prototype — not production default)."
+        ),
+    )
+    parser.add_argument(
         "--json-summary",
         action="store_true",
         help="Print the workflow summary as JSON.",
@@ -65,6 +73,7 @@ def main() -> int:
         cellprofiler_executable=args.executable,
         export_fiji_tiffs=not args.no_fiji_export,
         generate_qc=not args.no_qc,
+        adaptive_threshold=args.adaptive_threshold,
     )
 
     if args.json_summary:
@@ -87,6 +96,12 @@ def main() -> int:
         print(f"Masks: {result.masks_dir} ({len(result.mask_exports)} file(s))")
         print(f"Labels: {result.labels_dir} ({len(result.label_exports)} file(s))")
         print(f"QC overlays: {result.qc_dir} ({len(result.qc_artifacts)} image(s))")
+        if result.adaptive_threshold_summary is not None:
+            print(
+                "Adaptive threshold: "
+                f"{len(result.adaptive_threshold_summary.get('processed', []))} "
+                "image(s) staged"
+            )
         print(f"Logs: {result.logs_dir}")
 
     print("Workflow complete.")

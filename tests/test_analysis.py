@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from bioimage_pipeline.cellprofiler_runner import CellProfilerMeasurementsResult
 from bioimage_pipeline.analysis import (
     AnalysisConfig,
     build_default_pipeline,
@@ -184,14 +185,21 @@ def test_run_analysis_cellprofiler_mode(
         ),
     }
     mock_run.return_value = output_dir.resolve()
-    mock_load.return_value = {**image_tables, **object_tables}
-    mock_merge.return_value = pd.DataFrame(
-        {
-            "Image_Number": [1],
-            "ObjectNumber": [1],
-            "AreaShape_Area": [100],
-            "FileName": ["a.tif"],
-        }
+    mock_load.return_value = CellProfilerMeasurementsResult(
+        tables={**image_tables, **object_tables},
+        metadata={},
+        warnings=[],
+    )
+    mock_merge.return_value = (
+        pd.DataFrame(
+            {
+                "Image_Number": [1],
+                "ObjectNumber": [1],
+                "AreaShape_Area": [100],
+                "FileName": ["a.tif"],
+            }
+        ),
+        [],
     )
 
     result = run_analysis(
@@ -237,7 +245,11 @@ def test_run_analysis_cellprofiler_skips_merge_when_disabled(
 
     tables = {"MyExpt_Image": pd.DataFrame({"Image_Number": [1]})}
     mock_run.return_value = output_dir.resolve()
-    mock_load.return_value = tables
+    mock_load.return_value = CellProfilerMeasurementsResult(
+        tables=tables,
+        metadata={},
+        warnings=[],
+    )
 
     result = run_analysis(
         input_dir,

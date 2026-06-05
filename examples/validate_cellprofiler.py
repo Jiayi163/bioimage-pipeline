@@ -50,9 +50,13 @@ def main() -> int:
     )
     print(f"Output directory: {output_dir}")
 
-    tables = load_cellprofiler_measurements(output_dir)
-    print(f"Loaded {len(tables)} CSV file(s):")
-    for name, dataframe in tables.items():
+    load_result = load_cellprofiler_measurements(output_dir)
+    if load_result.warnings:
+        print("Import warnings:")
+        for warning in load_result.warnings:
+            print(f"  - {warning}")
+    print(f"Loaded {len(load_result.tables)} CSV file(s):")
+    for name, dataframe in load_result.tables.items():
         print(f"  - {name}: {len(dataframe)} rows, {len(dataframe.columns)} columns")
 
     print("Validation succeeded.")

@@ -1,4 +1,9 @@
-"""Fiji/ImageJ-compatible TIFF export helpers."""
+"""Fiji/ImageJ-compatible TIFF export helpers (Phase 12 fallback).
+
+Production final TIFF export is planned for Phase 14 via headless Fiji/ImageJ
+(``fiji_runner.py``). These helpers write ImageJ-compatible TIFFs from Python
+using ``tifffile`` when Fiji is unavailable, for tests, or as intermediate files.
+"""
 
 from __future__ import annotations
 

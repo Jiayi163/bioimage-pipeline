@@ -1,4 +1,14 @@
-"""Export helpers for Fiji-friendly TIFF and CSV output."""
+"""Export helpers for TIFF and CSV output.
+
+Python ImageJ-compatible TIFF writing (``fiji_tiff``) is the **fallback /
+intermediate** export path (Phase 12). Production final TIFF export through
+headless Fiji/ImageJ is Phase 14 (``fiji_runner.py``, planned).
+
+Functions such as :func:`organize_cellprofiler_tiffs_for_fiji` reorganize
+CellProfiler outputs via an **in-process** Python loop (acceptable fallback —
+no CellProfiler or Fiji relaunch). Production export should use **one Fiji batch
+run per folder** (Phase 14 ``fiji_runner.py``).
+"""
 
 from __future__ import annotations
 
@@ -140,7 +150,12 @@ def organize_cellprofiler_tiffs_for_fiji(
     pattern: str = "*.tif",
     exclude_dirs: Sequence[str] | None = None,
 ) -> OrganizedFijiExports:
-    """Convert CellProfiler TIFF outputs into organized Fiji-friendly folders."""
+    """Convert CellProfiler TIFF outputs into organized folders (Python fallback).
+
+    Re-exports mask and label TIFFs via :func:`export_tiff_for_fiji`. When Phase 14
+    Fiji headless export is available, the workflow should prefer that path for
+    final outputs and use this function only as fallback.
+    """
     masks_root = Path(masks_dir)
     labels_root = Path(labels_dir)
     masks_root.mkdir(parents=True, exist_ok=True)

@@ -13,6 +13,7 @@ from bioimage_pipeline.analysis import (
     run_cellprofiler_workflow_from_config,
 )
 from bioimage_pipeline.cellprofiler_runner import (
+    CellProfilerMeasurementsResult,
     CellProfilerRunResult,
     RESULTS_LABELS_DIR,
     RESULTS_LOGS_DIR,
@@ -260,8 +261,12 @@ def test_run_cellprofiler_workflow_organizes_results(
 
     mock_run_logged.return_value = _successful_run_result(raw_dir, logs_dir)
     mock_copy.return_value = [results_dir / RESULTS_MEASUREMENTS_DIR / "MyExpt_Image.csv"]
-    mock_load.return_value = tables
-    mock_merge.return_value = merged
+    mock_load.return_value = CellProfilerMeasurementsResult(
+        tables=tables,
+        metadata={},
+        warnings=[],
+    )
+    mock_merge.return_value = (merged, [])
     mock_organize.return_value = OrganizedFijiExports(
         masks=[mask_export],
         labels=[label_export],
@@ -337,7 +342,11 @@ def test_run_cellprofiler_workflow_can_skip_fiji_and_qc(
     tables = {"MyExpt_Image": pd.DataFrame({"Image_Number": [1]})}
 
     mock_run_logged.return_value = _successful_run_result(raw_dir, logs_dir)
-    mock_load.return_value = tables
+    mock_load.return_value = CellProfilerMeasurementsResult(
+        tables=tables,
+        metadata={},
+        warnings=[],
+    )
 
     result = run_cellprofiler_workflow(
         input_dir,
@@ -417,11 +426,15 @@ def test_run_cellprofiler_workflow_from_config_uses_structured_dirs(
         ),
         patch(
             "bioimage_pipeline.analysis.load_cellprofiler_measurements",
-            return_value={"MyExpt_Image": pd.DataFrame({"Image_Number": [1]})},
+            return_value=CellProfilerMeasurementsResult(
+                tables={"MyExpt_Image": pd.DataFrame({"Image_Number": [1]})},
+                metadata={},
+                warnings=[],
+            ),
         ),
         patch(
             "bioimage_pipeline.analysis.merge_cellprofiler_tables",
-            return_value=pd.DataFrame({"Image_Number": [1]}),
+            return_value=(pd.DataFrame({"Image_Number": [1]}), []),
         ),
         patch(
             "bioimage_pipeline.analysis.organize_cellprofiler_tiffs_for_fiji",

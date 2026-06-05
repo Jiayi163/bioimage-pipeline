@@ -7,6 +7,7 @@ from bioimage_pipeline.preprocess import (
     gaussian_blur,
     median_filter_image,
     normalize_image,
+    rolling_ball_subtract,
 )
 
 
@@ -92,3 +93,11 @@ def test_normalize_image_handles_constant_images() -> None:
     normalized = normalize_image(image)
 
     np.testing.assert_array_equal(normalized, np.zeros((4, 4), dtype=float))
+
+
+def test_rolling_ball_subtract_reduces_vignette() -> None:
+    image = np.full((128, 128), 200, dtype=np.uint16)
+    image[:30, :] = 80
+    corrected = rolling_ball_subtract(image, radius=12)
+    assert corrected.dtype == np.float32
+    assert float(corrected[10, 64]) > float(corrected[64, 64]) - 50

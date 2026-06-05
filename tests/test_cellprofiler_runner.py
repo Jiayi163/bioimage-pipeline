@@ -8,6 +8,7 @@ import pytest
 
 from bioimage_pipeline.cellprofiler_runner import (
     _build_cellprofiler_command,
+    classify_cellprofiler_table,
     discover_cellprofiler_csv_files,
     load_cellprofiler_measurements,
     merge_cellprofiler_tables,
@@ -213,15 +214,16 @@ def test_validate_cellprofiler_columns_raises_when_missing() -> None:
 
 
 def test_load_cellprofiler_measurements_reads_fixture_csvs() -> None:
-    tables = load_cellprofiler_measurements(FIXTURES_DIR)
+    load_result = load_cellprofiler_measurements(FIXTURES_DIR)
 
-    assert set(tables) == {
+    assert set(load_result.tables) == {
         "MyExpt_Image",
         "MyExpt_Experiment",
         "MyExpt_IdentifyPrimaryObjects",
     }
-    assert tables["MyExpt_Image"].loc[0, "FileName"] == "testimage.tif"
-    assert len(tables["MyExpt_IdentifyPrimaryObjects"]) == 2
+    assert load_result.tables["MyExpt_Image"].loc[0, "FileName"] == "testimage.tif"
+    assert len(load_result.tables["MyExpt_IdentifyPrimaryObjects"]) == 2
+    assert not load_result.warnings
 
 
 def test_load_cellprofiler_measurements_empty_dir_raises(tmp_path) -> None:
@@ -238,19 +240,115 @@ def test_load_cellprofiler_measurements_missing_dir_raises(tmp_path) -> None:
 
 
 def test_merge_cellprofiler_tables_combines_object_and_image_tables() -> None:
-    tables = load_cellprofiler_measurements(FIXTURES_DIR)
-    merged = merge_cellprofiler_tables(tables)
+    load_result = load_cellprofiler_measurements(FIXTURES_DIR)
+    merged, warnings = merge_cellprofiler_tables(
+        load_result.tables,
+        metadata=load_result.metadata,
+    )
 
+    assert merged is not None
     assert len(merged) == 2
     assert "AreaShape_Area" in merged.columns
     assert "FileName" in merged.columns
     assert "Plate_Name" in merged.columns
     assert merged.loc[0, "AreaShape_Area"] == 120
+    assert not warnings
 
 
-def test_merge_cellprofiler_tables_empty_dict_raises() -> None:
+def test_merge_cellprofiler_tables_empty_dict_returns_none_with_warning() -> None:
+    merged, warnings = merge_cellprofiler_tables({})
+    assert merged is None
+    assert warnings == ["No CellProfiler tables to merge"]
+
+
+def test_merge_cellprofiler_tables_empty_dict_raises_in_strict_mode() -> None:
     with pytest.raises(ValueError, match="No CellProfiler tables"):
-        merge_cellprofiler_tables({})
+        merge_cellprofiler_tables({}, strict=True)
+
+
+def test_load_cellprofiler_measurements_legacy_object_table_without_image_number(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "MyExpt_Image.csv").write_text(
+        "Image_Number,FileName\n1,sample.tif\n",
+        encoding="utf-8",
+    )
+    (output_dir / "MyExpt_IdentifyPrimaryObjects.csv").write_text(
+        "ObjectNumber,AreaShape_Area\n1,120\n2,95\n",
+        encoding="utf-8",
+    )
+
+    load_result = load_cellprofiler_measurements(output_dir)
+
+    assert "MyExpt_IdentifyPrimaryObjects" in load_result.tables
+    assert len(load_result.tables["MyExpt_IdentifyPrimaryObjects"]) == 2
+    assert load_result.metadata["MyExpt_IdentifyPrimaryObjects"].legacy is True
+    assert load_result.metadata["MyExpt_IdentifyPrimaryObjects"].mergeable is False
+    assert any("Image_Number" in warning for warning in load_result.warnings)
+
+
+def test_merge_cellprofiler_tables_skips_legacy_object_table_by_default(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "MyExpt_Image.csv").write_text(
+        "Image_Number,FileName\n1,sample.tif\n",
+        encoding="utf-8",
+    )
+    (output_dir / "MyExpt_IdentifyPrimaryObjects.csv").write_text(
+        "ObjectNumber,AreaShape_Area\n1,120\n2,95\n",
+        encoding="utf-8",
+    )
+    load_result = load_cellprofiler_measurements(output_dir)
+
+    merged, merge_warnings = merge_cellprofiler_tables(
+        load_result.tables,
+        metadata=load_result.metadata,
+    )
+
+    assert merged is not None
+    assert list(merged.columns) == ["Image_Number", "FileName"]
+    assert any(
+        "MyExpt_IdentifyPrimaryObjects" in warning
+        for warning in load_result.warnings
+    )
+    assert not merge_warnings
+
+
+def test_merge_cellprofiler_tables_strict_mode_raises_on_missing_image_number(
+    tmp_path: Path,
+) -> None:
+    tables = {
+        "MyExpt_IdentifyPrimaryObjects": pd.DataFrame(
+            {"ObjectNumber": [1, 2], "AreaShape_Area": [120, 95]}
+        )
+    }
+    with pytest.raises(ValueError, match="missing required columns: Image_Number"):
+        merge_cellprofiler_tables(tables, strict=True)
+
+
+def test_load_cellprofiler_measurements_strict_mode_raises_on_legacy_object_table(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "MyExpt_IdentifyPrimaryObjects.csv").write_text(
+        "ObjectNumber,AreaShape_Area\n1,120\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="missing required columns: Image_Number"):
+        load_cellprofiler_measurements(output_dir, strict=True)
+
+
+def test_classify_cellprofiler_table_detects_object_table_from_filename() -> None:
+    dataframe = pd.DataFrame({"ObjectNumber": [1], "AreaShape_Area": [100]})
+    metadata = classify_cellprofiler_table("MyExpt_IdentifyPrimaryObjects", dataframe)
+    assert metadata.table_type == "non_standard"
+    assert metadata.legacy is True
 
 
 @patch("bioimage_pipeline.cellprofiler_runner.shutil.which", return_value="cellprofiler")
@@ -340,6 +438,8 @@ def test_merge_cellprofiler_tables_image_only() -> None:
             {"Image_Number": [1], "Plate_Name": ["Plate1"]}
         ),
     }
-    merged = merge_cellprofiler_tables(tables)
+    merged, warnings = merge_cellprofiler_tables(tables)
 
+    assert merged is not None
     assert list(merged.columns) == ["Image_Number", "FileName", "Plate_Name"]
+    assert not warnings

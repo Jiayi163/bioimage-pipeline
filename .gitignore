@@ -21,6 +21,18 @@ input_images/
 output/
 validation_output/
 reports/
+test_output/
+
+# CellProfiler / workflow run folders (often created beside the repo)
+cellprofiler_raw/
+staging/
+
+# Streamlit local config and cache
+.streamlit/
+
+# OS junk
+Thumbs.db
+.DS_Store
 
 # Stray pytest cache directories
 pytest-cache-files-*/

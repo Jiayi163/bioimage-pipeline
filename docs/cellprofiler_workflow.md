@@ -1,32 +1,52 @@
-# CellProfiler-to-Fiji Workflow (Phase 13)
+# CellProfiler Workflow Integration (Phase 13)
 
-This project is a **lightweight CellProfiler-to-Fiji workflow tool**. CellProfiler
-performs the full analysis through `.cppipe` pipelines. This package manages
-inputs, runs CellProfiler headlessly, collects outputs, standardizes TIFFs for
-Fiji/ImageJ, and organizes everything into a clean results folder.
+Phase 13 orchestrates **CellProfiler as the primary analysis engine** with
+**one headless run per input folder**. It does not reimplement CellProfiler
+modules. Final TIFF export through Fiji/ImageJ headless is **Phase 14** (one Fiji
+run per folder); this phase currently uses Python TIFF export as an in-process
+fallback.
 
-Fiji is the manual QC/viewing target — it is **not** embedded in this project.
-The built-in Python engine remains available as a simple fallback for teaching
-and tests, but it is not the main feature.
+## Performance: batch-first
 
-## What the workflow does
+| Stage | Invocations | Implementation |
+|-------|-------------|----------------|
+| CellProfiler | **1 per folder** | `run_cellprofiler_pipeline_logged()` with `-i input_dir` |
+| Output collection | After CP completes | Scan `cellprofiler_raw/` for all CSVs and TIFFs |
+| Python TIFF fallback | In-process (no CP/Fiji relaunch) | `organize_cellprofiler_tiffs_for_fiji()` |
+| QC overlays | In-process per image | `generate_qc_for_cellprofiler_results()` |
+| Stage timing | Phase 14 | `timing.*_seconds` in `workflow_summary.json` |
+
+**Never** spawn CellProfiler once per image file from the workflow API.
+
+## Full workflow (target architecture)
+
+```text
+Input Images (folder)
+    ↓
+CellProfiler — ONE run (.cppipe, headless)     ← Phase 13 (this doc)
+    ↓  collect all outputs
+Fiji/ImageJ — ONE run (batch macro)            ← Phase 14 (planned)
+    ↓
+Organized results + QC + logs (with timings)
+```
+## What Phase 13 does today
 
 1. Accept a `.cppipe` pipeline file and an input image folder.
-2. Run CellProfiler headlessly (`-c -r -p -i -o`).
+2. Run CellProfiler headlessly **once** over the folder (`-c -r -p -i -o`).
 3. Capture stdout, stderr, command, and exit code under `logs/`.
-4. Locate CellProfiler CSV and TIFF outputs in `cellprofiler_raw/`.
+4. Locate **all** CellProfiler CSV and TIFF outputs in `cellprofiler_raw/`.
 5. Copy measurement CSVs into `measurements/` and optionally merge them.
-6. Convert mask/label TIFFs into Fiji-friendly files under `masks/` and `labels/`.
-7. Generate QC overlay PNGs under `qc/`.
-8. Write `logs/workflow_summary.json` with a full job summary.
-
+6. Convert mask/label TIFFs via **Python in-process fallback** under `masks/` and
+   `labels/` (until Phase 14 batch Fiji export is wired in).
+7. Generate QC overlay PNGs under `qc/` (in-process, no external relaunch).
+8. Write `logs/workflow_summary.json` with a full job summary (timings in Phase 14).
 ## Results folder layout
 
 ```text
 results/
   measurements/        # CSV tables (+ merged_measurements.csv)
-  masks/               # Fiji-compatible mask TIFFs (0/255 uint8)
-  labels/              # Fiji-compatible label TIFFs (uint16/uint32)
+  masks/               # Mask TIFFs (Python fallback today; Fiji final in Phase 14)
+  labels/              # Label TIFFs (Python fallback today; Fiji final in Phase 14)
   qc/                  # Mask/label overlay PNGs for quick inspection
   logs/                # CellProfiler stdout/stderr and workflow summary
   cellprofiler_raw/    # Unmodified CellProfiler output files
@@ -76,7 +96,7 @@ python examples/run_cellprofiler_workflow.py ^
   --executable "C:\Program Files\CellProfiler\CellProfiler.exe"
 ```
 
-Skip Fiji TIFF conversion or QC overlays:
+Skip Python fallback TIFF conversion or QC overlays:
 
 ```bash
 python examples/run_cellprofiler_workflow.py ^
@@ -86,6 +106,10 @@ python examples/run_cellprofiler_workflow.py ^
   --no-fiji-export ^
   --no-qc
 ```
+
+Note: `--no-fiji-export` disables the Python fallback TIFF organization step
+(naming retained for backward compatibility). Phase 14 will add a separate
+Fiji headless export flag.
 
 ## Error reporting
 
@@ -105,14 +129,15 @@ Common causes:
 - Input directory missing or empty
 - CellProfiler module errors (see stderr log)
 
-## Fiji QC
+## QC and manual inspection
 
-Open TIFFs from `masks/` and `labels/` in Fiji/ImageJ. Use `qc/` overlays for
-quick visual checks before opening Fiji. See
-[docs/fiji_qc_workflow.md](fiji_qc_workflow.md) for the manual inspection
-checklist.
+Open TIFFs from `masks/` and `labels/` in Fiji/ImageJ for manual QC. Use `qc/`
+overlays for quick visual checks. See [fiji_qc_workflow.md](fiji_qc_workflow.md).
 
-## Lightweight Python fallback
+When Phase 14 is complete, `masks/` and `labels/` will contain Fiji-exported
+final TIFFs by default.
+
+## Optional Python analysis fallback
 
 For teaching or quick tests without CellProfiler installed:
 
@@ -124,3 +149,9 @@ result = run_analysis("path/to/images", "path/to/output", analysis_engine="pytho
 
 This path does not replace CellProfiler analysis — it is a simple built-in
 pipeline for prototyping and unit tests.
+
+## Related docs
+
+- [gui_direction.md](gui_direction.md) — Phase 15 GUI: expose CP modules, do not reimplement
+- [fiji_headless_export.md](fiji_headless_export.md) — Phase 14 Fiji export plan
+- [fiji_tiff_export.md](fiji_tiff_export.md) — Python fallback TIFF format details

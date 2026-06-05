@@ -7,6 +7,7 @@ from bioimage_pipeline.threshold import (
     adaptive_threshold,
     manual_threshold,
     otsu_threshold,
+    sauvola_threshold,
 )
 
 
@@ -72,3 +73,15 @@ def test_adaptive_threshold_invalid_block_size_raises_value_error() -> None:
 
     with pytest.raises(ValueError, match="at least 1"):
         adaptive_threshold(image, block_size=0)
+
+
+def test_sauvola_threshold_returns_bool_mask_with_same_shape() -> None:
+    image = np.zeros((40, 40), dtype=np.uint8)
+    image[10:30, 10:30] = 200
+    image[5:35, 5:35] += 20
+
+    mask = sauvola_threshold(image, block_size=15)
+
+    assert mask.dtype == bool
+    assert mask.shape == image.shape
+    assert mask.sum() > 0

@@ -1,61 +1,92 @@
 # bioimage-pipeline
 
-A lightweight **CellProfiler-to-Fiji workflow tool**. CellProfiler performs the
-full analysis through `.cppipe` pipelines. This project manages inputs, runs
-CellProfiler headlessly, collects outputs, standardizes TIFFs for Fiji/ImageJ,
-and organizes results into a clean folder layout. It does not import or copy
-code from CellProfiler or Fiji.
+A **workflow orchestration layer** that **exposes CellProfiler functionality**
+through pipeline management and a future GUI — without reimplementing
+CellProfiler algorithms. CellProfiler is the primary analysis engine. Fiji/ImageJ
+handles export/QC when required. This project manages configuration, subprocess
+runs, output organization, logs, and QC artifacts.
+
+It does not import or copy code from CellProfiler or Fiji/ImageJ.
 
 | Layer | Role |
 |-------|------|
-| **CellProfiler** | Full analysis engine — all functionality via headless `.cppipe` runs |
-| **This project** | Orchestration, output collection, Fiji-compatible TIFF export, QC overlays |
-| **Fiji/ImageJ** | Manual QC/viewing target (no embedded Fiji runtime) |
-| **Python engine** | Lightweight/simple fallback for teaching, tests, and quick prototypes |
+| **CellProfiler** | Primary analysis engine — segmentation, measurement, feature extraction via `.cppipe` |
+| **Fiji/ImageJ** | Export/QC engine — headless final TIFF export when required (Phase 14) |
+| **This project** | Orchestration + future GUI front-end — pipeline management, config, logs, QC, results |
+| **Python TIFF export** | Fallback / intermediate — ImageJ-compatible writes when Fiji is unavailable |
+| **Python analysis engine** | Optional lightweight fallback for teaching, tests, and prototypes |
 
-**This project is not a replacement for CellProfiler.** It wires CellProfiler
-outputs into a repeatable workflow ending in Fiji-inspectable TIFFs and CSV
-measurements.
+**This project is not a replacement for CellProfiler or Fiji.** It exposes their
+capabilities through workflow control and a GUI that manages `.cppipe` pipelines:
+
+```text
+GUI → .cppipe config → CellProfiler (once/folder) → Fiji (optional, once/folder) → results
+```
+
+## Performance: batch-first execution
+
+External tools (CellProfiler, Fiji) are expensive to start. The workflow is
+designed for **batch invocation**, not one launch per image:
+
+1. **One CellProfiler run** per input folder (`-i input_dir -o output_dir`).
+2. **Collect all outputs** from `cellprofiler_raw/` before export.
+3. **One Fiji headless run** per folder with a batch macro (Phase 14).
+4. **Per-image export** only when batch macros cannot handle the case.
+5. **Python TIFF fallback** stays in-process (no JVM startup) for tests and when
+   Fiji is unavailable.
+6. **Stage timings** logged in `workflow_summary.json` (Phase 14): CellProfiler,
+   Fiji export, and QC generation runtime.
 
 ## Architecture
 
 | Layer | Role | Modules |
 |-------|------|---------|
-| CellProfiler-to-Fiji workflow | Primary end-to-end path | `analysis.py`, `cellprofiler_runner.py`, `export.py` |
-| TIFF I/O and Fiji-friendly export | ImageJ-compatible masks, labels, intensity | `io.py`, `export.py`, `fiji_tiff.py` |
-| QC visualization | Mask/label overlays and Fiji inspection workflow | `qc.py` |
-| Lightweight Python pipeline | Simple fallback for teaching / prototyping | `preprocess.py`, `threshold.py`, `segment.py`, `measure.py`, `pipeline.py`, `batch.py` |
+| Workflow orchestration | End-to-end CP → Fiji path | `analysis.py`, `cellprofiler_runner.py`, `qc.py` |
+| CellProfiler integration | Headless `.cppipe` runs, CSV import | `cellprofiler_runner.py` |
+| Fiji headless export (Phase 14) | Export/QC — final TIFF production | `fiji_runner.py` (planned) |
+| Python TIFF fallback | Intermediate / no-Fiji export | `fiji_tiff.py`, `export.py`, `io.py` |
+| QC visualization | Overlays and inspection helpers | `qc.py` |
+| GUI (Phase 15) | CP/Fiji front-end — test UI (15.0), shell (15.1), builder (15.2) | `workflow_test_ui.py`, `gui/`, `cppipe_io.py` (planned) |
+| Python analysis fallback | Teaching / prototyping only | `preprocess.py`, `threshold.py`, `segment.py`, `measure.py`, `pipeline.py`, `batch.py` |
 
 ```text
 input images + .cppipe
     ↓
-CellProfiler (headless, full analysis engine)
+CellProfiler (one headless run per folder — primary analysis)
+    ↓  measurements/, cellprofiler_raw/  (all images collected)
+Fiji/ImageJ (one headless run per folder — final TIFF export)   ← Phase 14
+    ↓  masks/, labels/ (final TIFFs)
+QC overlays + logs + organized results
     ↓
-organized results: measurements/, masks/, labels/, qc/, logs/
-    ↓
-open TIFFs in Fiji/ImageJ for manual QC
+optional manual inspection in Fiji GUI
 ```
 
-**Implemented:** TIFF read/write, lightweight pipeline, CellProfiler CLI runner,
-and example scripts.
+**Implemented today:** TIFF I/O, Python TIFF fallback, CellProfiler CLI runner,
+CellProfiler workflow orchestration (Phase 13), QC overlays, and example scripts.
 
-**Roadmap:** Phases 0–10 are complete. Next work is split into smaller steps
-before advanced algorithms:
+**Next priority:** Phase 14 — Fiji/ImageJ headless export integration.
 
-| Phase | Focus |
-|-------|--------|
-| 10.1–10.2 | CellProfiler validation and CSV import |
-| 10.3 | Unified mode (`analysis_engine`: `python` or `cellprofiler`) — complete |
-| 10.4 | Real-data validation — complete |
-| 10.5 | QC visualization — complete |
-| 11 | Advanced segmentation (watershed, touching objects) — complete |
-| 12 | Fiji/ImageJ-compatible TIFF export — complete |
-| 13 | CellProfiler-to-Fiji workflow integration — complete |
-| 14 | GUI (Streamlit / PyQt) |
-| 15 | Advanced CellProfiler support (templates, presets, batch jobs) |
-| 16 | Optional Python enhancements (adaptive thresholding, etc.) |
+| Phase | Focus | Status |
+|-------|--------|--------|
+| 0–11 | Core Python pipeline, CP validation, segmentation | Complete |
+| 12 | Python TIFF export (fallback / intermediate) | Complete |
+| 13 | CellProfiler workflow integration | Complete |
+| 14 | Fiji/ImageJ headless export integration | **Next** |
+| 15.0 | Temporary Streamlit workflow test UI | Complete |
+| 15.1 | GUI workflow shell (run, logs, preview) | Not started |
+| 15.2 | GUI pipeline builder & CP module exposure | Not started |
+| 16 | Optional Python analysis enhancements | Not started |
+| 17 | Self-adaptive threshold at import (hybrid CP) — core differentiator | Deferred — prototype only |
 
-Phases **0–13** are complete. **Phase 14** (GUI) is next.
+### GUI direction (Phase 15)
+
+Phase **15.0** ships first: a temporary Streamlit UI to click-run workflows and
+see logs, overlays, and measurements — not the final GUI. **15.1** is the proper
+workflow shell; **15.2** adds pipeline building and CellProfiler module exposure.
+The GUI **exposes CellProfiler functionality** without reimplementing algorithms
+like `IdentifyPrimaryObjects` or `MeasureObjectSizeShape`. See
+[docs/gui_direction.md](docs/gui_direction.md).
+
 See [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) for full phase details and status.
 
 ## Project Layout
@@ -68,14 +99,17 @@ bioimage_pipeline/
     threshold.py
     segment.py
     measure.py
-    export.py
+    export.py              # Python TIFF fallback + CP output organization
     pipeline.py
     batch.py
-    cellprofiler_runner.py
-    analysis.py
+    cellprofiler_runner.py # CellProfiler headless runner
+    analysis.py            # Workflow orchestration
     validation.py
     qc.py
-    fiji_tiff.py
+    fiji_tiff.py           # Python ImageJ-compatible TIFF writer
+    fiji_runner.py         # (Phase 14) Fiji headless export — planned
+    cppipe_io.py           # (Phase 15.2) Load/save .cppipe — planned
+    pipeline_catalog.py    # (Phase 15.2) CP module metadata — planned
 examples/
     run_basic_pipeline.py
     run_analysis.py
@@ -83,13 +117,17 @@ examples/
     validate_cellprofiler.py
     run_cellprofiler_workflow.py
     validate_real_data.py
+app/
+    workflow_test_ui.py    # Phase 15.0 Streamlit test UI
     touching_objects_demo.py
 docs/
     cellprofiler_validation.md
     cellprofiler_workflow.md
-    real_data_validation.md
-    fiji_qc_workflow.md
+    fiji_headless_export.md
     fiji_tiff_export.md
+    fiji_qc_workflow.md
+    gui_direction.md
+    real_data_validation.md
 tests/
 ```
 
@@ -99,6 +137,13 @@ Install the package in editable mode:
 
 ```bash
 pip install -e ".[dev]"
+```
+
+Run the Phase 15.0 workflow test UI (local browser app — requires CellProfiler):
+
+```bash
+pip install -e ".[ui]"
+streamlit run app/workflow_test_ui.py
 ```
 
 Run tests:
@@ -113,7 +158,7 @@ Run the basic example:
 python examples/run_basic_pipeline.py
 ```
 
-Run the visual validation script (outputs and QC overlays for Fiji inspection):
+Run the visual validation script (outputs and QC overlays):
 
 ```bash
 python examples/visual_check.py
@@ -164,8 +209,11 @@ output_dir = run_cellprofiler_pipeline(
     cellprofiler_executable=r"C:\Program Files\CellProfiler\CellProfiler.exe",
 )
 
-tables = load_cellprofiler_measurements(output_dir)
-merged = merge_cellprofiler_tables(tables)
+load_result = load_cellprofiler_measurements(output_dir)
+merged, warnings = merge_cellprofiler_tables(
+    load_result.tables,
+    metadata=load_result.metadata,
+)
 ```
 
 Headless command equivalent:
@@ -174,8 +222,8 @@ Headless command equivalent:
 cellprofiler -c -r -p pipeline.cppipe -i path/to/images -o path/to/cellprofiler_output
 ```
 
-The built-in lightweight pipeline (`Pipeline`, `batch.py`) remains available for
-small workflows that do not require CellProfiler.
+The built-in lightweight pipeline (`Pipeline`, `batch.py`) remains available as
+an optional fallback for workflows that do not require CellProfiler.
 
 ### Unified analysis mode (Phase 10.3)
 
@@ -184,11 +232,11 @@ Use one function to switch between engines:
 ```python
 from bioimage_pipeline.analysis import run_analysis
 
-# Python engine (default built-in pipeline)
+# Python engine (optional fallback)
 result = run_analysis("path/to/images", "path/to/output", analysis_engine="python")
 print(result["processed"])
 
-# CellProfiler engine
+# CellProfiler engine (primary)
 result = run_analysis(
     "path/to/images",
     "path/to/cellprofiler_output",
@@ -206,9 +254,11 @@ python examples/run_analysis.py --input-dir path/to/images --output-dir path/to/
 python examples/run_analysis.py --engine cellprofiler --cppipe path/to/pipeline.cppipe --input-dir path/to/images --output-dir path/to/output
 ```
 
-### CellProfiler-to-Fiji workflow (Phase 13)
+### CellProfiler workflow (Phase 13)
 
-Primary workflow: `.cppipe` → headless run → organized results for Fiji QC:
+Orchestrates **one CellProfiler headless run per input folder** and organizes
+results. Today, mask/label TIFFs are written via the **Python in-process fallback**
+exporter; Phase 14 will add **one Fiji batch run per folder** for final TIFFs.
 
 ```python
 from bioimage_pipeline.analysis import run_cellprofiler_workflow
@@ -231,6 +281,16 @@ python examples/run_cellprofiler_workflow.py --cppipe path/to/pipeline.cppipe --
 Results layout: `measurements/`, `masks/`, `labels/`, `qc/`, `logs/`,
 `cellprofiler_raw/`. See [docs/cellprofiler_workflow.md](docs/cellprofiler_workflow.md).
 
+### Fiji headless export (Phase 14 — planned)
+
+Install [Fiji](https://fiji.sc/) separately. Phase 14 will run Fiji **once per
+folder** with batch macros to produce final TIFF outputs from CellProfiler
+results. Python TIFF export remains a fast in-process fallback when Fiji is
+unavailable. Per-image Fiji launches are fallback-only, not the default path.
+
+See [docs/fiji_headless_export.md](docs/fiji_headless_export.md) for the
+integration plan, export-path comparison, and planned API.
+
 ### Real data validation (Phase 10.4)
 
 Validate microscopy TIFFs and compare Python outputs against reference masks or
@@ -243,7 +303,7 @@ python examples/validate_real_data.py --input-dir path/to/real_images --output-d
 See [docs/real_data_validation.md](docs/real_data_validation.md) for fixture
 details, limitations, and failure cases.
 
-### Advanced segmentation (Phase 11)
+### Advanced segmentation (Phase 11 — optional Python engine)
 
 Split touching objects with watershed labeling:
 
@@ -259,25 +319,10 @@ Compare connected vs watershed on a synthetic touching-objects demo:
 python examples/touching_objects_demo.py
 ```
 
-### Roadmap summary
+### Python TIFF fallback (Phase 12)
 
-| Phase | Goal | Status |
-|-------|------|--------|
-| 10.1 | CellProfiler integration validation | Complete |
-| 10.2 | CellProfiler output import | Complete |
-| 10.3 | Unified analysis mode | Complete |
-| 10.4 | Real data validation | Complete |
-| 10.5 | Visualization and QC | Complete |
-| 11 | Advanced segmentation | Complete |
-| 12 | Fiji/ImageJ-compatible TIFF export | Complete |
-| 13 | CellProfiler-to-Fiji workflow integration | Complete |
-| 14 | GUI (Streamlit / PyQt) | Not complete |
-| 15 | Advanced CellProfiler support | Not complete |
-| 16 | Optional Python enhancements | Not complete |
-
-### Fiji/ImageJ-compatible TIFF export (Phase 12)
-
-Masks, labels, and intensity images are exported with ImageJ-compatible tags:
+When Fiji is not used, masks, labels, and intensity images can be exported with
+ImageJ-compatible tags via Python:
 
 ```python
 from bioimage_pipeline.export import export_label_tiff, export_mask_tiff
@@ -292,8 +337,8 @@ metadata = TiffExportMetadata(
 export_mask_tiff("output/mask.tif", mask, metadata=metadata)
 ```
 
-See [docs/fiji_tiff_export.md](docs/fiji_tiff_export.md) for ordinary TIFF vs
-ImageJ TIFF vs future OME-TIFF.
+See [docs/fiji_tiff_export.md](docs/fiji_tiff_export.md) for format details and
+the fallback vs Fiji headless export comparison.
 
 See [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) for phased development status,
 acceptance criteria, and checklists.

@@ -2,6 +2,7 @@
 
 import numpy as np
 from scipy import ndimage
+from skimage import morphology
 
 
 def gaussian_blur(image: np.ndarray, sigma: float = 1) -> np.ndarray:
@@ -60,3 +61,30 @@ def normalize_image(image: np.ndarray) -> np.ndarray:
         return np.zeros_like(image_float)
 
     return (image_float - min_value) / (max_value - min_value)
+
+
+def rolling_ball_subtract(
+    image: np.ndarray,
+    *,
+    radius: int | None = None,
+) -> np.ndarray:
+    """Subtract uneven background using a morphological rolling-ball estimate.
+
+    Args:
+        image: 2D input image.
+        radius: Structuring element radius in pixels. When ``None``, estimated
+            from image size (~1/8 of the shorter side, minimum 8).
+
+    Returns:
+        Background-corrected image in ``float32`` with non-negative values.
+    """
+    array = np.asarray(image)
+    if array.ndim != 2:
+        raise ValueError("rolling_ball_subtract only supports 2D images")
+
+    if radius is None:
+        radius = max(8, min(array.shape) // 8)
+
+    background = morphology.opening(array, morphology.disk(radius))
+    corrected = array.astype(np.float32) - background.astype(np.float32)
+    return np.clip(corrected, 0, None).astype(np.float32)

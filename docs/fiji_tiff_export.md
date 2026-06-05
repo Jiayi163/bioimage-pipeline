@@ -1,18 +1,35 @@
-# Fiji / ImageJ TIFF Export
+# Fiji / ImageJ TIFF Export (Phase 12 — Fallback / Intermediate)
 
-This project does **not** embed Fiji or ImageJ. Instead, it writes TIFF files
-that open correctly in Fiji/ImageJ for visual QC and downstream workflows.
+Phase 12 provides **Python-based** ImageJ-compatible TIFF writing. This is a
+**fallback and intermediate** export path — not the production final-export path.
+
+For production workflows, **Phase 14** adds headless Fiji/ImageJ export to
+produce final TIFFs. See [fiji_headless_export.md](fiji_headless_export.md).
 
 ## Project roles
 
 | Layer | Role |
 |-------|------|
-| **CellProfiler** | Full analysis engine — run any `.cppipe` pipeline headlessly |
-| **Python engine** | Lightweight/simple workflow for teaching and quick tests |
-| **Fiji/ImageJ** | Final inspection target — open exported TIFFs manually |
+| **CellProfiler** | Primary analysis engine — run any `.cppipe` pipeline headlessly |
+| **Fiji/ImageJ** | Primary export engine (Phase 14) — headless final TIFF production |
+| **Python TIFF export** | Fallback — ImageJ-compatible writes via `tifffile` when Fiji is unavailable |
+| **Python analysis engine** | Optional lightweight workflow for teaching and quick tests |
 
 CellProfiler functionality is supported by **running CellProfiler**, not by
 reimplementing its modules in Python.
+
+## When to use Python TIFF export
+
+| Scenario | Export path |
+|----------|-------------|
+| Fiji installed, production workflow | **One Fiji run** + batch folder macro (Phase 14) |
+| Fiji not installed | Python in-process fallback (`export.py`, `fiji_tiff.py`) |
+| Unit tests and CI | Python in-process fallback (fast, no JVM) |
+| Python-only prototyping | Python in-process fallback |
+
+Python fallback loops per file **in-process** — this is acceptable because it
+does not relaunch CellProfiler or Fiji. Per-image **Fiji subprocess** launches
+are anti-pattern unless batch macros cannot handle the case.
 
 ## Export formats
 
@@ -24,7 +41,7 @@ reimplementing its modules in Python.
 - Good for internal round-trips and simple storage
 - No ImageJ-specific metadata tags
 
-### ImageJ-compatible TIFF (default for export helpers)
+### ImageJ-compatible TIFF (Python fallback)
 
 `export_mask_tiff`, `export_label_tiff`, `export_intensity_tiff`, and
 `save_fiji_compatible_tiff`
@@ -35,13 +52,12 @@ reimplementing its modules in Python.
   - unit (default `um`)
   - channel name
   - image description
-- Recommended for masks, labels, and intensity images you plan to open in Fiji
+- Used for masks, labels, and intensity when Fiji headless export is not run
 
 ### OME-TIFF (future)
 
-OME-TIFF with full microscopy metadata is **not implemented yet**. Use
-ImageJ-compatible TIFF today. OME-TIFF is listed as a later enhancement when
-multi-channel calibration and richer metadata are required.
+OME-TIFF with full microscopy metadata is **not implemented yet**. Use Fiji
+headless export (Phase 14) or ImageJ-compatible Python TIFF today.
 
 ## Dtype conventions
 
@@ -78,19 +94,22 @@ info = read_fiji_tiff_metadata("output/labels.tif")
 print(info.get("pixel_size"), info.get("channel_name"))
 ```
 
-## When actual Fiji/ImageJ integration would be needed
-
-Call Fiji/ImageJ directly only if you need features TIFF export cannot provide:
-
-- Live macro execution inside ImageJ
-- Proprietary import formats (some via Bio-Formats)
-- Interactive plugin workflows
-
-For this project, the default path is:
+## Workflow placement
 
 ```text
-CellProfiler .cppipe  →  CSV + mask/label TIFFs  →  open in Fiji manually
-Python pipeline      →  Fiji-compatible TIFF export  →  open in Fiji manually
+CellProfiler .cppipe — ONE run per folder
+    ↓
+CSV + raw TIFFs (cellprofiler_raw/) — all outputs collected
+    ↓
+[Fiji headless — ONE run + batch macro — Phase 14, production path]
+    ↓
+final masks/, labels/
+
+    — or when Fiji unavailable —
+
+[Python in-process fallback — Phase 12]
+    ↓
+organize_cellprofiler_tiffs_for_fiji() → masks/, labels/
 ```
 
 ## Tests
