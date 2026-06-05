@@ -1,8 +1,22 @@
 # Development Plan
 
-This project is a lightweight Python bioimage analysis package inspired by
-Fiji/ImageJ and CellProfiler. It does not import or copy code from either
-project.
+This project is a lightweight **CellProfiler-to-Fiji workflow tool**. It does not
+import or copy code from CellProfiler or Fiji/ImageJ.
+
+## Project goal (clarified)
+
+| Layer | Role |
+|-------|------|
+| **CellProfiler** | Full analysis engine — all functionality via headless `.cppipe` runs |
+| **This project** | Manage inputs, run CP headlessly, collect outputs, organize results |
+| **Fiji/ImageJ** | Manual QC/viewing target — open exported TIFFs (no embedded Fiji runtime) |
+| **Python engine** | Lightweight/simple fallback for teaching, tests, and quick prototypes |
+
+Core goal: CellProfiler performs analysis; this project delivers Fiji-inspectable
+outputs (masks, labels, measurements, QC overlays) in a clean results folder.
+
+We are **not** reimplementing CellProfiler modules. We **are** standardizing
+CellProfiler outputs into Fiji-friendly TIFFs and organized workflow artifacts.
 
 Work should proceed phase by phase. Do not implement later phases until the
 current phase has tests and passes its self-check.
@@ -39,12 +53,16 @@ For every phase:
 | 10 | Visual check without GUI | `PHASE COMPLETE` |
 | 10.1 | CellProfiler integration validation | `PHASE COMPLETE` |
 | 10.2 | CellProfiler output import | `PHASE COMPLETE` |
-| 10.3 | Unified analysis mode | `PHASE NOT COMPLETE` |
-| 10.4 | Real data validation | `PHASE NOT COMPLETE` |
-| 10.5 | Visualization and QC | `PHASE NOT COMPLETE` |
-| 11 | Advanced segmentation | `PHASE NOT COMPLETE` |
-| 12 | Adaptive thresholding improvements | `PHASE NOT COMPLETE` |
-| 13 | GUI | `PHASE NOT COMPLETE` |
+| 10.3 | Unified analysis mode | `PHASE COMPLETE` |
+| 10.4 | Real data validation | `PHASE COMPLETE` |
+| 10.5 | Visualization and QC | `PHASE COMPLETE` |
+| 11 | Advanced segmentation | `PHASE COMPLETE` |
+| 11.1 | Mask cleanup (morphology) | `PHASE COMPLETE` |
+| 12 | Fiji/ImageJ-compatible TIFF export | `PHASE COMPLETE` |
+| 13 | CellProfiler-to-Fiji workflow integration | `PHASE COMPLETE` ✔ |
+| 14 | GUI (Streamlit / PyQt) | `PHASE NOT COMPLETE` |
+| 15 | Advanced CellProfiler support | `PHASE NOT COMPLETE` |
+| 16 | Optional Python enhancements | `PHASE NOT COMPLETE` |
 
 ## Phase 0: Project Setup
 
@@ -183,7 +201,7 @@ Acceptance tests:
 
 Fiji visual check: deferred until Phase 6 export.
 
-Deferred: 3D volumes, watershed splitting (see Phase 11), GUI (see Phase 13).
+Deferred: 3D volumes, watershed splitting (see Phase 11), GUI (see Phase 14).
 
 Status: `PHASE COMPLETE` ✔
 
@@ -397,12 +415,24 @@ threshold → segment → measure → export) and a thin **CellProfiler engine m
 Existing modules:
 
 - **Python mode:** `pipeline.py`, `batch.py`, `preprocess.py`, `threshold.py`,
-  `segment.py`, `measure.py`, `export.py`
-- **CellProfiler mode:** `cellprofiler_runner.py`
+  `segment.py`, `measure.py`, `export.py`, `fiji_tiff.py`
+- **CellProfiler mode:** `cellprofiler_runner.py` (full CP via `.cppipe`)
+- **Fiji/ImageJ target:** `fiji_tiff.py`, `export.py`, `docs/fiji_tiff_export.md`
 
-**Ordering rule:** Complete **Phase 10.1 → 10.5** in order before starting
-**Phase 11**. Do not skip to advanced thresholding (**Phase 12**) until
-CellProfiler integration, unified mode, real-data validation, and QC are in place.
+**Ordering rule:** Complete **Phase 10.1 → 10.5** before **Phase 11**.
+Complete **Phase 12 (Fiji TIFF export)** before **Phase 13 (CellProfiler
+workflow integration)**. Complete **Phase 13** before **Phase 14 (GUI)**.
+Phases **15–16** extend the product after the core CP → Fiji export path works.
+
+**Forward roadmap (Phases 12–16):**
+
+| Phase | Focus | Status |
+|-------|-------|--------|
+| 12 | Fiji/ImageJ TIFF export | `PHASE COMPLETE` ✔ |
+| 13 | CellProfiler-to-Fiji workflow integration | `PHASE COMPLETE` ✔ |
+| 14 | GUI (Streamlit / PyQt) | `PHASE NOT COMPLETE` |
+| 15 | Advanced CellProfiler support | `PHASE NOT COMPLETE` |
+| 16 | Optional Python enhancements | `PHASE NOT COMPLETE` |
 
 ## Phase 10.1: CellProfiler Integration Validation
 
@@ -525,7 +555,15 @@ Acceptance:
 - User can switch engines with one parameter.
 - Python-only and CellProfiler-only paths still work independently.
 
-Status: `PHASE NOT COMPLETE`
+Status: `PHASE COMPLETE` ✔
+
+Self-check:
+
+```bash
+pytest tests/test_analysis.py
+python examples/run_analysis.py --input-dir path/to/images --output-dir path/to/output
+python examples/run_analysis.py --engine cellprofiler --cppipe path/to/pipeline.cppipe --input-dir path/to/images --output-dir path/to/cellprofiler_output --executable "C:\Program Files\CellProfiler\CellProfiler.exe"
+```
 
 ## Phase 10.4: Real Data Validation
 
@@ -544,7 +582,13 @@ Acceptance:
 - At least one real dataset successfully processed by each engine used in the
   test plan.
 
-Status: `PHASE NOT COMPLETE`
+Status: `PHASE COMPLETE` ✔
+
+Self-check:
+
+```bash
+python examples/validate_real_data.py --input-dir path/to/real_images --output-dir path/to/validation_output
+```
 
 ## Phase 10.5: Visualization and Quality Control
 
@@ -574,7 +618,25 @@ Acceptance:
 
 - User can visually verify segmentation quality without writing custom scripts.
 
-Status: `PHASE NOT COMPLETE`
+Status: `PHASE COMPLETE` ✔
+
+### Phase 10.5 checkpoint (verified)
+
+- [x] `examples/visual_check.py` fixture defines **two** bright circular objects at
+  `(50, 50)` and `(110, 105)`; pipeline detects **2** objects with matching
+  centroids and intensities (`230`, `210`) in `measurements.csv`.
+- [x] Mask and label QC overlays are spatially aligned with `original.tif`
+  (saved PNGs byte-match live overlay generation; label coverage 100% on
+  foreground pixels).
+- [x] Full test suite passes: `python -m pytest -v` (78 tests).
+
+Self-check:
+
+```bash
+python -m pytest -v
+pytest tests/test_qc.py -v
+python examples/visual_check.py
+```
 
 ## Phase 11: Advanced Segmentation
 
@@ -585,78 +647,325 @@ Inspiration:
 - **Fiji:** Watershed, Analyze Particles separation heuristics.
 - **CellProfiler:** IdentifyPrimaryObjects with declumping strategies.
 
-Files (proposed):
+Sub-phases:
 
-- `bioimage_pipeline/segment.py` (extend)
-- `tests/test_segment.py`
-
-Tasks:
-
-- Watershed segmentation on distance transforms.
-- Distance transform from binary masks.
-- Touching object splitting.
-- Improved object cleanup (morphology, hole filling, border clearing).
+| Sub-phase | Focus | Status |
+|-----------|-------|--------|
+| 11.1 | Mask cleanup (morphology) | `PHASE COMPLETE` |
+| 11.2 | Distance transform | `PHASE COMPLETE` |
+| 11.3 | Watershed splitting | `PHASE COMPLETE` |
+| 11.4 | Pipeline integration | `PHASE COMPLETE` |
 
 Deferred from Phase 4: watershed splitting.
 
-Acceptance:
+Acceptance (Phase 11 overall):
 
 - Touching objects can be separated in synthetic and representative test cases.
 
-Status: `PHASE NOT COMPLETE`
+Status: `PHASE COMPLETE` ✔
 
-## Phase 12: Adaptive Thresholding Improvements
+## Phase 11.1: Mask Cleanup (Morphology)
 
-Goal: improve threshold robustness across varied image types. Do not start until
-Phases 10.1–11 are complete.
+Goal: improve binary masks before advanced splitting.
 
-Inspiration:
+Files:
 
-- **Fiji:** Auto Threshold, rolling-ball background correction.
-- **CellProfiler:** advanced threshold modules.
+- `bioimage_pipeline/segment.py`
+- `tests/test_segment.py`
 
-Files (proposed):
+Functions:
 
-- `bioimage_pipeline/threshold.py` (extend)
-- `bioimage_pipeline/preprocess.py` (background correction)
-- `tests/test_threshold.py`
+- `fill_holes(mask)`
+- `clear_border_objects(mask)`
+- `clean_mask(mask, ...)`
 
 Tasks:
 
-- Auto parameter selection (block size, offset, sensitivity).
-- Background correction before thresholding.
-- Rolling-ball subtraction.
-- Multi-scale thresholding.
-
-Deferred examples (from former Phase 11 plan):
-
-- Auto-tuned block size / offset.
-- Rolling-ball or morphological background subtraction before threshold.
-- Multi-scale or learned thresholds.
+- Fill internal holes in foreground objects.
+- Remove objects connected to the image border.
+- Combine hole filling, small-object removal, and border clearing.
 
 Acceptance:
 
-- Improved performance across at least two image types (e.g. high vs low
-  background, uneven illumination).
+- Cleanup fixes hole and border artifacts without removing valid interior objects.
 
-Status: `PHASE NOT COMPLETE`
+Self-check:
 
-## Phase 13: GUI
+```bash
+pytest tests/test_segment.py -v
+```
+
+Status: `PHASE COMPLETE` ✔
+
+## Phase 11.2: Distance Transform
+
+Goal: compute distance maps from binary masks for watershed seeding.
+
+Files:
+
+- `bioimage_pipeline/segment.py`
+- `tests/test_segment.py`
+
+Functions:
+
+- `distance_transform(mask)`
+
+Tasks:
+
+- Euclidean distance transform on foreground pixels.
+- Zero background; peaks near object centers.
+
+Acceptance:
+
+- Output shape matches mask; values are non-negative; disk center is a peak;
+  touching disks produce two peak regions.
+
+Self-check:
+
+```bash
+pytest tests/test_segment.py -k distance -v
+```
+
+Status: `PHASE COMPLETE` ✔
+
+## Phase 11.3: Watershed Splitting
+
+Goal: separate touching objects using distance-transform watershed.
+
+Files:
+
+- `bioimage_pipeline/segment.py`
+- `tests/test_segment.py`
+
+Functions:
+
+- `split_touching_objects(mask, ...)`
+
+Tasks:
+
+- Find distance-transform peaks as seeds.
+- Run watershed inside the binary mask.
+- Return integer label image.
+
+Acceptance:
+
+- Touching disks merge with `label_objects` but split into two labels with
+  `split_touching_objects`; separated disks still label correctly.
+
+Self-check:
+
+```bash
+pytest tests/test_segment.py -k split_touching -v
+```
+
+Status: `PHASE COMPLETE` ✔
+
+## Phase 11.4: Pipeline Integration
+
+Goal: expose watershed labeling through the default Python pipeline.
+
+Files:
+
+- `bioimage_pipeline/analysis.py`
+- `examples/touching_objects_demo.py`
+- `tests/test_analysis.py`
+
+Tasks:
+
+- Add ``labeling_method`` option to ``build_default_pipeline`` and
+  ``run_analysis``.
+- Optional ``clean_mask_before_labeling`` flag.
+- Touching-objects demo with QC overlays for connected vs watershed.
+
+Acceptance:
+
+- Default pipeline behavior unchanged (``labeling_method="connected"``).
+- ``labeling_method="watershed"`` splits touching synthetic objects.
+
+Self-check:
+
+```bash
+pytest tests/test_analysis.py -k "watershed or labeling" -v
+python examples/touching_objects_demo.py
+```
+
+Status: `PHASE COMPLETE` ✔
+
+## Phase 12: Fiji/ImageJ-Compatible TIFF Export
+
+Goal: make final TIFF outputs open correctly in Fiji/ImageJ without calling
+Fiji/ImageJ directly.
+
+Files:
+
+- `bioimage_pipeline/fiji_tiff.py`
+- `bioimage_pipeline/export.py` (extend)
+- `bioimage_pipeline/io.py` (optional ImageJ mode)
+- `tests/test_fiji_tiff.py`
+- `tests/test_export.py`
+- `docs/fiji_tiff_export.md`
+
+Tasks:
+
+- ImageJ-compatible TIFF writer with optional metadata (pixel size, unit,
+  channel name, description).
+- Mask export as `uint8` (`0` / `255`).
+- Label export as `uint16` or `uint32` depending on max label ID.
+- Intensity export preserving safe integer dtypes.
+- Round-trip tests for shape, dtype, mask values, label IDs, and metadata.
+- Document ordinary TIFF vs ImageJ TIFF vs future OME-TIFF.
+
+Acceptance:
+
+- Exported masks, labels, and intensity TIFFs round-trip in tests.
+- Metadata is written and read when provided.
+- Roadmap reflects CellProfiler = engine, Python = lightweight, Fiji = QC target.
+
+Self-check:
+
+```bash
+pytest tests/test_fiji_tiff.py tests/test_export.py -v
+```
+
+Status: `PHASE COMPLETE` ✔
+
+### Phase 12 checkpoint (verified)
+
+- [x] `mask.tif` — `uint8`, shape `(160, 160)`, values `0` / `255`, ImageJ-compatible
+- [x] `labels.tif` — `uint16`, shape `(160, 160)`, label IDs `1` and `2` preserved
+- [x] `original.tif` — `uint16` intensity TIFF (plain TIFF in `visual_check.py`)
+- [x] QC overlays — `visual_check_qc_mask_overlay.png`, `visual_check_qc_label_overlay.png`
+- [x] `python -m pytest -v` — 112 tests passed
+
+Deferred to a later phase:
+
+- OME-TIFF export with full calibration metadata
+- Direct Fiji/ImageJ subprocess or macro integration (only when clearly needed)
+
+## Phase 13: CellProfiler-to-Fiji Workflow Integration
+
+Goal: make this project a lightweight CellProfiler-to-Fiji workflow tool — from
+`.cppipe` selection through headless execution to organized, Fiji-inspectable
+results.
+
+CellProfiler remains the **full analysis engine**. This phase wires existing
+pieces into one repeatable workflow (CLI and Python API), not new CP modules.
+
+Files:
+
+- `bioimage_pipeline/cellprofiler_runner.py` (extend)
+- `bioimage_pipeline/analysis.py` (extend)
+- `bioimage_pipeline/export.py` / `fiji_tiff.py` (CellProfiler output → Fiji TIFF)
+- `bioimage_pipeline/qc.py` (QC overlays from CP outputs)
+- `examples/run_cellprofiler_workflow.py`
+- `tests/test_cellprofiler_workflow.py`
+- `docs/cellprofiler_workflow.md`
+
+Tasks:
+
+1. Improve CellProfiler runner workflow (logged subprocess, output discovery).
+2. Accept a `.cppipe` pipeline file and image folder.
+3. Run CellProfiler headlessly.
+4. Capture logs and errors clearly (`logs/`).
+5. Locate CellProfiler outputs (CSV + TIFF in `cellprofiler_raw/`).
+6. Convert output TIFFs into Fiji/ImageJ-compatible files (`masks/`, `labels/`).
+7. Generate QC overlays from CellProfiler outputs (`qc/`).
+8. Organize all outputs into a clean results folder:
+   `measurements/`, `masks/`, `labels/`, `qc/`, `logs/`.
+9. Add tests using mocked CellProfiler subprocess calls.
+10. Document the CellProfiler-to-Fiji workflow.
+
+Acceptance:
+
+- User can run one command or API call to execute a `.cppipe` and receive
+  organized measurements, Fiji-openable TIFFs, QC overlays, and captured logs.
+- Python lightweight engine still works independently via `analysis_engine="python"`.
+
+Self-check:
+
+```bash
+python -m compileall bioimage_pipeline tests examples
+python -m pytest -v
+pytest tests/test_cellprofiler_workflow.py -v
+python examples/run_cellprofiler_workflow.py --cppipe path/to/pipeline.cppipe --input-dir path/to/images --output-dir path/to/results
+```
+
+Status: `PHASE COMPLETE` ✔
+
+Implementation note: `run_cellprofiler_workflow()` in `analysis.py` orchestrates
+headless CP execution, log capture, CSV collection, Fiji TIFF organization, and
+QC overlay generation. See [docs/cellprofiler_workflow.md](docs/cellprofiler_workflow.md).
+
+## Phase 14: GUI (Streamlit / PyQt)
 
 Goal: create a user-facing interface for non-programmers.
+
+Preferred first target: **Streamlit** demo (fastest path). **PyQt** remains an
+option for a desktop-native app later.
 
 Tasks:
 
 - File and folder selection.
-- Parameter controls (threshold, min object size, engine choice).
+- Engine choice: CellProfiler (`.cppipe`) or Python lightweight pipeline.
+- Parameter controls (threshold, min object size, labeling method).
 - Pipeline execution with progress feedback.
 - Result preview (mask overlay, measurement table).
-- Export controls (TIFF, CSV, output directory).
+- Export controls (Fiji-compatible TIFF, CSV, output directory).
 
 Acceptance:
 
-- Non-programmers can run the workflow without editing Python scripts.
+- Non-programmers can run a CellProfiler or Python workflow without editing
+  Python scripts.
 
 Deferred from Phase 4: GUI.
+
+Status: `PHASE NOT COMPLETE`
+
+## Phase 15: Advanced CellProfiler Support
+
+Goal: make recurring CellProfiler use easier for labs — templates, presets,
+and batch jobs.
+
+Tasks:
+
+- Pipeline templates (documented example `.cppipe` workflows).
+- Parameter presets (named config profiles for common assays).
+- Batch job runner (queue folders, track status, collect outputs).
+- Optional config file (`YAML` / `JSON`) for repeatable runs.
+
+Acceptance:
+
+- User can launch batch CellProfiler jobs from a preset without editing
+  pipeline JSON by hand.
+
+Status: `PHASE NOT COMPLETE`
+
+## Phase 16: Optional Python Enhancements
+
+Goal: improve the **lightweight Python engine** only. CellProfiler already
+covers heavy analysis; these are optional niceties for simple workflows.
+
+Note: **Phase 11 already delivered** watershed splitting, morphology cleanup,
+and distance-transform segmentation. Phase 16 extends or refines those features
+and adds thresholding improvements previously listed as a separate phase.
+
+Tasks:
+
+- Adaptive thresholding (auto block size, rolling-ball background correction).
+- Further watershed / declumping tuning and presets.
+- Additional morphology cleanup options.
+- Compare Python vs CellProfiler results on sample images (optional).
+
+Files (proposed):
+
+- `bioimage_pipeline/threshold.py` (extend)
+- `bioimage_pipeline/preprocess.py` (extend)
+- `bioimage_pipeline/segment.py` (extend)
+- `tests/test_threshold.py`, `tests/test_segment.py`
+
+Acceptance:
+
+- Python engine improvements are opt-in and do not replace CellProfiler as the
+  primary engine for production analysis.
 
 Status: `PHASE NOT COMPLETE`

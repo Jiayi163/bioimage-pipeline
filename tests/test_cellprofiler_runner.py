@@ -8,10 +8,12 @@ import pytest
 
 from bioimage_pipeline.cellprofiler_runner import (
     _build_cellprofiler_command,
+    discover_cellprofiler_csv_files,
     load_cellprofiler_measurements,
     merge_cellprofiler_tables,
     read_cellprofiler_csv,
     run_cellprofiler_pipeline,
+    run_cellprofiler_pipeline_logged,
     validate_cellprofiler_columns,
 )
 
@@ -249,6 +251,84 @@ def test_merge_cellprofiler_tables_combines_object_and_image_tables() -> None:
 def test_merge_cellprofiler_tables_empty_dict_raises() -> None:
     with pytest.raises(ValueError, match="No CellProfiler tables"):
         merge_cellprofiler_tables({})
+
+
+@patch("bioimage_pipeline.cellprofiler_runner.shutil.which", return_value="cellprofiler")
+@patch("bioimage_pipeline.cellprofiler_runner.subprocess.run")
+def test_run_cellprofiler_pipeline_writes_logs_on_failure(
+    mock_run: MagicMock,
+    mock_which: MagicMock,
+    tmp_path: Path,
+) -> None:
+    cppipe = tmp_path / "pipeline.cppipe"
+    cppipe.write_text("pipeline", encoding="utf-8")
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    output_dir = tmp_path / "output"
+    log_dir = tmp_path / "logs"
+
+    mock_run.return_value = MagicMock(
+        returncode=1,
+        stdout="stdout details",
+        stderr="stderr details",
+    )
+
+    with pytest.raises(RuntimeError, match="CellProfiler command failed"):
+        run_cellprofiler_pipeline(
+            cppipe,
+            input_dir,
+            output_dir,
+            log_dir=log_dir,
+        )
+
+    assert (log_dir / "cellprofiler_stdout.log").read_text(encoding="utf-8") == (
+        "stdout details"
+    )
+    assert (log_dir / "cellprofiler_stderr.log").read_text(encoding="utf-8") == (
+        "stderr details"
+    )
+    assert "cellprofiler" in (log_dir / "cellprofiler_command.txt").read_text(
+        encoding="utf-8"
+    )
+
+
+@patch("bioimage_pipeline.cellprofiler_runner.shutil.which", return_value="cellprofiler")
+@patch("bioimage_pipeline.cellprofiler_runner.subprocess.run")
+def test_run_cellprofiler_pipeline_logged_returns_run_result(
+    mock_run: MagicMock,
+    mock_which: MagicMock,
+    tmp_path: Path,
+) -> None:
+    cppipe = tmp_path / "pipeline.cppipe"
+    cppipe.write_text("pipeline", encoding="utf-8")
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    output_dir = tmp_path / "output"
+    log_dir = tmp_path / "logs"
+
+    mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+    result = run_cellprofiler_pipeline_logged(
+        cppipe,
+        input_dir,
+        output_dir,
+        log_dir=log_dir,
+    )
+
+    assert result.succeeded
+    assert result.stdout == "ok"
+    assert result.log_files["stdout"].exists()
+
+
+def test_discover_cellprofiler_csv_files_finds_exports(tmp_path) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "MyExpt_Image.csv").write_text("Image_Number\n1\n", encoding="utf-8")
+
+    discovered = discover_cellprofiler_csv_files(output_dir)
+
+    assert len(discovered) == 1
+    assert discovered[0].name == "MyExpt_Image.csv"
 
 
 def test_merge_cellprofiler_tables_image_only() -> None:

@@ -23,6 +23,9 @@ dependencies = [
 dev = [
     "pytest>=8"
 ]
+qc = [
+    "napari>=0.5"
+]
 
 [tool.setuptools.packages.find]
 include = ["bioimage_pipeline*"]

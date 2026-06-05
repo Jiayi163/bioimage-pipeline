@@ -1,29 +1,39 @@
 # bioimage-pipeline
 
-A lightweight bioimage analysis framework inspired by **Fiji/ImageJ** (TIFF I/O and
-visual inspection) and **CellProfiler** (modular analysis workflow). It does not
-import or copy code from either project.
+A lightweight **CellProfiler-to-Fiji workflow tool**. CellProfiler performs the
+full analysis through `.cppipe` pipelines. This project manages inputs, runs
+CellProfiler headlessly, collects outputs, standardizes TIFFs for Fiji/ImageJ,
+and organizes results into a clean folder layout. It does not import or copy
+code from CellProfiler or Fiji.
 
-**This project is not a replacement for CellProfiler.** For heavy image-analysis
-pipelines, use CellProfiler as an external engine via `.cppipe` files. This package
-provides a thin Python wrapper for batch workflow, TIFF I/O, and reading results.
+| Layer | Role |
+|-------|------|
+| **CellProfiler** | Full analysis engine — all functionality via headless `.cppipe` runs |
+| **This project** | Orchestration, output collection, Fiji-compatible TIFF export, QC overlays |
+| **Fiji/ImageJ** | Manual QC/viewing target (no embedded Fiji runtime) |
+| **Python engine** | Lightweight/simple fallback for teaching, tests, and quick prototypes |
+
+**This project is not a replacement for CellProfiler.** It wires CellProfiler
+outputs into a repeatable workflow ending in Fiji-inspectable TIFFs and CSV
+measurements.
 
 ## Architecture
 
 | Layer | Role | Modules |
 |-------|------|---------|
-| TIFF I/O and Fiji-friendly export | Read/write and inspect in Fiji | `io.py`, `export.py` |
-| Lightweight Python pipeline | Simple teaching / prototyping workflow | `preprocess.py`, `threshold.py`, `segment.py`, `measure.py`, `pipeline.py`, `batch.py` |
-| CellProfiler integration | Run `.cppipe` pipelines headless via CLI | `cellprofiler_runner.py` |
+| CellProfiler-to-Fiji workflow | Primary end-to-end path | `analysis.py`, `cellprofiler_runner.py`, `export.py` |
+| TIFF I/O and Fiji-friendly export | ImageJ-compatible masks, labels, intensity | `io.py`, `export.py`, `fiji_tiff.py` |
+| QC visualization | Mask/label overlays and Fiji inspection workflow | `qc.py` |
+| Lightweight Python pipeline | Simple fallback for teaching / prototyping | `preprocess.py`, `threshold.py`, `segment.py`, `measure.py`, `pipeline.py`, `batch.py` |
 
 ```text
-Python wrapper / batch workflow
+input images + .cppipe
     ↓
-calls CellProfiler .cppipe (subprocess, headless)
+CellProfiler (headless, full analysis engine)
     ↓
-reads CellProfiler CSV / mask outputs
+organized results: measurements/, masks/, labels/, qc/, logs/
     ↓
-exports or visualizes results (TIFF, pandas, Fiji)
+open TIFFs in Fiji/ImageJ for manual QC
 ```
 
 **Implemented:** TIFF read/write, lightweight pipeline, CellProfiler CLI runner,
@@ -35,13 +45,17 @@ before advanced algorithms:
 | Phase | Focus |
 |-------|--------|
 | 10.1–10.2 | CellProfiler validation and CSV import |
-| 10.3 | Unified mode (`analysis_engine`: `python` or `cellprofiler`) |
-| 10.4–10.5 | Real-data validation and QC visualization |
-| 11 | Advanced segmentation (watershed, touching objects) |
-| 12 | Adaptive thresholding improvements |
-| 13 | GUI |
+| 10.3 | Unified mode (`analysis_engine`: `python` or `cellprofiler`) — complete |
+| 10.4 | Real-data validation — complete |
+| 10.5 | QC visualization — complete |
+| 11 | Advanced segmentation (watershed, touching objects) — complete |
+| 12 | Fiji/ImageJ-compatible TIFF export — complete |
+| 13 | CellProfiler-to-Fiji workflow integration — complete |
+| 14 | GUI (Streamlit / PyQt) |
+| 15 | Advanced CellProfiler support (templates, presets, batch jobs) |
+| 16 | Optional Python enhancements (adaptive thresholding, etc.) |
 
-Advanced thresholding is **Phase 12**, not the immediate next step after Phase 10.
+Phases **0–13** are complete. **Phase 14** (GUI) is next.
 See [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) for full phase details and status.
 
 ## Project Layout
@@ -58,12 +72,24 @@ bioimage_pipeline/
     pipeline.py
     batch.py
     cellprofiler_runner.py
+    analysis.py
+    validation.py
+    qc.py
+    fiji_tiff.py
 examples/
     run_basic_pipeline.py
+    run_analysis.py
     visual_check.py
     validate_cellprofiler.py
+    run_cellprofiler_workflow.py
+    validate_real_data.py
+    touching_objects_demo.py
 docs/
     cellprofiler_validation.md
+    cellprofiler_workflow.md
+    real_data_validation.md
+    fiji_qc_workflow.md
+    fiji_tiff_export.md
 tests/
 ```
 
@@ -87,10 +113,18 @@ Run the basic example:
 python examples/run_basic_pipeline.py
 ```
 
-Run the visual validation script (outputs for Fiji inspection):
+Run the visual validation script (outputs and QC overlays for Fiji inspection):
 
 ```bash
 python examples/visual_check.py
+pytest tests/test_qc.py -v
+```
+
+See [docs/fiji_qc_workflow.md](docs/fiji_qc_workflow.md) for the step-by-step
+Fiji inspection checklist. Optional interactive viewing:
+
+```bash
+pip install -e ".[qc]"
 ```
 
 Validate CellProfiler integration (requires a local `.cppipe` file):
@@ -143,18 +177,123 @@ cellprofiler -c -r -p pipeline.cppipe -i path/to/images -o path/to/cellprofiler_
 The built-in lightweight pipeline (`Pipeline`, `batch.py`) remains available for
 small workflows that do not require CellProfiler.
 
+### Unified analysis mode (Phase 10.3)
+
+Use one function to switch between engines:
+
+```python
+from bioimage_pipeline.analysis import run_analysis
+
+# Python engine (default built-in pipeline)
+result = run_analysis("path/to/images", "path/to/output", analysis_engine="python")
+print(result["processed"])
+
+# CellProfiler engine
+result = run_analysis(
+    "path/to/images",
+    "path/to/cellprofiler_output",
+    analysis_engine="cellprofiler",
+    cppipe_path="path/to/pipeline.cppipe",
+    cellprofiler_executable=r"C:\Program Files\CellProfiler\CellProfiler.exe",
+)
+print(result["measurements"])
+```
+
+CLI example:
+
+```bash
+python examples/run_analysis.py --input-dir path/to/images --output-dir path/to/output
+python examples/run_analysis.py --engine cellprofiler --cppipe path/to/pipeline.cppipe --input-dir path/to/images --output-dir path/to/output
+```
+
+### CellProfiler-to-Fiji workflow (Phase 13)
+
+Primary workflow: `.cppipe` → headless run → organized results for Fiji QC:
+
+```python
+from bioimage_pipeline.analysis import run_cellprofiler_workflow
+
+result = run_cellprofiler_workflow(
+    "path/to/images",
+    "path/to/results",
+    "path/to/pipeline.cppipe",
+    cellprofiler_executable=r"C:\Program Files\CellProfiler\CellProfiler.exe",
+)
+print(result.measurements_dir)
+print(result.mask_exports)
+print(result.qc_artifacts)
+```
+
+```bash
+python examples/run_cellprofiler_workflow.py --cppipe path/to/pipeline.cppipe --input-dir path/to/images --output-dir path/to/results
+```
+
+Results layout: `measurements/`, `masks/`, `labels/`, `qc/`, `logs/`,
+`cellprofiler_raw/`. See [docs/cellprofiler_workflow.md](docs/cellprofiler_workflow.md).
+
+### Real data validation (Phase 10.4)
+
+Validate microscopy TIFFs and compare Python outputs against reference masks or
+CellProfiler results:
+
+```bash
+python examples/validate_real_data.py --input-dir path/to/real_images --output-dir path/to/validation_output
+```
+
+See [docs/real_data_validation.md](docs/real_data_validation.md) for fixture
+details, limitations, and failure cases.
+
+### Advanced segmentation (Phase 11)
+
+Split touching objects with watershed labeling:
+
+```python
+from bioimage_pipeline.analysis import run_analysis
+
+run_analysis("path/to/images", "path/to/output", labeling_method="watershed")
+```
+
+Compare connected vs watershed on a synthetic touching-objects demo:
+
+```bash
+python examples/touching_objects_demo.py
+```
+
 ### Roadmap summary
 
 | Phase | Goal | Status |
 |-------|------|--------|
 | 10.1 | CellProfiler integration validation | Complete |
 | 10.2 | CellProfiler output import | Complete |
-| 10.3 | Unified analysis mode | Not complete |
-| 10.4 | Real data validation | Not complete |
-| 10.5 | Visualization and QC | Not complete |
-| 11 | Advanced segmentation | Not complete |
-| 12 | Adaptive thresholding | Not complete |
-| 13 | GUI | Not complete |
+| 10.3 | Unified analysis mode | Complete |
+| 10.4 | Real data validation | Complete |
+| 10.5 | Visualization and QC | Complete |
+| 11 | Advanced segmentation | Complete |
+| 12 | Fiji/ImageJ-compatible TIFF export | Complete |
+| 13 | CellProfiler-to-Fiji workflow integration | Complete |
+| 14 | GUI (Streamlit / PyQt) | Not complete |
+| 15 | Advanced CellProfiler support | Not complete |
+| 16 | Optional Python enhancements | Not complete |
+
+### Fiji/ImageJ-compatible TIFF export (Phase 12)
+
+Masks, labels, and intensity images are exported with ImageJ-compatible tags:
+
+```python
+from bioimage_pipeline.export import export_label_tiff, export_mask_tiff
+from bioimage_pipeline.fiji_tiff import TiffExportMetadata
+
+metadata = TiffExportMetadata(
+    pixel_size_x=0.65,
+    pixel_size_y=0.65,
+    unit="um",
+    channel_name="Nuclei",
+)
+export_mask_tiff("output/mask.tif", mask, metadata=metadata)
+```
+
+See [docs/fiji_tiff_export.md](docs/fiji_tiff_export.md) for ordinary TIFF vs
+ImageJ TIFF vs future OME-TIFF.
 
 See [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) for phased development status,
 acceptance criteria, and checklists.

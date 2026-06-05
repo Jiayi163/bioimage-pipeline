@@ -17,5 +17,10 @@ cellprofiler_output/
 cellprofiler_output*/
 input_images/
 
+# Local example and validation run artifacts
+output/
+validation_output/
+reports/
+
 # Stray pytest cache directories
 pytest-cache-files-*/

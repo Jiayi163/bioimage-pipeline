@@ -6,6 +6,8 @@ from typing import Any
 import numpy as np
 import tifffile
 
+from bioimage_pipeline.fiji_tiff import TiffExportMetadata, save_fiji_compatible_tiff
+
 
 def read_tiff(path: str | Path) -> np.ndarray[Any, Any]:
     """Read a TIFF image from disk.
@@ -33,17 +35,29 @@ def read_tiff(path: str | Path) -> np.ndarray[Any, Any]:
         raise OSError(f"Could not read TIFF file: {image_path}") from exc
 
 
-def save_tiff(path: str | Path, image: np.ndarray[Any, Any]) -> None:
+def save_tiff(
+    path: str | Path,
+    image: np.ndarray[Any, Any],
+    *,
+    metadata: TiffExportMetadata | None = None,
+    imagej_compatible: bool = False,
+) -> Path:
     """Save image data to a TIFF file.
 
     Args:
         path: Destination path for the TIFF image.
         image: Image data to save.
+        metadata: Optional ImageJ/Fiji metadata (requires
+            ``imagej_compatible=True``).
+        imagej_compatible: When ``True``, write ImageJ-compatible TIFF tags.
 
     Raises:
         ValueError: If image is not a NumPy array.
         OSError: If the TIFF file cannot be written.
     """
+    if imagej_compatible:
+        return save_fiji_compatible_tiff(path, image, metadata=metadata)
+
     if not isinstance(image, np.ndarray):
         raise ValueError("image must be a NumPy array")
 
@@ -53,3 +67,4 @@ def save_tiff(path: str | Path, image: np.ndarray[Any, Any]) -> None:
         tifffile.imwrite(image_path, image)
     except Exception as exc:
         raise OSError(f"Could not save TIFF file: {image_path}") from exc
+    return image_path.resolve()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
@@ -11,6 +12,29 @@ import pandas as pd
 
 _OBJECT_MERGE_KEYS = ("Image_Number", "ObjectNumber")
 _IMAGE_MERGE_KEY = "Image_Number"
+
+RESULTS_MEASUREMENTS_DIR = "measurements"
+RESULTS_MASKS_DIR = "masks"
+RESULTS_LABELS_DIR = "labels"
+RESULTS_QC_DIR = "qc"
+RESULTS_LOGS_DIR = "logs"
+RESULTS_RAW_DIR = "cellprofiler_raw"
+
+
+@dataclass
+class CellProfilerRunResult:
+    """Captured output from a headless CellProfiler subprocess run."""
+
+    output_dir: Path
+    command: list[str]
+    returncode: int
+    stdout: str
+    stderr: str
+    log_files: dict[str, Path]
+
+    @property
+    def succeeded(self) -> bool:
+        return self.returncode == 0
 
 
 def _resolve_existing_path(path: str | Path, label: str) -> Path:
@@ -56,12 +80,53 @@ def _build_cellprofiler_command(
     return command
 
 
+def _write_cellprofiler_logs(
+    log_dir: Path,
+    *,
+    command: Sequence[str],
+    stdout: str,
+    stderr: str,
+    returncode: int,
+) -> dict[str, Path]:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_files = {
+        "stdout": log_dir / "cellprofiler_stdout.log",
+        "stderr": log_dir / "cellprofiler_stderr.log",
+        "command": log_dir / "cellprofiler_command.txt",
+        "exit_code": log_dir / "cellprofiler_exit_code.txt",
+    }
+    log_files["stdout"].write_text(stdout, encoding="utf-8")
+    log_files["stderr"].write_text(stderr, encoding="utf-8")
+    log_files["command"].write_text(" ".join(command), encoding="utf-8")
+    log_files["exit_code"].write_text(str(returncode), encoding="utf-8")
+    return log_files
+
+
+def format_cellprofiler_failure(
+    *,
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    log_files: dict[str, Path] | None = None,
+) -> str:
+    details = (stderr or "").strip() or (stdout or "").strip()
+    if not details:
+        details = f"exit code {returncode}"
+    if log_files:
+        stderr_log = log_files.get("stderr")
+        if stderr_log is not None:
+            details = f"{details} (see {stderr_log})"
+    return details
+
+
 def run_cellprofiler_pipeline(
     cppipe_path: str | Path,
     input_dir: str | Path,
     output_dir: str | Path,
     extra_args: Sequence[str] | None = None,
     cellprofiler_executable: str = "cellprofiler",
+    *,
+    log_dir: str | Path | None = None,
 ) -> Path:
     """Run a CellProfiler pipeline in headless mode.
 
@@ -72,7 +137,9 @@ def run_cellprofiler_pipeline(
         extra_args: Optional extra CLI arguments appended to the command.
         cellprofiler_executable: CellProfiler command name or full path to the
             executable (for example ``cellprofiler`` or
-            ``C:\\Program Files\\CellProfiler\\CellProfiler.exe``).
+            ``C:\\Program Files\\CellProfiler\\CellProfiler.exe``.
+        log_dir: Optional folder where stdout, stderr, and command logs are
+            written before errors are raised.
 
     Returns:
         Resolved path to the output directory.
@@ -81,6 +148,37 @@ def run_cellprofiler_pipeline(
         FileNotFoundError: If the pipeline file or input directory is missing.
         RuntimeError: If CellProfiler is not installed or the command fails.
     """
+    run_result = run_cellprofiler_pipeline_logged(
+        cppipe_path=cppipe_path,
+        input_dir=input_dir,
+        output_dir=output_dir,
+        extra_args=extra_args,
+        cellprofiler_executable=cellprofiler_executable,
+        log_dir=log_dir,
+    )
+    if not run_result.succeeded:
+        raise RuntimeError(
+            "CellProfiler command failed: "
+            + format_cellprofiler_failure(
+                returncode=run_result.returncode,
+                stdout=run_result.stdout,
+                stderr=run_result.stderr,
+                log_files=run_result.log_files,
+            )
+        )
+    return run_result.output_dir
+
+
+def run_cellprofiler_pipeline_logged(
+    cppipe_path: str | Path,
+    input_dir: str | Path,
+    output_dir: str | Path,
+    extra_args: Sequence[str] | None = None,
+    cellprofiler_executable: str = "cellprofiler",
+    *,
+    log_dir: str | Path | None = None,
+) -> CellProfilerRunResult:
+    """Run CellProfiler headlessly and return captured stdout/stderr."""
     pipeline_path = _resolve_existing_path(cppipe_path, "Pipeline file")
     input_path = _resolve_existing_path(input_dir, "Input directory")
     if not input_path.is_dir():
@@ -111,13 +209,26 @@ def run_cellprofiler_pipeline(
             f"Failed to launch CellProfiler: {exc}"
         ) from exc
 
-    if completed.returncode != 0:
-        stderr = (completed.stderr or "").strip()
-        stdout = (completed.stdout or "").strip()
-        details = stderr or stdout or f"exit code {completed.returncode}"
-        raise RuntimeError(f"CellProfiler command failed: {details}")
+    stdout = completed.stdout or ""
+    stderr = completed.stderr or ""
+    log_files: dict[str, Path] = {}
+    if log_dir is not None:
+        log_files = _write_cellprofiler_logs(
+            Path(log_dir),
+            command=command,
+            stdout=stdout,
+            stderr=stderr,
+            returncode=completed.returncode,
+        )
 
-    return output_path.resolve()
+    return CellProfilerRunResult(
+        output_dir=output_path.resolve(),
+        command=command,
+        returncode=completed.returncode,
+        stdout=stdout,
+        stderr=stderr,
+        log_files=log_files,
+    )
 
 
 def read_cellprofiler_csv(csv_path: str | Path) -> pd.DataFrame:
@@ -282,3 +393,102 @@ def merge_cellprofiler_tables(
             suffixes=("", f"_{name}"),
         )
     return merged
+
+
+def extract_processed_image_names(
+    tables: dict[str, pd.DataFrame],
+) -> list[str]:
+    """Return input image filenames from CellProfiler Image export tables."""
+    filenames: list[str] = []
+    for table_name, dataframe in tables.items():
+        if "FileName" not in dataframe.columns:
+            continue
+        for value in dataframe["FileName"].dropna().astype(str):
+            if value not in filenames:
+                filenames.append(value)
+    return filenames
+
+
+def summarize_cellprofiler_tables(
+    tables: dict[str, pd.DataFrame],
+) -> dict[str, dict[str, int]]:
+    """Summarize loaded CellProfiler CSV tables for workflow reporting."""
+    return {
+        table_name: {
+            "rows": len(dataframe),
+            "columns": len(dataframe.columns),
+        }
+        for table_name, dataframe in tables.items()
+    }
+
+
+def discover_cellprofiler_csv_files(
+    output_dir: str | Path,
+    *,
+    pattern: str = "*.csv",
+) -> list[Path]:
+    """Return CSV files written by CellProfiler in an output directory."""
+    output_path = Path(output_dir)
+    if not output_path.is_dir():
+        raise FileNotFoundError(f"Output directory not found: {output_path}")
+    return sorted(path for path in output_path.glob(pattern) if path.is_file())
+
+
+def discover_cellprofiler_tiff_files(
+    output_dir: str | Path,
+    *,
+    pattern: str = "*.tif",
+    exclude_dirs: Sequence[str] = (
+        RESULTS_MEASUREMENTS_DIR,
+        RESULTS_MASKS_DIR,
+        RESULTS_LABELS_DIR,
+        RESULTS_QC_DIR,
+        RESULTS_LOGS_DIR,
+    ),
+) -> list[Path]:
+    """Return TIFF files written by CellProfiler, excluding organized results."""
+    output_path = Path(output_dir)
+    if not output_path.is_dir():
+        raise FileNotFoundError(f"Output directory not found: {output_path}")
+
+    excluded = {name.lower() for name in exclude_dirs}
+    discovered: list[Path] = []
+
+    for candidate in sorted(output_path.rglob(pattern)):
+        if not candidate.is_file():
+            continue
+        if any(part.lower() in excluded for part in candidate.relative_to(output_path).parts):
+            continue
+        discovered.append(candidate)
+
+    if pattern == "*.tif":
+        for candidate in sorted(output_path.rglob("*.tiff")):
+            if not candidate.is_file():
+                continue
+            if any(
+                part.lower() in excluded
+                for part in candidate.relative_to(output_path).parts
+            ):
+                continue
+            discovered.append(candidate)
+
+    return discovered
+
+
+def copy_cellprofiler_measurements(
+    source_dir: str | Path,
+    destination_dir: str | Path,
+    *,
+    pattern: str = "*.csv",
+) -> list[Path]:
+    """Copy CellProfiler CSV exports into a measurements results folder."""
+    source_path = Path(source_dir)
+    destination_path = Path(destination_dir)
+    destination_path.mkdir(parents=True, exist_ok=True)
+
+    copied: list[Path] = []
+    for csv_file in discover_cellprofiler_csv_files(source_path, pattern=pattern):
+        destination = destination_path / csv_file.name
+        destination.write_bytes(csv_file.read_bytes())
+        copied.append(destination.resolve())
+    return copied

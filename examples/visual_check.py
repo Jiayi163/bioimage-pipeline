@@ -12,6 +12,7 @@ from bioimage_pipeline.export import (
 from bioimage_pipeline.io import save_tiff
 from bioimage_pipeline.measure import measure_objects
 from bioimage_pipeline.preprocess import gaussian_blur
+from bioimage_pipeline.qc import export_qc_artifacts
 from bioimage_pipeline.segment import label_objects, remove_small_objects_from_mask
 from bioimage_pipeline.threshold import otsu_threshold
 
@@ -48,8 +49,19 @@ def main() -> None:
     export_label_tiff(output_dir / "labels.tif", labels)
     export_measurements_csv(output_dir / "measurements.csv", measurements)
 
+    qc_paths = export_qc_artifacts(
+        image,
+        output_dir,
+        "visual_check",
+        mask=mask,
+        labels=labels,
+    )
+
     print(f"Saved outputs to: {output_dir.resolve()}")
-    print("Open the output TIFF files in Fiji to visually inspect the result.")
+    print(f"Mask overlay: {qc_paths['mask_overlay']}")
+    print(f"Label overlay: {qc_paths['label_overlay']}")
+    print("Open the TIFF or PNG files in Fiji to visually inspect the result.")
+    print("See docs/fiji_qc_workflow.md for a step-by-step Fiji checklist.")
 
 
 if __name__ == "__main__":
