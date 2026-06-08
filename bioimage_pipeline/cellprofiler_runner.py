@@ -453,7 +453,6 @@ def load_cellprofiler_measurements(
         raw_columns = list(raw_dataframe.columns)
         column_log = f"{table_name}: columns found — {', '.join(raw_columns)}"
         logger.info(column_log)
-        warnings.append(column_log)
 
         dataframe, normalization_notes = normalize_cellprofiler_dataframe(
             raw_dataframe,

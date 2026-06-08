@@ -1,12 +1,10 @@
 # bioimage-pipeline
 
-A **workflow orchestration layer** that **exposes CellProfiler functionality**
-through pipeline management and a future GUI — without reimplementing
-CellProfiler algorithms. CellProfiler is the primary analysis engine. Fiji/ImageJ
-handles export/QC when required. This project manages configuration, subprocess
-runs, output organization, logs, and QC artifacts.
-
-It does not import or copy code from CellProfiler or Fiji/ImageJ.
+A **lightweight bioimage analysis pipeline** inspired by Fiji/ImageJ and
+CellProfiler. It provides a Python-native stack and batch-processing workflow,
+a CellProfiler integration layer, and a Fiji-compatible TIFF export path.
+This project manages pipeline configuration, subprocess orchestration, output
+organization, logs, and QC artifacts.
 
 | Layer | Role |
 |-------|------|
@@ -16,11 +14,13 @@ It does not import or copy code from CellProfiler or Fiji/ImageJ.
 | **Python TIFF export** | Fallback / intermediate — ImageJ-compatible writes when Fiji is unavailable |
 | **Python analysis engine** | Optional lightweight fallback for teaching, tests, and prototypes |
 
-**This project is not a replacement for CellProfiler or Fiji.** It exposes their
-capabilities through workflow control and a GUI that manages `.cppipe` pipelines:
+It can run fully standalone with its own Python pipeline, or use CellProfiler
+and Fiji/ImageJ as external engines via headless subprocess calls:
 
 ```text
-GUI → .cppipe config → CellProfiler (once/folder) → Fiji (optional, once/folder) → results
+Python pipeline (standalone)  →  stack/folder of TIFFs  →  masks, labels, CSV
+CellProfiler (external)       →  .cppipe headless run   →  measurements, exports
+Fiji/ImageJ (external)        →  headless macro export  →  final TIFFs
 ```
 
 ## Performance: batch-first execution
@@ -47,7 +47,7 @@ designed for **batch invocation**, not one launch per image:
 | Python TIFF fallback | Intermediate / no-Fiji export | `fiji_tiff.py`, `export.py`, `io.py` |
 | QC visualization | Overlays and inspection helpers | `qc.py` |
 | GUI (Phase 15) | CP/Fiji front-end — test UI (15.0), shell (15.1), builder (15.2) | `workflow_test_ui.py`, `gui/`, `cppipe_io.py` (planned) |
-| Python analysis fallback | Teaching / prototyping only | `preprocess.py`, `threshold.py`, `segment.py`, `measure.py`, `pipeline.py`, `batch.py` |
+| Python analysis fallback | Teaching / prototyping only | `preprocess.py`, `threshold.py`, `segment.py`, `measure.py`, `pipeline.py`, `batch.py`, `stack.py`, `stack_batch.py` |
 
 ```text
 input images + .cppipe
@@ -83,8 +83,8 @@ CellProfiler workflow orchestration (Phase 13), QC overlays, and example scripts
 Phase **15.0** ships first: a temporary Streamlit UI to click-run workflows and
 see logs, overlays, and measurements — not the final GUI. **15.1** is the proper
 workflow shell; **15.2** adds pipeline building and CellProfiler module exposure.
-The GUI **exposes CellProfiler functionality** without reimplementing algorithms
-like `IdentifyPrimaryObjects` or `MeasureObjectSizeShape`. See
+The GUI exposes CellProfiler and Fiji functionality through workflow controls,
+pipeline configuration, and result inspection. See
 [docs/gui_direction.md](docs/gui_direction.md).
 
 See [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) for full phase details and status.
@@ -157,6 +157,24 @@ Run the basic example:
 ```bash
 python examples/run_basic_pipeline.py
 ```
+
+### Stack / batch processing (Python engine)
+
+Process a folder of TIFFs or a multi-page stack (Fiji-style workflow):
+
+```bash
+python examples/run_stack_batch.py --demo --output output/demo_test
+python examples/run_stack_example.py
+```
+
+With a JSON recipe:
+
+```bash
+python examples/run_stack_batch.py --recipe examples/stack_batch_recipe.json
+```
+
+See [docs/stack_batch_workflow.md](docs/stack_batch_workflow.md) for the full
+API, output layout, and Fiji workflow mapping.
 
 Run the visual validation script (outputs and QC overlays):
 

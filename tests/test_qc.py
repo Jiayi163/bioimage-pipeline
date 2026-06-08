@@ -12,10 +12,12 @@ from bioimage_pipeline.qc import (
     create_mask_overlay,
     export_qc_artifacts,
     generate_qc_for_folder,
+    generate_qc_for_stack,
     normalize_for_display,
     save_qc_figure,
     view_in_napari,
 )
+from bioimage_pipeline.stack import load_stack_from_folder
 
 
 def test_normalize_for_display_scales_to_uint8() -> None:
@@ -151,3 +153,68 @@ def test_view_in_napari_opens_viewer(mock_napari_module: MagicMock) -> None:
     mock_viewer.add_image.assert_called_once()
     mock_viewer.add_labels.assert_called_once()
     mock_napari_module.run.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# generate_qc_for_stack (Phase S.7)
+# ---------------------------------------------------------------------------
+
+
+def _make_stack_with_outputs(tmp_path: Path, n_frames: int = 3):
+    """Create a folder-based stack and matching mask/label TIFFs in output_dir."""
+    src = tmp_path / "src"
+    src.mkdir()
+    out = tmp_path / "out"
+    out.mkdir()
+
+    for i in range(n_frames):
+        img = np.zeros((30, 40), dtype=np.uint8)
+        img[5:15, 10:25] = 180
+        save_tiff(src / f"img_{i:02d}.tif", img)
+
+        mask = img > 100
+        mask_uint8 = mask.astype(np.uint8) * 255
+        save_tiff(out / f"img_{i:02d}_f{i:03d}_mask.tif", mask_uint8)
+
+        import skimage.measure
+        labels = skimage.measure.label(mask).astype(np.int32)
+        save_tiff(out / f"img_{i:02d}_f{i:03d}_labels.tif", labels)
+
+    stack = load_stack_from_folder(src)
+    return stack, out
+
+
+def test_generate_qc_for_stack_creates_overlays_for_each_frame(tmp_path: Path) -> None:
+    stack, out = _make_stack_with_outputs(tmp_path, n_frames=3)
+    qc_dir = tmp_path / "qc"
+
+    artifacts = generate_qc_for_stack(stack, out, image_format="png")
+
+    assert len(artifacts) == 3
+    for frame_idx, frame_artifacts in artifacts.items():
+        assert "mask_overlay" in frame_artifacts
+        assert "label_overlay" in frame_artifacts
+        assert frame_artifacts["mask_overlay"].exists()
+        assert frame_artifacts["label_overlay"].exists()
+
+
+def test_generate_qc_for_stack_returns_frame_index_keys(tmp_path: Path) -> None:
+    stack, out = _make_stack_with_outputs(tmp_path, n_frames=2)
+    artifacts = generate_qc_for_stack(stack, out)
+    assert set(artifacts.keys()) == {0, 1}
+
+
+def test_generate_qc_for_stack_skips_frames_without_outputs(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    out = tmp_path / "out"
+    out.mkdir()
+
+    for i in range(3):
+        img = np.zeros((20, 20), dtype=np.uint8)
+        save_tiff(src / f"img_{i}.tif", img)
+
+    stack = load_stack_from_folder(src)
+    artifacts = generate_qc_for_stack(stack, out)
+
+    assert artifacts == {}

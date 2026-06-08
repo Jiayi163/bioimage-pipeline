@@ -1,46 +1,36 @@
 # Development Plan
 
-This project is a **workflow orchestration layer** connecting CellProfiler,
-Fiji/ImageJ, and organized final outputs. It does not import or copy code from
-CellProfiler or Fiji/ImageJ.
+This project is a **lightweight bioimage analysis pipeline** inspired by
+Fiji/ImageJ and CellProfiler. It provides a Python-native stack and
+batch-processing workflow, a CellProfiler integration layer, and a
+Fiji-compatible TIFF export path.
 
-## Project goal (clarified)
+## Project goal
 
 ```text
-Input Images  →  CellProfiler  →  Fiji/ImageJ  →  Final Outputs
-                      ↑                ↑
-                 .cppipe runs    headless export
-                 measurements    final TIFFs + metadata
-                 masks, labels   macros/scripts when needed
+Input Images (folder or multi-page TIFF stack)
+    ↓
+Python pipeline  →  preprocess → segment → measure  →  masks, labels, CSV
+    OR
+CellProfiler     →  headless .cppipe run             →  measurements, exports
+    OR
+Fiji/ImageJ      →  headless macro export            →  final TIFFs + metadata
 ```
 
 | Layer | Role |
 |-------|------|
-| **CellProfiler** | Primary analysis engine — segmentation, measurement, object detection, feature extraction, etc.; runs through `.cppipe` pipelines headlessly |
-| **Fiji/ImageJ** | Export/QC engine — final TIFF export workflow when required; headless macros/scripts; preserves Fiji/ImageJ-specific export behavior and metadata |
-| **This project** | Workflow orchestration layer — pipeline management, configuration, logging, QC generation, results organization, future GUI |
-| **Python TIFF export** | Fallback and intermediate format — ImageJ-compatible TIFF writing via `tifffile` when Fiji is unavailable or for tests |
-| **Python analysis engine** | Optional lightweight fallback for teaching, tests, and quick prototypes — **not** a CellProfiler replacement |
+| **Python pipeline** | Standalone analysis — stack/batch processing, segmentation, measurement, export |
+| **CellProfiler** | External analysis engine — headless `.cppipe` runs, CSV output |
+| **Fiji/ImageJ** | External export/QC engine — headless TIFF export, macros |
+| **Python TIFF export** | In-process fallback — ImageJ-compatible TIFF writing via `tifffile` |
 
-Core goal: **expose CellProfiler functionality through this application** without
-reimplementing CellProfiler algorithms. CellProfiler performs analysis; Fiji/ImageJ
-handles export when required; this project orchestrates the workflow and provides
-a future GUI front-end.
+**What we do:**
 
-**What we do NOT do:**
-
-- Reimplement CellProfiler modules (e.g. `IdentifyPrimaryObjects`,
-  `MeasureObjectSizeShape`, `MeasureTexture`, `RelateObjects`, `ClassifyObjects`).
-- Copy CellProfiler or Fiji/ImageJ source code.
-- Replace CellProfiler as the analysis engine for production workflows.
-
-**What we DO do:**
-
+- Process folders of TIFFs or multi-page TIFF stacks with a composable Python pipeline.
 - Run CellProfiler headlessly via `.cppipe` pipelines.
 - Collect, organize, and preview CellProfiler outputs.
 - Drive Fiji/ImageJ headless export when required (Phase 14).
-- Provide a GUI that **generates/manages pipeline configuration**, calls
-  CellProfiler, optionally calls Fiji, and displays results (Phase 15).
+- Provide a GUI that manages pipelines, calls external engines, and displays results (Phase 15).
 
 ## Performance: batch-first execution
 
@@ -145,7 +135,7 @@ GUI
 
 **In scope for the GUI:**
 
-- Browse and search CellProfiler modules (metadata/catalog — not reimplemented algorithms).
+- Browse and search CellProfiler modules by name and category.
 - Configure module parameters (read/write `.cppipe` or equivalent pipeline representation).
 - Build and edit pipelines visually or step-by-step.
 - Load and save pipelines (`.cppipe`).
@@ -156,11 +146,10 @@ GUI
 - Export / open organized results.
 - Optionally trigger Fiji/ImageJ headless export.
 
-**Out of scope for the GUI (and entire project):**
+**Out of current scope for the GUI:**
 
-- Rewriting CellProfiler modules such as `IdentifyPrimaryObjects`,
-  `MeasureObjectSizeShape`, `MeasureTexture`, `RelateObjects`, `ClassifyObjects`.
-- Reimplementing Fiji/ImageJ image processing plugins.
+- Replacing the CellProfiler desktop app for interactive pipeline editing.
+- Real-time streaming analysis (batch-first is the design).
 
 Phase 15 is split into **15.0** (temporary Streamlit test UI), **15.1** (workflow
 shell), and **15.2** (pipeline builder). See [docs/gui_direction.md](docs/gui_direction.md).
@@ -213,6 +202,14 @@ For every phase:
 | 15.2 | GUI pipeline builder & CP module exposure | `PHASE NOT COMPLETE` |
 | 16 | Optional Python analysis enhancements | `PHASE NOT COMPLETE` |
 | 17 | Self-adaptive threshold at import (hybrid CP workflow) — **core differentiator** | `DEFERRED` — prototype only |
+| **S.0** | **Stack track prep — fix failing test, update docs** | `PHASE COMPLETE` ✔ |
+| **S.1** | **Stack I/O — AxisInfo, StackFrame, iter_stack_frames** | `PHASE COMPLETE` ✔ |
+| **S.2** | Stack data model — ImageStack, load from folder or file | `PHASE COMPLETE` ✔ |
+| **S.3** | Stack batch runner — run_pipeline_on_stack | `PHASE COMPLETE` ✔ |
+| **S.4** | Stack export — per-frame TIFFs, combined CSV | `PHASE COMPLETE` ✔ |
+| **S.5** | Processed-image export | `PHASE COMPLETE` ✔ |
+| **S.6** | Fiji-macro-style batch recipe (CLI + optional JSON) | `PHASE COMPLETE` ✔ |
+| **S.7** | Stack QC overlays, example, docs | `PHASE COMPLETE` ✔ |
 
 ## Phase 0: Project Setup
 
@@ -1160,9 +1157,8 @@ Status: `PHASE NOT COMPLETE`
 
 ## Phase 15: GUI — CellProfiler & Fiji Workflow Front-End
 
-Goal: build a user-facing application that **exposes CellProfiler functionality**
-through pipeline management and workflow control — without reimplementing
-CellProfiler algorithms.
+Goal: build a user-facing application that exposes CellProfiler and Fiji
+functionality through pipeline management and workflow control.
 
 Delivered in three sub-phases: **15.0** (temporary Streamlit test UI — ship first),
 **15.1** (proper workflow shell), **15.2** (pipeline builder).
@@ -1175,10 +1171,8 @@ The GUI is **not** a new analysis engine. It is a front-end that:
 4. Optionally triggers Fiji/ImageJ headless export (Phase 14).
 5. Surfaces logs, progress, and stage timings.
 
-**Out of scope:** reimplementing CellProfiler modules (`IdentifyPrimaryObjects`,
-`MeasureObjectSizeShape`, `MeasureTexture`, `RelateObjects`, `ClassifyObjects`,
-etc.). The GUI reads/writes pipeline configuration and delegates execution to
-CellProfiler.
+The GUI reads/writes pipeline configuration and can delegate execution to
+CellProfiler or run the built-in Python pipeline.
 
 Files (planned):
 
@@ -1267,8 +1261,7 @@ GUI without opening the CellProfiler desktop app for every edit.
 Tasks:
 
 - Module catalog: browse/search CellProfiler modules by name and category
-  (metadata sourced from CellProfiler module definitions or a curated catalog —
-  not reimplemented module code).
+  (metadata sourced from CellProfiler module definitions or a curated catalog).
 - Parameter panels: configure module settings; persist to `.cppipe` format.
 - Pipeline editor: add, remove, reorder modules; validate pipeline structure.
 - Load/save `.cppipe` files; import pipelines created in CellProfiler.
@@ -1281,14 +1274,11 @@ Implementation notes:
 - Module parameter schemas may be loaded from CellProfiler where possible, or
   maintained as a catalog that maps to `.cppipe` keys — either way, execution
   stays in CellProfiler.
-- Do not implement segmentation, measurement, or classification algorithms in Python.
-
 Acceptance:
 
 - User can build or edit a pipeline in the GUI, save as `.cppipe`, and run it
   headlessly with the same results as running that `.cppipe` in CellProfiler directly.
-- GUI exposes modules like `IdentifyPrimaryObjects` as configurable steps — it
-  does not reimplement their algorithms.
+- GUI exposes modules like `IdentifyPrimaryObjects` as configurable steps.
 
 Status: `PHASE NOT COMPLETE`
 
@@ -1408,3 +1398,285 @@ These items are useful but outside the current Phases 13–16 scope:
 - Batch job queues and preset profiles for recurring lab workflows
 - OME-TIFF export with full microscopy calibration metadata
 - Deeper CellProfiler integration (e.g. live module schema sync from installed CP version)
+
+---
+
+## Stack / Batch Track (Phases S.0 – S.7)
+
+**Goal:** Fiji-style stack and batch-processing workflow on the **Python engine**.
+Load a folder of images or a multi-page TIFF, treat every image/frame as a stack
+slice, apply the same preprocess → segment → measure pipeline to each slice, and
+export per-frame TIFFs and a combined CSV.
+
+This is an **independent track** alongside the CellProfiler workflow track
+(Phases 13–17). Both use the same core Python pipeline modules.
+
+```text
+Input (folder of TIFFs  OR  one multi-page stack TIFF)
+    ↓
+ImageStack  →  Pipeline (same steps for every frame)
+    ↓
+Per-frame outputs (mask.tif, labels.tif, measurements.csv)
+Combined all_measurements.csv  (frame / slice / stack_id columns)
+```
+
+## Phase S.0: Stack Track Prep
+
+Goal: clean baseline before introducing stack code.
+
+Tasks:
+
+- Remove spurious `"columns found"` entry from `warnings` list in
+  `load_cellprofiler_measurements` (`cellprofiler_runner.py` line 456).
+- Add stack-track section to `DEVELOPMENT_PLAN.md`.
+
+Acceptance:
+
+- `python -m pytest -v` passes with 0 failures.
+
+Self-check:
+
+```bash
+python -m pytest -v
+```
+
+Status: `PHASE COMPLETE` ✔
+
+## Phase S.1: Stack I/O — AxisInfo, StackFrame, iter_stack_frames
+
+Goal: primitives for reading multi-frame TIFFs frame-by-frame.
+
+Files:
+
+- `bioimage_pipeline/io.py` (extend)
+- `tests/test_io.py` (extend)
+
+New public API:
+
+| Symbol | Description |
+|--------|-------------|
+| `AxisInfo` | Dataclass: height, width, z_count, t_count, c_count, frame_count, source |
+| `StackFrame` | Dataclass: index, array, z_index, t_index, c_index, source_path, metadata |
+| `interpret_tiff_axes(shape, imagej_metadata)` | Infer Z/T/C from shape + optional ImageJ metadata |
+| `extract_2d_plane(image, frame_index)` | Pull one 2D plane from any nD array |
+| `iter_stack_frames(path)` | Iterator — yields one StackFrame per page |
+
+Rules:
+
+- Single-page TIFF → yields 1 frame.
+- Multi-page TIFF → yields N frames (one per page).
+- ImageJ metadata used when present for per-axis indices.
+- Frame arrays are always 2D `(H, W)`.
+- Source path attached to every frame.
+
+Acceptance tests (18 new tests in `test_io.py`):
+
+- `interpret_tiff_axes` on 2D, 3D, 4D, 5D shapes and ImageJ metadata dict.
+- `extract_2d_plane` on 2D passthrough, 3D selection, out-of-range error.
+- `iter_stack_frames` single image, multipage, 2D frame guarantee,
+  source path, missing file, directory, z_index.
+
+Self-check:
+
+```bash
+python -m pytest tests/test_io.py -v
+python -m pytest -v
+```
+
+Status: `PHASE COMPLETE` ✔
+
+## Phase S.2: Stack Data Model
+
+Goal: a unified `ImageStack` object that can be built from a folder of 2D TIFFs
+**or** from a single multi-page TIFF — without duplicating frame logic.
+
+Files:
+
+- `bioimage_pipeline/stack.py` (new)
+- `tests/test_stack.py` (new)
+
+API:
+
+```python
+@dataclass
+class ImageStack:
+    frames: list[StackFrame]
+    source: str | Path  # file path or folder path
+    axis_info: AxisInfo | None
+
+def load_stack_from_tiff(path) -> ImageStack
+def load_stack_from_folder(folder, pattern="*.tif") -> ImageStack
+def load_stack(source) -> ImageStack   # auto-detects file vs folder
+```
+
+Rules:
+
+- `load_stack_from_folder`: discovers TIFFs sorted alphabetically; each file
+  becomes one `StackFrame` (2D image or first plane of a multi-page file).
+- `load_stack_from_tiff`: uses `iter_stack_frames`; returns all pages.
+- `load_stack`: if `source` is a file → `load_stack_from_tiff`; if a folder
+  → `load_stack_from_folder`.
+- Empty folder → `ValueError`.
+- Missing path → `FileNotFoundError`.
+
+Acceptance tests:
+
+- Folder with N TIFFs → stack with N frames.
+- Multi-page TIFF → stack with N frames.
+- File vs folder auto-detection.
+- Frame order is alphabetical for folder sources.
+- Empty folder raises.
+
+Status: `PHASE COMPLETE` ✔
+
+## Phase S.3: Stack Batch Runner
+
+Goal: run a `Pipeline` on every frame of an `ImageStack`, collecting per-frame
+outputs and a combined measurement table.
+
+Files:
+
+- `bioimage_pipeline/batch.py` (extend)
+- `tests/test_batch.py` (extend)
+
+New function:
+
+```python
+def run_pipeline_on_stack(
+    pipeline: Pipeline,
+    stack: ImageStack,
+    output_dir: str | Path,
+) -> dict[str, Any]
+```
+
+Returns: `{"processed": [...], "failed": [...], "measurements": DataFrame | None}`
+
+Per-frame data dict includes `"filename"`, `"frame_index"`, `"z_index"`,
+`"t_index"`, `"c_index"` from the frame metadata.
+
+Rules:
+
+- Continue processing remaining frames on single-frame failure (same as
+  `run_pipeline_on_folder`).
+- Collect all per-frame measurements DataFrames; concat to `all_measurements.csv`.
+- Do not re-read source files; reuse `StackFrame.array`.
+
+Acceptance tests:
+
+- N-frame stack → N processed outputs.
+- Single-frame failure → reported in `failed`, remaining frames succeed.
+- Combined measurements have `frame_index` column.
+- No stack-level failure when one frame is bad.
+
+Status: `PHASE COMPLETE` ✔
+
+## Phase S.4: Stack Export
+
+Goal: write per-frame mask/label TIFFs and a combined CSV with frame-identity
+columns.
+
+Files:
+
+- `bioimage_pipeline/export.py` (extend)
+- `tests/test_export.py` (extend)
+
+Output naming convention:
+
+```text
+output_dir/
+    {stem}_f000_mask.tif
+    {stem}_f000_labels.tif
+    {stem}_f000_measurements.csv
+    ...
+    all_measurements.csv   ← frame_index, z_index, filename columns added
+```
+
+Acceptance tests:
+
+- File names include zero-padded frame index.
+- Combined CSV schema includes `frame_index`.
+- Round-trip: mask values 0/255, label IDs preserved.
+
+Status: `PHASE COMPLETE` ✔
+
+## Phase S.5: Processed-Image Export
+
+Goal: export the `"processed"` (blurred/corrected) plane alongside masks and
+labels, so the full pipeline intermediate state is inspectable.
+
+Files:
+
+- `bioimage_pipeline/batch.py` (extend)
+- `bioimage_pipeline/export.py` (extend)
+
+Convention: `{stem}_f000_processed.tif` — intensity TIFF written by
+`export_intensity_tiff`.
+
+Acceptance tests:
+
+- Processed TIFF exists after batch run.
+- Shape matches source frame.
+- Dtype is safe integer or float32.
+
+Status: `PHASE COMPLETE` ✔
+
+## Phase S.6: Fiji-Macro-Style Batch Recipe (CLI)
+
+Goal: a repeatable CLI command that mirrors Fiji's "Process Folder" / macro
+workflow — load input, run fixed pipeline steps, export results — without
+requiring any Python scripting by the user.
+
+Files:
+
+- `examples/run_stack_batch.py`
+- `bioimage_pipeline/stack_recipe.py` — JSON recipe load/save/merge
+- `bioimage_pipeline/stack_batch.py` — `run_stack_batch_workflow()`
+- `examples/stack_batch_recipe.json` — example recipe template
+
+CLI:
+
+```bash
+python examples/run_stack_batch.py \
+    --input path/to/folder_or_stack.tif \
+    --output path/to/results \
+    [--blur-sigma 1.0] \
+    [--min-object-size 20] \
+    [--labeling connected|watershed] \
+    [--export-processed]
+```
+
+Optional: JSON recipe file (`--recipe batch_recipe.json`) that serializes
+pipeline step names and parameters for reproducible batch runs.
+
+Implemented: `--recipe`, `--generate-qc`, `stack_recipe.py`, `stack_batch.py`,
+`examples/stack_batch_recipe.json`.
+
+Acceptance tests:
+
+- CLI smoke test: `subprocess.run([sys.executable, "examples/run_stack_batch.py", ...])`.
+- Result directory contains expected output files.
+
+Status: `PHASE COMPLETE` ✔
+
+## Phase S.7: Stack QC, Example, and Docs
+
+Goal: QC overlays per frame, a runnable end-to-end example, and documentation.
+
+Files:
+
+- `bioimage_pipeline/qc.py` (extend — `generate_qc_for_stack`)
+- `examples/run_stack_example.py` (new — synthetic Z-stack end-to-end)
+- `docs/stack_batch_workflow.md` (new — Fiji workflow mapping + API reference)
+- `bioimage_pipeline/stack_batch.py` — shared workflow entry point
+- `tests/test_stack_batch_cli.py` — CLI subprocess smoke tests
+
+`generate_qc_for_stack(stack, masks_dir, labels_dir, qc_dir)` produces one
+overlay PNG per frame using existing `export_qc_artifacts`.
+
+Acceptance:
+
+- Example runs from terminal with no real data required.
+- QC overlay PNGs are created for each frame.
+- Doc maps Fiji "Process Stack" steps to this project's API.
+
+Status: `PHASE COMPLETE` ✔

@@ -255,6 +255,73 @@ def generate_qc_for_folder(
     return {"generated": generated, "skipped": skipped, "artifacts": artifacts}
 
 
+def generate_qc_for_stack(
+    stack: "Any",
+    output_dir: str | Path,
+    *,
+    masks_dir: str | Path | None = None,
+    labels_dir: str | Path | None = None,
+    image_format: str = "png",
+) -> dict[int, dict[str, Path]]:
+    """Generate QC overlays for every frame in an :class:`~bioimage_pipeline.stack.ImageStack`.
+
+    Looks for per-frame mask and label TIFFs written by
+    :func:`~bioimage_pipeline.batch.run_pipeline_on_stack` using the naming
+    convention ``{stem}_f{index:03d}_mask.tif`` / ``_labels.tif``.
+
+    When ``masks_dir`` / ``labels_dir`` are ``None`` they default to
+    ``output_dir``, which is the common case when the stack runner writes
+    everything to one folder.
+
+    Args:
+        stack: :class:`~bioimage_pipeline.stack.ImageStack` instance.
+        output_dir: Folder where QC overlay PNGs are written.
+        masks_dir: Folder to search for ``*_mask.tif`` files (default: ``output_dir``).
+        labels_dir: Folder to search for ``*_labels.tif`` files (default: ``output_dir``).
+        image_format: Output image format — ``"png"`` or ``"tif"`` (default: ``"png"``).
+
+    Returns:
+        Dict mapping ``frame_index`` → artifact path dict
+        (keys: ``"mask_overlay"``, ``"label_overlay"``).
+    """
+    qc_path = Path(output_dir)
+    qc_path.mkdir(parents=True, exist_ok=True)
+    masks_path = Path(masks_dir) if masks_dir else qc_path
+    labels_path = Path(labels_dir) if labels_dir else qc_path
+
+    artifacts: dict[int, dict[str, Path]] = {}
+
+    for frame in stack:
+        if frame.source_path is not None and frame.source_path.is_file():
+            stem = frame.source_path.stem
+        else:
+            stem = f"frame_{frame.index:03d}"
+
+        frame_tag = f"f{frame.index:03d}"
+        prefix = f"{stem}_{frame_tag}"
+
+        mask_file = masks_path / f"{prefix}_mask.tif"
+        label_file = labels_path / f"{prefix}_labels.tif"
+
+        if not mask_file.exists() and not label_file.exists():
+            continue
+
+        mask = read_tiff(mask_file) > 0 if mask_file.exists() else None
+        labels = read_tiff(label_file) if label_file.exists() else None
+
+        frame_artifacts = export_qc_artifacts(
+            frame.array,
+            qc_path,
+            prefix,
+            mask=mask,
+            labels=labels,
+            image_format=image_format,
+        )
+        artifacts[frame.index] = frame_artifacts
+
+    return artifacts
+
+
 def view_in_napari(
     image: np.ndarray,
     *,
