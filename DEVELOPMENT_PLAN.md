@@ -1155,6 +1155,38 @@ python examples/run_fiji_export.py --help
 
 Status: `PHASE NOT COMPLETE`
 
+### Fiji Automated OIR Z-Max Output Status
+
+Status: `PHASE COMPLETE` ✔
+
+Implemented:
+
+- Finds input `.oir` files recursively.
+- Builds expected `.tif` output names.
+- Generates a manual-run Fiji macro using **Bio-Formats Windowless Importer**.
+- Runs the intended Z Project Max Intensity macro path from Fiji GUI mode.
+- Verifies that expected output files exist before reporting files as processed.
+
+Validation result:
+
+- Fiji reference output and Python-generated/manual-macro output are
+  **pixel-identical**.
+
+Validated:
+
+- Same input `.oir` files.
+- Same output filenames.
+- Same file sizes.
+- Same image shapes.
+- Same pixel values (`compare_outputs.py` reported identical TIFF arrays).
+
+Note:
+
+- Command-line Fiji macro execution for `.oir` import remains avoided because it
+  can trigger `java.lang.VerifyError` in `loci.plugins.in.MainDialog` on some
+  Fiji/Bio-Formats/Java combinations. The accepted path is to generate the
+  `.ijm` file from Python and run it manually from the Fiji GUI.
+
 ## Phase 15: GUI — CellProfiler & Fiji Workflow Front-End
 
 Goal: build a user-facing application that exposes CellProfiler and Fiji

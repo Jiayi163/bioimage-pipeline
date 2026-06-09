@@ -29,6 +29,9 @@ ui = [
 qc = [
     "napari>=0.5"
 ]
+oir = [
+    "aicsimageio>=4.0"
+]
 
 [tool.setuptools.packages.find]
 include = ["bioimage_pipeline*"]
