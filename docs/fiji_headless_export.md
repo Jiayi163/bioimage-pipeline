@@ -42,19 +42,18 @@ Organized results (measurements/, masks/, labels/, qc/, logs/)
 | **This project** | Orchestration — subprocess management, config, logs, timing, QC, future GUI |
 | **Python TIFF (`fiji_tiff.py`)** | Fast in-process fallback — no JVM startup |
 
-## Planned module: `fiji_runner.py`
+## Implemented module: `fiji_runner.py`
 
-Responsibilities (not yet implemented):
+Responsibilities:
 
 - Resolve Fiji/ImageJ executable path (config + auto-detect common install locations)
 - Run **one headless subprocess per batch** with captured stdout/stderr
 - Execute **batch folder macros** (input dir → output dirs), not one launch per file
-- Fall back to per-image Fiji export only when documented as necessary
 - Fall back to `export.organize_cellprofiler_tiffs_for_fiji()` when Fiji is missing
 - Record `timing.fiji_export_seconds` in workflow summary
 - Write export logs under `logs/fiji_*.log`
 
-Planned API:
+API:
 
 ```python
 run_fiji_batch_export(
@@ -63,6 +62,7 @@ run_fiji_batch_export(
     labels_dir,
     macro_path="export_folder.ijm",
     fiji_executable=None,
+    log_dir="logs",
 ) -> FijiExportResult
 ```
 
@@ -72,13 +72,13 @@ Platform-specific commands vary. Batch pattern:
 
 ```text
 # Linux / macOS (Fiji) — one run, macro loops over folder
-/path/to/Fiji.app/ImageJ-linux64 --headless -macro export_folder.ijm /path/in /path/masks /path/labels
+/path/to/Fiji.app/ImageJ-linux64 --headless -macro export_folder.ijm "/path/in|/path/masks|/path/labels|*.tif"
 
 # Windows — one run
-"C:\Program Files\Fiji.app\ImageJ-win64.exe" /headless -macro export_folder.ijm C:\in C:\masks C:\labels
+"C:\Program Files\Fiji.app\ImageJ-win64.exe" --headless -macro export_folder.ijm "C:\in|C:\masks|C:\labels|*.tif"
 ```
 
-Macros will live under `examples/fiji_macros/` (planned). Each macro should:
+Macros live under `examples/fiji_macros/`. Each macro should:
 
 - Accept folder paths as arguments (not single file paths)
 - Process all matching TIFFs in the input folder
@@ -86,23 +86,16 @@ Macros will live under `examples/fiji_macros/` (planned). Each macro should:
 
 ## Workflow integration
 
-`run_cellprofiler_workflow()` (Phase 13) currently:
+`run_cellprofiler_workflow()` now:
 
 1. Runs CellProfiler **once** per folder (complete)
 2. Collects all outputs from `cellprofiler_raw/` (complete)
-3. Python fallback TIFF organization — in-process per file (acceptable fallback)
-4. QC overlays — in-process per image (no external relaunch)
-
-Phase 14 will insert batch Fiji export between steps 2 and 4:
-
-1. Run CellProfiler once (unchanged)
-2. Collect CP outputs (unchanged)
-3. **Run Fiji once** with batch macro → final TIFFs in `masks/`, `labels/`
+3. **Runs Fiji once** with batch macro → final TIFFs in `masks/`, `labels/`
 4. If Fiji fails or is not installed → Python in-process fallback + logged warning
-5. Generate QC overlays from final TIFFs
-6. Write `logs/workflow_summary.json` with **stage timings**
+5. Generates QC overlays from final TIFFs
+6. Writes `logs/workflow_summary.json` with **stage timings**
 
-Planned timing fields in `workflow_summary.json`:
+Timing fields in `workflow_summary.json`:
 
 ```json
 {
@@ -115,13 +108,14 @@ Planned timing fields in `workflow_summary.json`:
 }
 ```
 
-Planned config flags on `CellProfilerWorkflowConfig`:
+Config flags on `CellProfilerWorkflowConfig`:
 
 - `fiji_executable: str | None`
-- `fiji_export_enabled: bool = True`
+- `export_fiji_tiffs: bool = True`
 - `fiji_macro_path: Path | None` — batch folder macro (default)
+- `fiji_headless: bool | None`
+- `fiji_timeout: float | None`
 - `fiji_fallback_to_python: bool = True`
-- `fiji_per_image_fallback: bool = False` — opt-in only
 
 ## Export path comparison
 
@@ -147,7 +141,7 @@ These remain useful but are **not** the production final-export path:
 
 ## Logs and failure handling
 
-Planned log files under `logs/`:
+Log files under `logs/`:
 
 - `fiji_stdout.log`
 - `fiji_stderr.log`
@@ -160,12 +154,13 @@ When Fiji is unavailable:
 - `workflow_summary.json` records `export_engine: "python_fallback"`
 - User sees a clear message pointing to Fiji installation docs
 
-When batch macro fails but per-image fallback is enabled:
+When batch macro fails:
 
-- Log `export_mode: "per_image_fallback"` and increased `fiji_export_seconds`
-- Document why batch export was not used
+- Workflow falls back to Python export when `fiji_fallback_to_python=True`
+- `logs/fiji_export_warning.log` records why batch export was not used
+- `workflow_summary.json` records `export_engine: "python_fallback"`
 
-## Tests (planned)
+## Tests
 
 - Mock subprocess verifies **single Fiji invocation** per workflow run
 - Mock batch macro success path
@@ -175,6 +170,7 @@ When batch macro fails but per-image fallback is enabled:
 
 ```bash
 pytest tests/test_fiji_runner.py -v
+python examples/run_fiji_export.py --help
 ```
 
 ## Related docs

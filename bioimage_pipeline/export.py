@@ -2,7 +2,7 @@
 
 Python ImageJ-compatible TIFF writing (``fiji_tiff``) is the **fallback /
 intermediate** export path (Phase 12). Production final TIFF export through
-headless Fiji/ImageJ is Phase 14 (``fiji_runner.py``, planned).
+headless Fiji/ImageJ is Phase 14 (``fiji_runner.py``).
 
 Functions such as :func:`organize_cellprofiler_tiffs_for_fiji` reorganize
 CellProfiler outputs via an **in-process** Python loop (acceptable fallback —

@@ -1,11 +1,11 @@
-# GUI Direction (Phase 15 — 15.0 → 15.1 → 15.2)
+# GUI Direction (Phase 15 — 15.1 → 15.2)
 
 The GUI is a **front-end and workflow manager** for CellProfiler and Fiji. It
 exposes CellProfiler functionality through pipeline configuration and orchestration
 — it does **not** reimplement CellProfiler algorithms.
 
-Phase 15 ships in three steps: **15.0** (temporary Streamlit test UI — visible
-now), **15.1** (proper workflow shell), **15.2** (pipeline builder).
+Phase 15 ships in two steps: **15.1** (proper workflow shell, complete) and
+**15.2** (pipeline builder, complete).
 
 ## Product goal
 
@@ -30,7 +30,7 @@ now), **15.1** (proper workflow shell), **15.2** (pipeline builder).
 ┌─────────────────────────────────────────────────────────────┐
 │  This project — orchestration (Phases 13–14)                  │
 │  • run_cellprofiler_workflow()                              │
-│  • run_fiji_batch_export() (planned)                        │
+│  • run_fiji_batch_export()                                  │
 │  • QC, logs, results folders                                │
 └──────────────┬─────────────────────────┬────────────────────┘
                │ headless subprocess      │ headless subprocess
@@ -54,27 +54,13 @@ GUI
 
 ## Phase 15 sub-phases
 
-### Phase 15.0 — Temporary Streamlit workflow test UI
-
-**Not the final GUI.** Fast prototype so you can click-run existing workflows and
-see logs, overlays, measurements, and outputs without writing scripts.
-
-| Feature | Description |
-|---------|-------------|
-| Input folder selection | Choose image directory for batch run |
-| Pipeline load | Pick or upload existing `.cppipe` file |
-| Executable config | CellProfiler and Fiji paths (sidebar / session) |
-| Run workflow | Button → `run_cellprofiler_workflow()` (+ optional Fiji) |
-| Logs | Stream from `logs/` (stdout/stderr, workflow summary) |
-| Result preview | QC overlay PNGs, measurement CSV tables |
-| Outputs | Link or download organized result folders |
-
-Launch: `pip install -e ".[ui]"` then `streamlit run app/workflow_test_ui.py`.
-
 ### Phase 15.1 — GUI workflow shell
 
-Proper workflow shell — may evolve from or replace 15.0. Run saved pipelines and
-review results without Python scripting.
+Proper workflow shell for running saved pipelines and reviewing results without
+Python scripting or showing Fiji/CellProfiler windows.
+
+Implemented as a standard-library Tkinter shell in
+`bioimage_pipeline/gui/workflow_shell.py`, launched by `examples/run_gui.py`.
 
 | Feature | Description |
 |---------|-------------|
@@ -88,14 +74,16 @@ review results without Python scripting.
 
 ### Phase 15.2 — Pipeline builder & module exposure
 
-Configure and compose CellProfiler pipelines in the GUI.
+Configure and compose CellProfiler pipelines in the GUI. The initial builder is
+implemented in the Tkinter shell with text-preserving `.cppipe` I/O and a curated
+module catalog.
 
 | Feature | Description |
 |---------|-------------|
 | Module browser | Search/browse CP modules by name and category |
 | Parameter panels | Edit module settings → persist to `.cppipe` |
 | Pipeline editor | Add, remove, reorder modules |
-| Load / save | Read and write standard `.cppipe` JSON |
+| Load / save | Read and write standard `.cppipe` text |
 | Run from editor | Hand off to 15.1 workflow shell |
 
 ## CellProfiler modules — expose, do not reimplement
@@ -117,7 +105,8 @@ Implementation approach:
 
 1. **Catalog** — module names, categories, parameter keys (from `.cppipe` schema
    or curated metadata aligned with CellProfiler).
-2. **Editor** — read/write `.cppipe` JSON; validate structure before run.
+2. **Editor** — read/write text `.cppipe` files conservatively; validate
+   structure before run.
 3. **Execution** — always delegate to `cellprofiler -c -r -p ...`; never run
    parallel Python implementations of the same algorithms for production.
 
@@ -144,17 +133,14 @@ prototyping. The GUI **primary path** is CellProfiler. The Python engine may
 appear later as an optional "simple mode" but must not become the main product
 surface or duplicate CellProfiler module functionality.
 
-## Planned files
+## Files
 
 | File | Phase | Purpose |
 |------|-------|---------|
-| `app/workflow_test_ui.py` | 15.0 | Temporary Streamlit test UI |
-| `bioimage_pipeline/workflow_ui.py` | 15.0 | UI helpers (logs, QC, validation) |
-| `bioimage_pipeline/gui/` or `app/` | 15.1 | GUI application package |
+| `bioimage_pipeline/gui/workflow_shell.py` | 15.1 | GUI workflow shell and testable helpers |
 | `bioimage_pipeline/cppipe_io.py` | 15.2 | Load/save/parse `.cppipe` |
 | `bioimage_pipeline/pipeline_catalog.py` | 15.2 | Module metadata for browser |
 | `examples/run_gui.py` | 15.1 | Launch script |
-| `tests/test_streamlit_workflow_ui.py` | 15.0 | Test UI smoke tests |
 | `tests/test_cppipe_io.py` | 15.2 | Pipeline I/O tests |
 | `tests/test_gui_workflow.py` | 15.1 | Workflow shell tests (mocked CP) |
 
@@ -162,14 +148,15 @@ surface or duplicate CellProfiler module functionality.
 
 | Option | Pros | Notes |
 |--------|------|-------|
-| **Streamlit** | Fast prototype | **15.0 first**; may evolve into 15.1 |
-| **PyQt / PySide** | Native desktop, rich pipeline editor | Candidate for 15.1 / 15.2 |
-| **Web UI + local API** | Flexible layout | Longer setup |
+| **Tkinter** | No new dependency, available in standard Python installs | Used for 15.1 shell |
+| **PyQt / PySide** | Native desktop, rich pipeline editor | Candidate for future richer shell/editor |
+| **Web UI + local API** | Flexible layout | Candidate for future richer shell/editor |
 
-All options must call the same orchestration APIs (`analysis.py`, `cellprofiler_runner.py`, future `fiji_runner.py`).
+All options must call the same orchestration APIs (`analysis.py`,
+`cellprofiler_runner.py`, `fiji_runner.py`).
 
 ## Related docs
 
 - [DEVELOPMENT_PLAN.md](../DEVELOPMENT_PLAN.md) — Phase 15 acceptance criteria
 - [cellprofiler_workflow.md](cellprofiler_workflow.md) — headless CP orchestration
-- [fiji_headless_export.md](fiji_headless_export.md) — batch Fiji export plan
+- [fiji_headless_export.md](fiji_headless_export.md) — batch Fiji export

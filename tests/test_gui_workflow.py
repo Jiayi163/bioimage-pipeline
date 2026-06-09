@@ -1,0 +1,218 @@
+"""Tests for Phase 15.1 GUI workflow shell helpers."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+from bioimage_pipeline.analysis import CellProfilerWorkflowResult
+from bioimage_pipeline.cellprofiler_runner import CellProfilerRunResult
+from bioimage_pipeline.gui import (
+    GuiWorkflowConfig,
+    build_workflow_summary,
+    read_log_tail,
+    run_gui_workflow,
+    validate_workflow_config,
+)
+from bioimage_pipeline.gui.workflow_shell import load_measurements_preview
+
+
+def _workflow_result(results_dir: Path) -> CellProfilerWorkflowResult:
+    raw_dir = results_dir / "cellprofiler_raw"
+    measurements_dir = results_dir / "measurements"
+    masks_dir = results_dir / "masks"
+    labels_dir = results_dir / "labels"
+    qc_dir = results_dir / "qc"
+    logs_dir = results_dir / "logs"
+    for path in (raw_dir, measurements_dir, masks_dir, labels_dir, qc_dir, logs_dir):
+        path.mkdir(parents=True, exist_ok=True)
+
+    (measurements_dir / "merged_measurements.csv").write_text(
+        "Image_Number,ObjectNumber,AreaShape_Area\n1,1,42\n",
+        encoding="utf-8",
+    )
+    (masks_dir / "sample_mask.tif").write_bytes(b"mask")
+    (labels_dir / "sample_objects.tif").write_bytes(b"label")
+    (qc_dir / "sample_qc_mask_overlay.png").write_bytes(b"png")
+    stdout_log = logs_dir / "cellprofiler_stdout.log"
+    stdout_log.write_text("done", encoding="utf-8")
+
+    cp_run = CellProfilerRunResult(
+        output_dir=raw_dir,
+        command=["cellprofiler", "-c", "-r"],
+        returncode=0,
+        stdout="done",
+        stderr="",
+        log_files={"stdout": stdout_log},
+    )
+    return CellProfilerWorkflowResult(
+        results_dir=results_dir,
+        raw_output_dir=raw_dir,
+        measurements_dir=measurements_dir,
+        masks_dir=masks_dir,
+        labels_dir=labels_dir,
+        qc_dir=qc_dir,
+        logs_dir=logs_dir,
+        processed_images=["sample.tif"],
+        tables={"MyExpt_Image": pd.DataFrame({"Image_Number": [1]})},
+        table_summary={"MyExpt_Image": {"rows": 1, "columns": 1}},
+        measurements=pd.DataFrame({"Image_Number": [1], "ObjectNumber": [1]}),
+        mask_exports=[masks_dir / "sample_mask.tif"],
+        label_exports=[labels_dir / "sample_objects.tif"],
+        qc_artifacts={"sample.tif": {"mask_overlay": qc_dir / "sample_qc_mask_overlay.png"}},
+        log_files={"stdout": stdout_log},
+        cellprofiler_run=cp_run,
+        timing={
+            "cellprofiler_seconds": 1.0,
+            "fiji_export_seconds": 2.0,
+            "qc_seconds": 0.5,
+            "total_seconds": 3.5,
+        },
+        export_engine="fiji",
+        export_mode="batch",
+    )
+
+
+def test_validate_workflow_config_reports_missing_paths(tmp_path: Path) -> None:
+    config = GuiWorkflowConfig(
+        input_dir="",
+        output_dir="",
+        cppipe_path="",
+    )
+
+    errors = validate_workflow_config(config)
+
+    assert "Input folder is required." in errors
+    assert "Output folder is required." in errors
+    assert "CellProfiler pipeline file is required." in errors
+
+
+def test_validate_workflow_config_accepts_existing_paths(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "results"
+    cppipe = tmp_path / "pipeline.cppipe"
+    input_dir.mkdir()
+    (input_dir / "sample.tif").write_bytes(b"image")
+    cppipe.write_text("pipeline", encoding="utf-8")
+
+    config = GuiWorkflowConfig(input_dir=input_dir, output_dir=output_dir, cppipe_path=cppipe)
+
+    assert validate_workflow_config(config) == []
+
+
+def test_validate_workflow_config_reports_empty_input_folder(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "results"
+    cppipe = tmp_path / "pipeline.cppipe"
+    input_dir.mkdir()
+    cppipe.write_text("pipeline", encoding="utf-8")
+
+    errors = validate_workflow_config(
+        GuiWorkflowConfig(input_dir=input_dir, output_dir=output_dir, cppipe_path=cppipe)
+    )
+
+    assert errors == [f"Input folder is empty: {input_dir}"]
+
+
+def test_validate_workflow_config_reports_missing_cppipe(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    (input_dir / "sample.tif").write_bytes(b"image")
+
+    errors = validate_workflow_config(
+        GuiWorkflowConfig(
+            input_dir=input_dir,
+            output_dir=tmp_path / "results",
+            cppipe_path=tmp_path / "missing.cppipe",
+        )
+    )
+
+    assert any("CellProfiler pipeline file does not exist" in error for error in errors)
+
+
+def test_run_gui_workflow_delegates_to_headless_workflow(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "results"
+    cppipe = tmp_path / "pipeline.cppipe"
+    input_dir.mkdir()
+    (input_dir / "sample.tif").write_bytes(b"image")
+    cppipe.write_text("pipeline", encoding="utf-8")
+    calls: list[dict[str, object]] = []
+
+    def fake_runner(*args, **kwargs):
+        calls.append({"args": args, "kwargs": kwargs})
+        return _workflow_result(output_dir)
+
+    summary = run_gui_workflow(
+        GuiWorkflowConfig(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            cppipe_path=cppipe,
+            cellprofiler_executable="cellprofiler",
+            fiji_executable=None,
+            export_fiji_tiffs=True,
+            generate_qc=True,
+        ),
+        runner=fake_runner,
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["args"] == (input_dir, output_dir, cppipe)
+    assert calls[0]["kwargs"]["cellprofiler_executable"] == "cellprofiler"
+    assert calls[0]["kwargs"]["export_fiji_tiffs"] is True
+    assert summary.processed_count == 1
+    assert summary.export_engine == "fiji"
+    assert summary.export_mode == "batch"
+    assert len(summary.qc_preview_files) == 1
+
+
+def test_run_gui_workflow_reports_failed_subprocess_without_crashing(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "results"
+    cppipe = tmp_path / "pipeline.cppipe"
+    input_dir.mkdir()
+    (input_dir / "sample.tif").write_bytes(b"image")
+    cppipe.write_text("pipeline", encoding="utf-8")
+
+    def failing_runner(*args, **kwargs):
+        raise RuntimeError("CellProfiler command failed: boom")
+
+    with pytest.raises(RuntimeError, match="CellProfiler command failed: boom"):
+        run_gui_workflow(
+            GuiWorkflowConfig(
+                input_dir=input_dir,
+                output_dir=output_dir,
+                cppipe_path=cppipe,
+            ),
+            runner=failing_runner,
+        )
+
+
+def test_build_workflow_summary_lists_outputs(tmp_path: Path) -> None:
+    result = _workflow_result(tmp_path / "results")
+
+    summary = build_workflow_summary(result)
+
+    assert summary.measurement_files[0].name == "merged_measurements.csv"
+    assert summary.mask_files[0].name == "sample_mask.tif"
+    assert summary.label_files[0].name == "sample_objects.tif"
+    assert summary.qc_preview_files[0].name == "sample_qc_mask_overlay.png"
+    assert any("Processed images: 1" in line for line in summary.to_display_lines())
+
+
+def test_read_log_tail_returns_last_lines(tmp_path: Path) -> None:
+    log_path = tmp_path / "workflow.log"
+    log_path.write_text("\n".join(f"line {index}" for index in range(5)), encoding="utf-8")
+
+    assert read_log_tail(log_path, max_lines=2) == "line 3\nline 4"
+
+
+def test_load_measurements_preview_limits_rows(tmp_path: Path) -> None:
+    csv_path = tmp_path / "measurements.csv"
+    csv_path.write_text("a\n1\n2\n3\n", encoding="utf-8")
+
+    preview = load_measurements_preview(csv_path, max_rows=2)
+
+    assert preview["a"].tolist() == [1, 2]

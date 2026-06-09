@@ -27,9 +27,6 @@ test_output/
 cellprofiler_raw/
 staging/
 
-# Streamlit local config and cache
-.streamlit/
-
 # OS junk
 Thumbs.db
 .DS_Store

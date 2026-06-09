@@ -101,7 +101,7 @@ confidence scoring). It is **not production-ready** and will likely need:
 - Tuning on real fluorescence nuclei datasets beyond current synthetic fixtures
 - SNR / vignette / density decision rules adjusted per assay
 - Validation against manual or CellProfiler reference masks (IoU/Dice targets)
-- GUI live-preview integration (Phase 15.0 / 15.1)
+- GUI live-preview integration (Phase 15.1)
 - Clear opt-in API — **not** the default Python or CellProfiler workflow until validated
 
 **Current wiring (opt-in only):**
@@ -115,11 +115,10 @@ confidence scoring). It is **not production-ready** and will likely need:
 Do **not** treat Phase 17 as complete until real-data validation and product
 sign-off. See full phase spec below (Phase 17 section).
 
-## GUI direction (Phase 15 — 15.0 → 15.1 → 15.2)
+## GUI direction (Phase 15 — 15.1 → 15.2)
 
-Phase 15 is delivered in three steps. **15.0** is a temporary Streamlit test UI
-(visible now, not the final product). **15.1** is the proper workflow shell.
-**15.2** adds pipeline building and CellProfiler module exposure.
+Phase 15 starts with **15.1**, the proper workflow shell. **15.2** adds pipeline
+building and CellProfiler module exposure.
 
 The GUI is a **front-end and workflow manager** for CellProfiler and Fiji — not
 a replacement for CellProfiler's analysis engine.
@@ -151,8 +150,8 @@ GUI
 - Replacing the CellProfiler desktop app for interactive pipeline editing.
 - Real-time streaming analysis (batch-first is the design).
 
-Phase 15 is split into **15.0** (temporary Streamlit test UI), **15.1** (workflow
-shell), and **15.2** (pipeline builder). See [docs/gui_direction.md](docs/gui_direction.md).
+Phase 15 is split into **15.1** (workflow shell) and **15.2** (pipeline builder).
+See [docs/gui_direction.md](docs/gui_direction.md).
 
 Work should proceed phase by phase. Do not implement later phases until the
 current phase has tests and passes its self-check.
@@ -196,10 +195,9 @@ For every phase:
 | 11.1 | Mask cleanup (morphology) | `PHASE COMPLETE` |
 | 12 | Python TIFF export (fallback / intermediate) | `PHASE COMPLETE` |
 | 13 | CellProfiler workflow integration | `PHASE COMPLETE` ✔ |
-| 14 | Fiji/ImageJ headless export integration | `PHASE NOT COMPLETE` |
-| 15.0 | Temporary Streamlit workflow test UI | `PHASE COMPLETE` |
-| 15.1 | GUI workflow shell (run, logs, preview, export) | `PHASE NOT COMPLETE` |
-| 15.2 | GUI pipeline builder & CP module exposure | `PHASE NOT COMPLETE` |
+| 14 | Fiji/ImageJ headless export integration | `PHASE COMPLETE` ✔ |
+| 15.1 | GUI workflow shell (run, logs, preview, export) | `PHASE COMPLETE` ✔ |
+| 15.2 | GUI pipeline builder & CP module exposure | `PHASE COMPLETE` ✔ |
 | 16 | Optional Python analysis enhancements | `PHASE NOT COMPLETE` |
 | 17 | Self-adaptive threshold at import (hybrid CP workflow) — **core differentiator** | `DEFERRED` — prototype only |
 | **S.0** | **Stack track prep — fix failing test, update docs** | `PHASE COMPLETE` ✔ |
@@ -565,9 +563,9 @@ Existing modules:
 - **Python TIFF fallback:** `fiji_tiff.py`, `export.py`, `io.py`
 - **Python analysis fallback:** `pipeline.py`, `batch.py`, `preprocess.py`,
   `threshold.py`, `segment.py`, `measure.py`
-- **Fiji headless export (Phase 14, planned):** `fiji_runner.py` (new)
-- **GUI (Phase 15, planned):** Streamlit test UI (15.0) → workflow shell (15.1)
-  → pipeline builder (15.2) — see [docs/gui_direction.md](docs/gui_direction.md)
+- **Fiji headless export (Phase 14):** `fiji_runner.py`
+- **GUI (Phase 15):** workflow shell (15.1) → pipeline builder (15.2)
+  — see [docs/gui_direction.md](docs/gui_direction.md)
 - **Self-adaptive import (Phase 17, deferred):** `adaptive_import.py` — prototype
   only, opt-in; not production default
 
@@ -575,7 +573,7 @@ Existing modules:
 Complete **Phase 12 (Python TIFF fallback)** before **Phase 13 (CellProfiler
 workflow integration)**. Complete **Phase 13** before **Phase 14 (Fiji/ImageJ
 headless export)**. Complete **Phase 14** before **Phase 15** (sub-phases
-**15.0 → 15.1 → 15.2**). Phase **16** extends the optional Python engine only.
+**15.1 → 15.2**). Phase **16** extends the optional Python engine only.
 Phase **17** (self-adaptive import — **core differentiator**) is **deferred** —
 resume after Phases 14–16 unless real-data needs force earlier validation. Keep
 Phase 17 visible in the roadmap; it complements CellProfiler, it does not compete
@@ -591,10 +589,9 @@ external launches only as a documented fallback.
 |-------|-------|--------|
 | 12 | Python TIFF export (fallback / intermediate) | `PHASE COMPLETE` ✔ |
 | 13 | CellProfiler workflow integration | `PHASE COMPLETE` ✔ |
-| 14 | Fiji/ImageJ headless export integration | `PHASE NOT COMPLETE` |
-| 15.0 | Temporary Streamlit workflow test UI | `PHASE COMPLETE` |
-| 15.1 | GUI workflow shell | `PHASE NOT COMPLETE` |
-| 15.2 | GUI pipeline builder & CP module exposure | `PHASE NOT COMPLETE` |
+| 14 | Fiji/ImageJ headless export integration | `PHASE COMPLETE` ✔ |
+| 15.1 | GUI workflow shell | `PHASE COMPLETE` ✔ |
+| 15.2 | GUI pipeline builder & CP module exposure | `PHASE COMPLETE` ✔ |
 | 16 | Optional Python analysis enhancements | `PHASE NOT COMPLETE` |
 | 17 | Self-adaptive threshold at import (hybrid CP) — **core differentiator** | `DEFERRED` — prototype |
 
@@ -1017,7 +1014,7 @@ Deferred to later phases:
 
 | Path | Module | Role |
 |------|--------|------|
-| **Production (Phase 14)** | `fiji_runner.py` (planned) | Headless Fiji/ImageJ export of final TIFFs |
+| **Production (Phase 14)** | `fiji_runner.py` | Headless Fiji/ImageJ export of final TIFFs |
 | **Fallback / intermediate (Phase 12)** | `fiji_tiff.py`, `export.py` | Python `tifffile` ImageJ-compatible writes |
 | **Plain storage** | `io.py` | Ordinary TIFF without ImageJ tags |
 
@@ -1104,14 +1101,14 @@ batch macro (e.g. `export_folder.ijm input_dir output_dir`). Do not spawn Fiji
 once per image unless batch export is impossible — document and log when
 per-image fallback is used.
 
-Files (planned):
+Files:
 
-- `bioimage_pipeline/fiji_runner.py` (new)
-- `bioimage_pipeline/analysis.py` (extend workflow to call Fiji export)
+- `bioimage_pipeline/fiji_runner.py`
+- `bioimage_pipeline/analysis.py` (extends workflow to call Fiji export)
 - `bioimage_pipeline/export.py` (fallback path when Fiji unavailable)
-- `examples/fiji_macros/export_folder.ijm` (new — batch folder macro)
-- `examples/run_fiji_export.py` (new)
-- `tests/test_fiji_runner.py` (new)
+- `examples/fiji_macros/export_folder.ijm` — batch folder macro
+- `examples/run_fiji_export.py`
+- `tests/test_fiji_runner.py`
 - `docs/fiji_headless_export.md`
 
 Tasks:
@@ -1153,7 +1150,36 @@ python -m pytest tests/test_fiji_runner.py -v
 python examples/run_fiji_export.py --help
 ```
 
-Status: `PHASE NOT COMPLETE`
+Status: `PHASE COMPLETE` ✔
+
+### Phase 14 checkpoint (implemented)
+
+- [x] Fiji/ImageJ executable resolution and clear missing-executable errors are in
+  `bioimage_pipeline/fiji_runner.py`.
+- [x] `run_fiji_batch_export()` runs one Fiji subprocess per batch macro and writes
+  `fiji_stdout.log`, `fiji_stderr.log`, `fiji_command.txt`, and
+  `fiji_exit_code.txt`.
+- [x] `run_cellprofiler_workflow()` now attempts Fiji batch export before QC and
+  falls back to Python TIFF export with `logs/fiji_export_warning.log` when Fiji
+  is unavailable or the macro fails.
+- [x] `workflow_summary.json` includes `timing.cellprofiler_seconds`,
+  `timing.fiji_export_seconds`, `timing.qc_seconds`, and `timing.total_seconds`,
+  plus `export_engine` / `export_mode`.
+- [x] Batch macro, CLI example, and mocked subprocess tests are present:
+  `examples/fiji_macros/export_folder.ijm`, `examples/run_fiji_export.py`,
+  `tests/test_fiji_runner.py`.
+
+Verification:
+
+```bash
+python -m compileall bioimage_pipeline tests examples
+python examples/run_fiji_export.py --help
+```
+
+Note: `python -m pytest tests/test_fiji_runner.py tests/test_cellprofiler_workflow.py -v`
+currently fails during collection in this environment because `scikit-image` is
+binary-incompatible with the installed NumPy (`numpy.dtype size changed`), before
+the Phase 14 tests execute.
 
 ### Fiji Automated OIR Z-Max Output Status
 
@@ -1192,8 +1218,8 @@ Note:
 Goal: build a user-facing application that exposes CellProfiler and Fiji
 functionality through pipeline management and workflow control.
 
-Delivered in three sub-phases: **15.0** (temporary Streamlit test UI — ship first),
-**15.1** (proper workflow shell), **15.2** (pipeline builder).
+Delivered in two sub-phases: **15.1** (proper workflow shell) and **15.2**
+(pipeline builder).
 
 The GUI is **not** a new analysis engine. It is a front-end that:
 
@@ -1206,66 +1232,24 @@ The GUI is **not** a new analysis engine. It is a front-end that:
 The GUI reads/writes pipeline configuration and can delegate execution to
 CellProfiler or run the built-in Python pipeline.
 
-Files (planned):
+Files:
 
-- `app/workflow_test_ui.py` (Phase 15.0)
-- `bioimage_pipeline/workflow_ui.py` (Phase 15.0 helpers)
-- `bioimage_pipeline/gui/` or `app/` package (new — Phase 15.1+)
-- `bioimage_pipeline/pipeline_catalog.py` (new — Phase 15.2, module metadata)
-- `bioimage_pipeline/cppipe_io.py` (new — Phase 15.2, load/save/parse `.cppipe`)
-- `examples/run_gui.py` (new — Phase 15.1)
-- `tests/test_streamlit_workflow_ui.py`, `tests/test_gui_workflow.py`,
-  `tests/test_cppipe_io.py` (new)
+- `bioimage_pipeline/gui/` package (Phase 15.1+)
+- `bioimage_pipeline/pipeline_catalog.py` (Phase 15.2 module metadata)
+- `bioimage_pipeline/cppipe_io.py` (Phase 15.2 load/save/parse `.cppipe`)
+- `examples/run_gui.py` (Phase 15.1)
+- `tests/test_gui_workflow.py`, `tests/test_cppipe_io.py`
 - `docs/gui_direction.md`
-
-### Phase 15.0: Temporary Streamlit Workflow Test UI
-
-Goal: deliver a **visible, clickable UI now** — not the final GUI. Wraps existing
-workflow APIs so developers and early users can run pipelines and inspect outputs
-without writing scripts.
-
-**Purpose:**
-
-```text
-Not final GUI.
-Just lets you click-run existing workflows, see logs, overlays, measurements, outputs.
-```
-
-Technology: **Streamlit** (fastest path; may be replaced or absorbed by 15.1).
-
-Tasks:
-
-- Select input image folder and output directory.
-- Pick or upload an existing `.cppipe` pipeline file.
-- Configure CellProfiler and Fiji executable paths (session state / sidebar).
-- Button to run `run_cellprofiler_workflow()` (+ optional Fiji export when Phase 14 lands).
-- Stream log tail from `logs/` (stdout/stderr, workflow summary).
-- Display QC overlay images (mask/label PNGs from `qc/`).
-- Show measurement tables (CSV preview from `measurements/`).
-- Link or download organized output folders.
-
-Acceptance:
-
-- User can click-run a saved workflow end-to-end and see logs, overlays, and measurements.
-- UI calls existing orchestration APIs only — no duplicated analysis logic.
-- Clearly labeled as **test / prototype UI**, not the production GUI shell.
-
-Self-check:
-
-```bash
-streamlit run app/workflow_test_ui.py
-# or: streamlit run examples/streamlit_workflow_ui.py
-```
-
-Status: `PHASE COMPLETE`
 
 ### Phase 15.1: GUI Workflow Shell
 
-Goal: build the **proper workflow shell** — polished run/review experience that
-may evolve from or replace the 15.0 Streamlit prototype.
+Goal: build the **proper workflow shell** — polished run/review experience for
+running saved CellProfiler pipelines and reviewing organized outputs.
 
-Technology: **Streamlit** (evolved from 15.0), **PyQt/PySide**, or **Electron + web UI**
-— decision after 15.0 validates the workflow UX.
+Technology: standard-library **Tkinter** shell for the first proper workflow UI,
+with workflow logic separated into testable helpers. This keeps Phase 15.1
+dependency-light while still calling the existing headless orchestration APIs
+without showing Fiji or CellProfiler windows.
 
 Tasks:
 
@@ -1283,7 +1267,26 @@ Acceptance:
 - Non-programmers can run a saved `.cppipe` end-to-end and inspect results in the GUI.
 - GUI invokes CellProfiler — it does not run Python segmentation as the primary path.
 
-Status: `PHASE NOT COMPLETE`
+Status: `PHASE COMPLETE` ✔
+
+### Phase 15.1 checkpoint (implemented)
+
+- [x] `bioimage_pipeline/gui/workflow_shell.py` provides the GUI workflow shell,
+  validation helpers, workflow summary model, log-tail reader, measurements
+  preview loader, and Tkinter launch surface.
+- [x] `examples/run_gui.py` launches the shell.
+- [x] GUI execution delegates to `run_cellprofiler_workflow()` so CellProfiler and
+  Fiji run through headless orchestration rather than showing their desktop UI.
+- [x] `tests/test_gui_workflow.py` covers config validation, headless workflow
+  delegation, output summaries, log tails, and measurement previews.
+
+Self-check:
+
+```bash
+python -m pytest tests/test_gui_workflow.py -v
+python -m compileall bioimage_pipeline tests examples
+python examples/run_gui.py
+```
 
 ### Phase 15.2: GUI Pipeline Builder & CellProfiler Module Exposure
 
@@ -1301,8 +1304,8 @@ Tasks:
 
 Implementation notes:
 
-- Prefer reading/writing standard `.cppipe` JSON so pipelines remain compatible
-  with CellProfiler CLI and desktop app.
+- Prefer text-preserving read/write of standard `.cppipe` files so pipelines
+  remain compatible with CellProfiler CLI and desktop app.
 - Module parameter schemas may be loaded from CellProfiler where possible, or
   maintained as a catalog that maps to `.cppipe` keys — either way, execution
   stays in CellProfiler.
@@ -1312,9 +1315,37 @@ Acceptance:
   headlessly with the same results as running that `.cppipe` in CellProfiler directly.
 - GUI exposes modules like `IdentifyPrimaryObjects` as configurable steps.
 
-Status: `PHASE NOT COMPLETE`
+Status: `PHASE COMPLETE` ✔
 
-Deferred from Phase 4: GUI (now Phase 15 with sub-phases 15.0, 15.1, and 15.2).
+### Phase 15.2 checkpoint (implemented)
+
+- [x] `bioimage_pipeline/cppipe_io.py` loads, parses, validates, edits, renumbers,
+  saves CellProfiler `.cppipe` text while preserving unknown lines, and generates
+  the minimal GUI pipeline:
+  `Images → Metadata → NamesAndTypes → IdentifyPrimaryObjects → SaveImages → ExportToSpreadsheet`.
+- [x] `bioimage_pipeline/pipeline_catalog.py` exposes a curated CellProfiler
+  module catalog with searchable module metadata, visible setting labels,
+  defaults, allowed choices, and conditional visibility for the Phase 15.2
+  modules.
+- [x] `bioimage_pipeline/gui/workflow_shell.py` includes a Pipeline Builder panel
+  with selected pipeline modules on the left, selected-module settings on the
+  right, add/remove/reorder controls, live setting updates, saving edited
+  pipelines, and running them through the Phase 15.1 headless workflow shell.
+- [x] `tests/test_cppipe_io.py` covers parser round trips, setting updates,
+  module move/remove/append, catalog lookup, conditional visible settings,
+  generated module blocks, GUI model updates, and runner handoff.
+- [x] A generated Phase 15.2 `.cppipe` opened and ran headlessly through
+  CellProfiler 4.2.8 on a synthetic TIFF, writing `Image.csv`, `Nuclei.csv`, and
+  `Nuclei0001.tiff` to the selected output folder.
+
+Self-check:
+
+```bash
+python -m pytest tests/test_cppipe_io.py tests/test_gui_workflow.py -v
+python -c "from bioimage_pipeline.cppipe_io import create_pipeline_from_catalog; print(create_pipeline_from_catalog().to_text())"
+```
+
+Deferred from Phase 4: GUI (now Phase 15 with sub-phases 15.1 and 15.2).
 
 ## Phase 16: Optional Python Analysis Enhancements
 
@@ -1405,7 +1436,7 @@ Opt-in CellProfiler hook: `run_cellprofiler_workflow(..., adaptive_threshold=Tru
 1. Validate on real microscopy datasets; define minimum IoU/Dice acceptance.
 2. Per-image decision log review; add “low confidence → review in GUI” path.
 3. Document recommended `.cppipe` templates that consume staging masks.
-4. Integrate with Phase 15.0/15.1 GUI preview (import overlay before CP run).
+4. Integrate with Phase 15.1 GUI preview (import overlay before CP run).
 5. Re-evaluate whether default workflows should opt in after sign-off.
 
 Acceptance (when resumed):

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Sequence
 
 import pandas as pd
 
-from bioimage_pipeline.adaptive_import import run_self_adaptive_threshold_on_folder
 from bioimage_pipeline.batch import run_pipeline_on_folder
 from bioimage_pipeline.cellprofiler_runner import (
     RESULTS_LABELS_DIR,
@@ -33,17 +34,11 @@ from bioimage_pipeline.export import (
     export_measurements_csv,
     organize_cellprofiler_tiffs_for_fiji,
 )
-from bioimage_pipeline.qc import generate_qc_for_cellprofiler_results
-from bioimage_pipeline.measure import measure_objects
-from bioimage_pipeline.pipeline import Pipeline
-from bioimage_pipeline.preprocess import gaussian_blur
-from bioimage_pipeline.segment import (
-    clean_mask,
-    label_objects,
-    remove_small_objects_from_mask,
-    split_touching_objects,
+from bioimage_pipeline.fiji_runner import (
+    FijiExportResult,
+    format_fiji_error_summary,
+    run_fiji_batch_export,
 )
-from bioimage_pipeline.threshold import otsu_threshold
 
 AnalysisEngine = Literal["python", "cellprofiler"]
 LabelingMethod = Literal["connected", "watershed"]
@@ -51,6 +46,13 @@ _SUPPORTED_ENGINES = frozenset({"python", "cellprofiler"})
 _SUPPORTED_LABELING = frozenset({"connected", "watershed"})
 
 RESULTS_STAGING_DIR = "staging"
+
+
+def generate_qc_for_cellprofiler_results(*args: Any, **kwargs: Any) -> Any:
+    """Lazy proxy for QC generation to keep CellProfiler/Fiji imports lightweight."""
+    from bioimage_pipeline.qc import generate_qc_for_cellprofiler_results as _generate
+
+    return _generate(*args, **kwargs)
 
 
 def _validate_labeling_method(labeling_method: str) -> LabelingMethod:
@@ -83,6 +85,16 @@ def build_default_pipeline(
     call :func:`bioimage_pipeline.adaptive_import.run_self_adaptive_threshold`
     directly or use ``run_cellprofiler_workflow(..., adaptive_threshold=True)``.
     """
+    from bioimage_pipeline.measure import measure_objects
+    from bioimage_pipeline.pipeline import Pipeline
+    from bioimage_pipeline.preprocess import gaussian_blur
+    from bioimage_pipeline.segment import (
+        clean_mask,
+        label_objects,
+        remove_small_objects_from_mask,
+        split_touching_objects,
+    )
+    from bioimage_pipeline.threshold import otsu_threshold
 
     validated_labeling = _validate_labeling_method(labeling_method)
 
@@ -139,6 +151,11 @@ class CellProfilerWorkflowConfig:
     export_fiji_tiffs: bool = True
     generate_qc: bool = True
     fiji_image_pattern: str = "*.tif"
+    fiji_executable: str | Path | None = None
+    fiji_macro_path: str | Path | None = None
+    fiji_headless: bool | None = None
+    fiji_timeout: float | None = None
+    fiji_fallback_to_python: bool = True
     adaptive_threshold: bool = False
     adaptive_min_object_size: int = 20
     adaptive_image_pattern: str = "*.tif"
@@ -164,6 +181,11 @@ class CellProfilerWorkflowResult:
     qc_artifacts: dict[str, dict[str, Path]]
     log_files: dict[str, Path]
     cellprofiler_run: CellProfilerRunResult
+    timing: dict[str, float] | None = None
+    export_engine: str | None = None
+    export_mode: str | None = None
+    fiji_export_result: FijiExportResult | None = None
+    export_warnings: list[str] | None = None
     adaptive_threshold_summary: dict[str, Any] | None = None
     import_warnings: list[str] | None = None
 
@@ -201,6 +223,15 @@ class CellProfilerWorkflowResult:
             },
             "log_files": {key: str(path) for key, path in self.log_files.items()},
             "cellprofiler_returncode": self.cellprofiler_run.returncode,
+            "timing": dict(self.timing or {}),
+            "export_engine": self.export_engine,
+            "export_mode": self.export_mode,
+            "fiji_export": (
+                self.fiji_export_result.to_dict()
+                if self.fiji_export_result is not None
+                else None
+            ),
+            "export_warnings": list(self.export_warnings or []),
             "adaptive_threshold_summary": self.adaptive_threshold_summary,
             "import_warnings": list(self.import_warnings or []),
         }
@@ -411,6 +442,11 @@ def run_cellprofiler_workflow(
     export_fiji_tiffs: bool = True,
     generate_qc: bool = True,
     fiji_image_pattern: str = "*.tif",
+    fiji_executable: str | Path | None = None,
+    fiji_macro_path: str | Path | None = None,
+    fiji_headless: bool | None = None,
+    fiji_timeout: float | None = None,
+    fiji_fallback_to_python: bool = True,
     adaptive_threshold: bool = False,
     adaptive_min_object_size: int = 20,
     adaptive_image_pattern: str = "*.tif",
@@ -433,6 +469,14 @@ def run_cellprofiler_workflow(
             files under ``masks/`` and ``labels/``.
         generate_qc: Create mask/label overlay figures under ``qc/``.
         fiji_image_pattern: Glob pattern for TIFF discovery in raw CP output.
+        fiji_executable: Optional Fiji/ImageJ executable path. When omitted,
+            common paths and ``FIJI_EXECUTABLE`` are checked.
+        fiji_macro_path: Optional batch folder macro. Defaults to the bundled
+            ``examples/fiji_macros/export_folder.ijm``.
+        fiji_headless: Override platform default headless mode.
+        fiji_timeout: Optional Fiji subprocess timeout in seconds.
+        fiji_fallback_to_python: Fall back to in-process Python TIFF export when
+            Fiji is unavailable or the batch macro fails.
         adaptive_threshold: When ``True``, run experimental Phase 17 self-adaptive
             Python thresholding into ``staging/`` before CellProfiler (opt-in;
             prototype — see DEVELOPMENT_PLAN.md Phase 17).
@@ -452,6 +496,11 @@ def run_cellprofiler_workflow(
         export_fiji_tiffs=export_fiji_tiffs,
         generate_qc=generate_qc,
         fiji_image_pattern=fiji_image_pattern,
+        fiji_executable=fiji_executable,
+        fiji_macro_path=fiji_macro_path,
+        fiji_headless=fiji_headless,
+        fiji_timeout=fiji_timeout,
+        fiji_fallback_to_python=fiji_fallback_to_python,
         adaptive_threshold=adaptive_threshold,
         adaptive_min_object_size=adaptive_min_object_size,
         adaptive_image_pattern=adaptive_image_pattern,
@@ -463,10 +512,21 @@ def run_cellprofiler_workflow_from_config(
     config: CellProfilerWorkflowConfig,
 ) -> CellProfilerWorkflowResult:
     """Run :func:`run_cellprofiler_workflow` from a config object."""
+    total_started = time.perf_counter()
+    timing: dict[str, float] = {
+        "cellprofiler_seconds": 0.0,
+        "fiji_export_seconds": 0.0,
+        "qc_seconds": 0.0,
+        "total_seconds": 0.0,
+    }
     directories = _prepare_workflow_directories(Path(config.output_dir))
 
     adaptive_summary: dict[str, Any] | None = None
     if config.adaptive_threshold:
+        from bioimage_pipeline.adaptive_import import (
+            run_self_adaptive_threshold_on_folder,
+        )
+
         staging_dir = directories["results"] / RESULTS_STAGING_DIR
         adaptive_summary = run_self_adaptive_threshold_on_folder(
             config.input_dir,
@@ -480,6 +540,7 @@ def run_cellprofiler_workflow_from_config(
         for label_path in (staging_dir / "labels").glob("*.tif"):
             shutil.copy2(label_path, directories["labels"] / label_path.name)
 
+    cellprofiler_started = time.perf_counter()
     run_result = run_cellprofiler_pipeline_logged(
         cppipe_path=config.cppipe_path,
         input_dir=config.input_dir,
@@ -488,7 +549,9 @@ def run_cellprofiler_workflow_from_config(
         cellprofiler_executable=config.cellprofiler_executable,
         log_dir=directories["logs"],
     )
+    timing["cellprofiler_seconds"] = time.perf_counter() - cellprofiler_started
     if not run_result.succeeded:
+        timing["total_seconds"] = time.perf_counter() - total_started
         _write_workflow_summary(
             directories["logs"],
             CellProfilerWorkflowResult(
@@ -508,6 +571,9 @@ def run_cellprofiler_workflow_from_config(
                 qc_artifacts={},
                 log_files=run_result.log_files,
                 cellprofiler_run=run_result,
+                timing=timing,
+                export_engine=None,
+                export_mode=None,
             ),
         )
         raise RuntimeError(
@@ -544,25 +610,77 @@ def run_cellprofiler_workflow_from_config(
 
     mask_exports: list[Path] = []
     label_exports: list[Path] = []
+    fiji_export_result: FijiExportResult | None = None
+    export_engine: str | None = None
+    export_mode: str | None = None
+    export_warnings: list[str] = []
+    export_warning_log: Path | None = None
     if config.export_fiji_tiffs:
         if config.adaptive_threshold:
             mask_exports = sorted(directories["masks"].glob("*.tif"))
             label_exports = sorted(directories["labels"].glob("*.tif"))
+            export_engine = "python_adaptive_staging"
+            export_mode = "staged"
         else:
-            organized = organize_cellprofiler_tiffs_for_fiji(
-                directories["raw"],
-                directories["masks"],
-                directories["labels"],
-                pattern=config.fiji_image_pattern,
-            )
-            mask_exports = organized.masks
-            label_exports = organized.labels
+            fiji_started = time.perf_counter()
+            try:
+                fiji_export_result = run_fiji_batch_export(
+                    directories["raw"],
+                    directories["masks"],
+                    directories["labels"],
+                    macro_path=config.fiji_macro_path,
+                    fiji_executable=config.fiji_executable,
+                    headless=config.fiji_headless,
+                    timeout=config.fiji_timeout,
+                    image_pattern=config.fiji_image_pattern,
+                    log_dir=directories["logs"],
+                )
+            except (FileNotFoundError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                export_warnings.append(
+                    f"Fiji batch export unavailable; using Python TIFF fallback. {exc}"
+                )
+            finally:
+                timing["fiji_export_seconds"] = time.perf_counter() - fiji_started
+
+            if fiji_export_result is not None and fiji_export_result.succeeded:
+                mask_exports = fiji_export_result.mask_exports
+                label_exports = fiji_export_result.label_exports
+                export_engine = "fiji"
+                export_mode = "batch"
+            else:
+                if fiji_export_result is not None:
+                    export_warnings.append(
+                        "Fiji batch export failed; using Python TIFF fallback. "
+                        + format_fiji_error_summary(fiji_export_result)
+                    )
+                if not config.fiji_fallback_to_python:
+                    raise RuntimeError(
+                        "Fiji batch export failed and Python fallback is disabled."
+                    )
+                organized = organize_cellprofiler_tiffs_for_fiji(
+                    directories["raw"],
+                    directories["masks"],
+                    directories["labels"],
+                    pattern=config.fiji_image_pattern,
+                )
+                mask_exports = organized.masks
+                label_exports = organized.labels
+                export_engine = "python_fallback"
+                export_mode = "in_process"
+
+            if export_warnings:
+                export_warning_log = directories["logs"] / "fiji_export_warning.log"
+                export_warning_log.write_text(
+                    "\n".join(export_warnings),
+                    encoding="utf-8",
+                )
 
     qc_artifacts: dict[str, dict[str, Path]] = {}
     qc_image_names = processed_images
     if config.adaptive_threshold and adaptive_summary is not None:
         qc_image_names = adaptive_summary.get("processed", processed_images)
     if config.generate_qc and qc_image_names:
+        qc_started = time.perf_counter()
         qc_artifacts = generate_qc_for_cellprofiler_results(
             config.input_dir,
             directories["masks"],
@@ -570,6 +688,16 @@ def run_cellprofiler_workflow_from_config(
             directories["qc"],
             qc_image_names,
         )
+        timing["qc_seconds"] = time.perf_counter() - qc_started
+    timing["total_seconds"] = time.perf_counter() - total_started
+
+    log_files = dict(run_result.log_files)
+    if fiji_export_result is not None:
+        log_files.update(
+            {f"fiji_{key}": path for key, path in fiji_export_result.log_files.items()}
+        )
+    if export_warning_log is not None:
+        log_files["fiji_warning"] = export_warning_log
 
     result = CellProfilerWorkflowResult(
         results_dir=directories["results"].resolve(),
@@ -586,8 +714,13 @@ def run_cellprofiler_workflow_from_config(
         mask_exports=mask_exports,
         label_exports=label_exports,
         qc_artifacts=qc_artifacts,
-        log_files=run_result.log_files,
+        log_files=log_files,
         cellprofiler_run=run_result,
+        timing=timing,
+        export_engine=export_engine,
+        export_mode=export_mode,
+        fiji_export_result=fiji_export_result,
+        export_warnings=export_warnings or None,
         adaptive_threshold_summary=adaptive_summary,
         import_warnings=import_warnings or None,
     )

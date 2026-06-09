@@ -25,7 +25,7 @@ Input Images (folder)
     ↓
 CellProfiler — ONE run (.cppipe, headless)     ← Phase 13 (this doc)
     ↓  collect all outputs
-Fiji/ImageJ — ONE run (batch macro)            ← Phase 14 (planned)
+Fiji/ImageJ — ONE run (batch macro)            ← Phase 14
     ↓
 Organized results + QC + logs (with timings)
 ```

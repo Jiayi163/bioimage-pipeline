@@ -23,9 +23,6 @@ dependencies = [
 dev = [
     "pytest>=8"
 ]
-ui = [
-    "streamlit>=1.28"
-]
 qc = [
     "napari>=0.5"
 ]
