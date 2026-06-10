@@ -26,14 +26,13 @@ DEFAULT_CPPIPE_PREAMBLE = [
     "HasImagePlaneDetails:False",
     "",
 ]
-MINIMAL_GUI_PIPELINE_MODULES = (
+REQUIRED_SETUP_MODULES = (
     "Images",
     "Metadata",
     "NamesAndTypes",
-    "IdentifyPrimaryObjects",
-    "SaveImages",
-    "ExportToSpreadsheet",
+    "Groups",
 )
+MINIMAL_GUI_PIPELINE_MODULES = REQUIRED_SETUP_MODULES
 
 
 @dataclass
@@ -264,11 +263,14 @@ def update_module_setting(
     modules = list(pipeline.modules)
     module = modules[module_index]
     lines = list(module.lines)
+    updated = False
     for setting in module.settings:
         if setting.key == setting_key:
-            lines[setting.line_index] = f"{setting.key}:{value}"
-            break
-    else:
+            original = lines[setting.line_index]
+            indent = original[: len(original) - len(original.lstrip())]
+            lines[setting.line_index] = f"{indent}{setting.key}:{value}"
+            updated = True
+    if not updated:
         lines.append(f"{setting_key}:{value}")
 
     modules[module_index] = _module_from_lines(lines, module.start_line, module.module_num)

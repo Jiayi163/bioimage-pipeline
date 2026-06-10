@@ -1,10 +1,20 @@
 """GUI workflow shell package."""
 
+from bioimage_pipeline.gui.workflow_editor import (
+    EditorSession,
+    get_images_input_folder,
+    launch_cellprofiler_gui,
+    list_module_output_lines,
+    scan_detected_images,
+    set_images_input_folder,
+    window_title,
+)
 from bioimage_pipeline.gui.workflow_shell import (
     GuiWorkflowConfig,
     GuiWorkflowSummary,
     PipelineBuilderState,
     add_catalog_module_to_pipeline,
+    add_named_module_to_pipeline,
     build_workflow_summary,
     create_default_pipeline_builder_state,
     launch_workflow_shell,
@@ -20,20 +30,28 @@ from bioimage_pipeline.gui.workflow_shell import (
 )
 
 __all__ = [
+    "EditorSession",
     "GuiWorkflowConfig",
     "GuiWorkflowSummary",
     "PipelineBuilderState",
     "add_catalog_module_to_pipeline",
+    "add_named_module_to_pipeline",
     "build_workflow_summary",
     "create_default_pipeline_builder_state",
+    "get_images_input_folder",
+    "launch_cellprofiler_gui",
     "launch_workflow_shell",
+    "list_module_output_lines",
     "load_pipeline_builder_state",
     "move_pipeline_module",
     "read_log_tail",
     "remove_pipeline_module",
     "run_gui_workflow",
     "save_pipeline_builder_state",
+    "scan_detected_images",
     "select_pipeline_module",
+    "set_images_input_folder",
     "update_pipeline_module_setting",
     "validate_workflow_config",
+    "window_title",
 ]

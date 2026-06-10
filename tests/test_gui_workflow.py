@@ -84,9 +84,8 @@ def test_validate_workflow_config_reports_missing_paths(tmp_path: Path) -> None:
 
     errors = validate_workflow_config(config)
 
-    assert "Input folder is required." in errors
+    assert "Set an input folder in the Images module before running." in errors
     assert "Output folder is required." in errors
-    assert "CellProfiler pipeline file is required." in errors
 
 
 def test_validate_workflow_config_accepts_existing_paths(tmp_path: Path) -> None:
@@ -113,7 +112,7 @@ def test_validate_workflow_config_reports_empty_input_folder(tmp_path: Path) -> 
         GuiWorkflowConfig(input_dir=input_dir, output_dir=output_dir, cppipe_path=cppipe)
     )
 
-    assert errors == [f"Input folder is empty: {input_dir}"]
+    assert errors == [f"No image files detected in: {input_dir}"]
 
 
 def test_validate_workflow_config_reports_missing_cppipe(tmp_path: Path) -> None:

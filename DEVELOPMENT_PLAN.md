@@ -1347,6 +1347,38 @@ python -c "from bioimage_pipeline.cppipe_io import create_pipeline_from_catalog;
 
 Deferred from Phase 4: GUI (now Phase 15 with sub-phases 15.1 and 15.2).
 
+### Phase 15.3 editor-first refactor
+
+Goal: turn the shell into a CellProfiler-style pipeline editor.
+
+Implemented:
+
+- [x] Startup loads only the required setup modules
+  (`Images → Metadata → NamesAndTypes → Groups`); no analysis/demo/test modules.
+- [x] Phase A — Run executes the in-memory edited pipeline by materializing it to
+  a working `.cppipe`; selecting a separate pipeline file is no longer required.
+- [x] Phase B — Module deletion via toolbar button, right-click context menu, and
+  Delete/Backspace keys; the four setup modules are protected (no delete/reorder).
+- [x] Full CellProfiler module catalog (`pipeline_catalog.py`) grouped into
+  CellProfiler categories (Image Processing, Object Processing, Measurement,
+  File Processing, Data Tools, Advanced, Worm Toolbox, Other) via
+  `list_modules_by_category()`; catalog browser is now a category tree.
+
+Deferred (to implement later):
+
+- [x] Phase C — New/Open/Save/Save As menu with current-file tracking and a
+  modified/title indicator.
+- [x] Phase D — Move input-folder selection into the Images module and add a
+  "detected images" preview.
+- [x] Phase E — Surface SaveImages/ExportToSpreadsheet output paths in the UI.
+- [x] Phase F — Editor-first layout (promote pipeline + settings, demote run
+  options to a Run panel/dialog).
+
+**Architecture decision (2026-06-10):** Hybrid strategy — continue custom editor +
+execution engine; use native CellProfiler for advanced authoring. See
+[docs/architecture_decision.md](docs/architecture_decision.md) and
+[docs/cellprofiler_authoring.md](docs/cellprofiler_authoring.md).
+
 ## Phase 16: Optional Python Analysis Enhancements
 
 Goal: improve the **optional lightweight Python engine** only — for teaching,

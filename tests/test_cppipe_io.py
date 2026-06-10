@@ -33,6 +33,7 @@ from bioimage_pipeline.pipeline_catalog import (
     get_module_definition,
     list_categories,
     list_modules,
+    list_modules_by_category,
     search_modules,
 )
 
@@ -120,12 +121,62 @@ def test_module_catalog_search_and_lookup() -> None:
     names = [module.name for module in list_modules()]
 
     assert "IdentifyPrimaryObjects" in names
-    assert "Output" in list_categories()
+    assert "File Processing" in list_categories()
     assert search_modules("intensity")[0].name in {
         "MeasureObjectIntensity",
         "IdentifyPrimaryObjects",
     }
-    assert get_module_definition("ExportToSpreadsheet").category == "Output"
+    assert get_module_definition("ExportToSpreadsheet").category == "File Processing"
+
+
+def test_catalog_covers_core_cellprofiler_modules() -> None:
+    names = {module.name for module in list_modules()}
+
+    expected = {
+        "CreateBatchFiles",
+        "ColorToGray",
+        "CorrectIlluminationCalculate",
+        "CorrectIlluminationApply",
+        "Crop",
+        "EnhanceOrSuppressFeatures",
+        "ImageMath",
+        "RescaleIntensity",
+        "Resize",
+        "Threshold",
+        "IdentifyPrimaryObjects",
+        "IdentifySecondaryObjects",
+        "IdentifyTertiaryObjects",
+        "FilterObjects",
+        "TrackObjects",
+        "Watershed",
+        "MeasureObjectIntensity",
+        "MeasureGranularity",
+        "MeasureColocalization",
+        "SaveImages",
+        "ExportToSpreadsheet",
+        "ExportToDatabase",
+        "FlagImage",
+        "CalculateMath",
+        "UntangleWorms",
+    }
+    missing = expected - names
+    assert not missing, f"Missing catalog modules: {sorted(missing)}"
+
+
+def test_catalog_grouping_excludes_input_and_is_ordered() -> None:
+    grouped = list_modules_by_category()
+    categories = [category for category, _ in grouped]
+
+    assert "Input" not in categories
+    assert categories[0] == "Image Processing"
+    assert {"Object Processing", "Measurement", "File Processing", "Advanced"} <= set(categories)
+
+    for _, modules in grouped:
+        sorted_names = [module.name.lower() for module in modules]
+        assert sorted_names == sorted(sorted_names)
+
+    create_batch = get_module_definition("CreateBatchFiles")
+    assert create_batch.category == "File Processing"
 
 
 def test_phase_15_2_catalog_includes_setting_metadata() -> None:
@@ -133,7 +184,7 @@ def test_phase_15_2_catalog_includes_setting_metadata() -> None:
     parameters = {parameter.label: parameter for parameter in module.parameters}
 
     assert module.display_name == "SaveImages"
-    assert module.category == "Output"
+    assert module.category == "File Processing"
     assert parameters["Select the type of image to save"].choices == (
         "Image",
         "Mask",
@@ -168,6 +219,70 @@ def test_conditional_visible_settings_follow_current_values() -> None:
     assert "Enter single file name" in single_name_labels
 
 
+def test_names_and_types_visible_settings_show_one_assignment_block() -> None:
+    names_and_types = get_module_definition("NamesAndTypes")
+    visible_labels = [
+        parameter.label for parameter in names_and_types.visible_parameters()
+    ]
+
+    assert visible_labels.count("Name to assign these images") == 1
+    assert visible_labels.count("Select the image type") == 1
+    assert visible_labels.count("Set intensity range from") == 1
+    assert visible_labels.count("Maximum intensity") == 0
+    assert "Name to assign these objects" not in visible_labels
+    assert visible_labels[:4] == [
+        "Assign a name to",
+        "Select the image type",
+        "Name to assign these images",
+        "Image set matching method",
+    ]
+
+
+def test_names_and_types_visible_settings_follow_manual_intensity_choice() -> None:
+    names_and_types = get_module_definition("NamesAndTypes")
+    manual_labels = [
+        parameter.label
+        for parameter in names_and_types.visible_parameters(
+            {"Set intensity range from": "Manual"}
+        )
+    ]
+
+    assert "Maximum intensity" in manual_labels
+    assert manual_labels.count("Maximum intensity") == 1
+
+
+def test_names_and_types_cppipe_preserves_hidden_per_assignment_settings() -> None:
+    pipeline = create_pipeline_from_catalog()
+    names_module = next(
+        module for module in pipeline.modules if module.name == "NamesAndTypes"
+    )
+    text = pipeline.to_text()
+
+    assert names_module.lines.count("    Name to assign these images:DNA") == 2
+    assert "    Name to assign these objects:Cell" in text
+    assert names_module.lines.count("    Select the image type:Grayscale image") == 2
+    assert names_module.lines.count("    Set intensity range from:Image metadata") == 2
+    assert names_module.lines.count("    Maximum intensity:255.0") == 2
+    assert "NamesAndTypes:" in text
+
+
+def test_update_module_setting_syncs_duplicate_setting_keys() -> None:
+    pipeline = create_pipeline_from_catalog()
+    names_index = next(
+        index
+        for index, module in enumerate(pipeline.modules)
+        if module.name == "NamesAndTypes"
+    )
+
+    updated = update_module_setting(
+        pipeline, names_index, "Name to assign these images", "DAPI",
+    )
+    module = updated.modules[names_index]
+
+    assert module.lines.count("    Name to assign these images:DAPI") == 2
+    assert module.lines.count("    Name to assign these images:DNA") == 0
+
+
 def test_pipeline_builder_state_adds_and_saves_catalog_module(tmp_path: Path) -> None:
     cppipe = tmp_path / "pipeline.cppipe"
     cppipe.write_text(SAMPLE_CPPIPE, encoding="utf-8")
@@ -183,34 +298,45 @@ def test_pipeline_builder_state_adds_and_saves_catalog_module(tmp_path: Path) ->
     assert loaded.modules[-1].name == "SaveImages"
 
 
-def test_generated_minimal_cppipe_contains_expected_module_blocks() -> None:
+def test_generated_default_pipeline_contains_only_required_setup_modules() -> None:
     pipeline = create_pipeline_from_catalog()
     text = pipeline.to_text()
 
     assert [module.name for module in pipeline.modules] == list(MINIMAL_GUI_PIPELINE_MODULES)
+    assert [module.name for module in pipeline.modules] == [
+        "Images",
+        "Metadata",
+        "NamesAndTypes",
+        "Groups",
+    ]
     for index, module_name in enumerate(MINIMAL_GUI_PIPELINE_MODULES, start=1):
         assert f"{module_name}:[module_num:{index}|" in text
-    assert "Name the primary objects to be identified:Nuclei" in text
-    assert "ExportToSpreadsheet:" in text
+    assert "IdentifyPrimaryObjects:" not in text
+    assert "ExportToSpreadsheet:" not in text
+    assert "SaveImages:" not in text
 
 
 def test_gui_builder_model_updates_settings_and_order() -> None:
     state = create_default_pipeline_builder_state()
 
-    state = select_pipeline_module(state, 3)
-    state = update_pipeline_module_setting(
-        state,
-        3,
-        "Name the primary objects to be identified",
-        "Cells",
+    assert [module.name for module in state.pipeline.modules] == [
+        "Images",
+        "Metadata",
+        "NamesAndTypes",
+        "Groups",
+    ]
+
+    state = select_pipeline_module(state, 1)
+    state = update_pipeline_module_setting(state, 1, "Extract metadata?", "Yes")
+    assert any(
+        "Extract metadata?:Yes" in line for line in state.pipeline.modules[1].lines
     )
-    assert state.pipeline.modules[3].settings[1].value == "Cells"
 
-    state = move_pipeline_module(state, 3, 2)
-    assert state.pipeline.modules[2].name == "IdentifyPrimaryObjects"
+    state = move_pipeline_module(state, 3, 1)
+    assert state.pipeline.modules[1].name == "Groups"
 
-    state = remove_pipeline_module(state, 2)
-    assert "IdentifyPrimaryObjects" not in [module.name for module in state.pipeline.modules]
+    state = remove_pipeline_module(state, 1)
+    assert "Groups" not in [module.name for module in state.pipeline.modules]
 
 
 def test_generated_pipeline_can_be_passed_to_cellprofiler_runner(tmp_path: Path) -> None:
