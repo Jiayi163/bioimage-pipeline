@@ -24,6 +24,35 @@ from bioimage_pipeline.gui.workflow_shell import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _mock_discovered_cellprofiler(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    if request.node.name == "test_validate_workflow_config_reports_missing_cellprofiler":
+        return
+
+    executable = tmp_path / "CellProfiler.exe"
+    executable.write_text("stub", encoding="utf-8")
+
+    def _find(value: str | Path | None = None) -> Path | None:
+        if value is None:
+            return executable.resolve()
+        text = str(value).strip()
+        if not text or text == "cellprofiler":
+            return executable.resolve()
+        path = Path(text)
+        if path.is_file():
+            return path.resolve()
+        return None
+
+    monkeypatch.setattr(
+        "bioimage_pipeline.gui.workflow_shell.find_cellprofiler_executable",
+        _find,
+    )
+
+
 def _workflow_result(results_dir: Path) -> CellProfilerWorkflowResult:
     raw_dir = results_dir / "cellprofiler_raw"
     measurements_dir = results_dir / "measurements"

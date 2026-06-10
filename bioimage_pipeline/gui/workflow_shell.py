@@ -19,7 +19,14 @@ from typing import Any, Callable
 import pandas as pd
 
 from bioimage_pipeline.analysis import CellProfilerWorkflowResult
-from bioimage_pipeline.fiji_runner import find_fiji_executable
+from bioimage_pipeline.cellprofiler_runner import find_cellprofiler_executable
+from bioimage_pipeline.fiji_runner import find_fiji_executable, fiji_not_found_message
+from bioimage_pipeline.gui.run_settings import (
+    build_cached_run_executables,
+    collect_run_settings_from_values,
+    save_gui_run_settings,
+    sync_discovered_executables_to_settings,
+)
 from bioimage_pipeline.z_projection import (
     PYTHON_OIR_MISSING_DEPS_MESSAGE,
     iter_oir_files,
@@ -366,8 +373,11 @@ def validate_workflow_config(config: GuiWorkflowConfig) -> list[str]:
 
     if not str(config.cellprofiler_executable).strip():
         errors.append("CellProfiler executable is required.")
-    if config.fiji_executable and not Path(config.fiji_executable).is_file():
-        errors.append(f"Fiji executable does not exist: {config.fiji_executable}")
+    elif find_cellprofiler_executable(config.cellprofiler_executable) is None:
+        errors.append("CellProfiler not found. Please select executable.")
+    if config.fiji_executable:
+        if find_fiji_executable(config.fiji_executable) is None:
+            errors.append(f"Fiji executable does not exist: {config.fiji_executable}")
     if config.fiji_macro_path and not Path(config.fiji_macro_path).is_file():
         errors.append(f"Fiji macro does not exist: {config.fiji_macro_path}")
 
@@ -380,10 +390,7 @@ def validate_workflow_config(config: GuiWorkflowConfig) -> list[str]:
         elif engine == "python" and not python_oir_dependencies_available():
             errors.append(PYTHON_OIR_MISSING_DEPS_MESSAGE)
         elif engine == "fiji" and find_fiji_executable(config.fiji_executable) is None:
-            errors.append(
-                "Fiji executable is required for OIR projection. "
-                "Set the Fiji executable field or FIJI_EXECUTABLE."
-            )
+            errors.append(fiji_not_found_message())
     return errors
 
 
@@ -539,6 +546,12 @@ def launch_workflow_shell() -> None:
     editor_session = EditorSession()
     builder_state: dict[str, PipelineBuilderState | None] = {"state": None}
     run_entries: dict[str, tk.Entry] = {}
+    executable_cache = build_cached_run_executables()
+    sync_discovered_executables_to_settings(executable_cache)
+    startup_warnings = [
+        *executable_cache.cellprofiler.warnings,
+        *executable_cache.fiji.warnings,
+    ]
 
     def pipeline_text() -> str:
         state = builder_state["state"]
@@ -820,10 +833,13 @@ def launch_workflow_shell() -> None:
 
     add_run_row(0, "Output folder", "output_dir", browse="folder")
     add_run_row(1, "CellProfiler executable", "cellprofiler_executable")
-    run_entries["cellprofiler_executable"].insert(0, "cellprofiler")
+    run_entries["cellprofiler_executable"].insert(
+        0,
+        executable_cache.cellprofiler.display_value,
+    )
     add_run_row(2, "Fiji executable", "fiji_executable")
-    if os.environ.get("FIJI_EXECUTABLE"):
-        run_entries["fiji_executable"].insert(0, os.environ["FIJI_EXECUTABLE"])
+    if executable_cache.fiji.display_value:
+        run_entries["fiji_executable"].insert(0, executable_cache.fiji.display_value)
     add_run_row(3, "Fiji macro", "fiji_macro_path")
 
     ttk.Label(run_panel, text="OIR projection engine").grid(
@@ -852,7 +868,17 @@ def launch_workflow_shell() -> None:
         side="left", padx=(12, 0),
     )
 
-    status = tk.StringVar(value="Ready.")
+    status = tk.StringVar(
+        value=(
+            startup_warnings[0]
+            if len(startup_warnings) == 1
+            else (
+                f"{len(startup_warnings)} startup warning(s). See output after run."
+                if startup_warnings
+                else "Ready."
+            )
+        ),
+    )
     ttk.Label(run_panel, textvariable=status).grid(row=6, column=0, columnspan=3, sticky="w")
 
     output_text = tk.Text(run_panel, height=6, wrap="word")
@@ -1254,6 +1280,13 @@ def launch_workflow_shell() -> None:
             messagebox.showerror("Invalid workflow settings", "\n".join(errors))
             return
 
+        save_gui_run_settings(
+            collect_run_settings_from_values(
+                cellprofiler_executable=config.cellprofiler_executable,
+                fiji_executable=str(config.fiji_executable or ""),
+            )
+        )
+
         run_button.configure(state="disabled")
         status.set("Running headless CellProfiler/Fiji workflow...")
         write_output("Workflow started.\n")
@@ -1367,6 +1400,23 @@ def launch_workflow_shell() -> None:
     )
     catalog_tree.bind("<Double-1>", lambda _e: add_selected_module() if selected_catalog_module_name() else None)
     catalog_query.bind("<Return>", lambda _e: search_catalog())
+
+    if startup_warnings:
+        write_output("\n".join(startup_warnings))
+
+    def persist_current_run_settings() -> None:
+        save_gui_run_settings(
+            collect_run_settings_from_values(
+                cellprofiler_executable=run_entries["cellprofiler_executable"].get(),
+                fiji_executable=run_entries["fiji_executable"].get(),
+            )
+        )
+
+    def on_close() -> None:
+        persist_current_run_settings()
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
 
     file_new()
     refresh_title()

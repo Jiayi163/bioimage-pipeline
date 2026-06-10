@@ -98,9 +98,9 @@ def test_run_cellprofiler_pipeline_calls_subprocess(
     assert str(output_dir) in command
 
 
-@patch("bioimage_pipeline.cellprofiler_runner.shutil.which", return_value=None)
+@patch("bioimage_pipeline.cellprofiler_runner.find_cellprofiler_executable", return_value=None)
 def test_run_cellprofiler_pipeline_raises_when_not_installed(
-    mock_which: MagicMock,
+    _mock_find: MagicMock,
     tmp_path: Path,
 ) -> None:
     cppipe = tmp_path / "pipeline.cppipe"
@@ -108,7 +108,7 @@ def test_run_cellprofiler_pipeline_raises_when_not_installed(
     input_dir = tmp_path / "input"
     input_dir.mkdir()
 
-    with pytest.raises(RuntimeError, match="executable not found"):
+    with pytest.raises(RuntimeError, match="CellProfiler not found"):
         run_cellprofiler_pipeline(cppipe, input_dir, tmp_path / "output")
 
 
@@ -169,7 +169,7 @@ def test_run_cellprofiler_pipeline_custom_executable_missing_raises(
     input_dir = tmp_path / "input"
     input_dir.mkdir()
 
-    with pytest.raises(RuntimeError, match="executable not found"):
+    with pytest.raises(RuntimeError, match="CellProfiler not found"):
         run_cellprofiler_pipeline(
             cppipe,
             input_dir,

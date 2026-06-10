@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import platform
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -73,16 +75,93 @@ def _resolve_existing_path(path: str | Path, label: str) -> Path:
     return resolved
 
 
+def _windows_cellprofiler_candidates() -> list[Path]:
+    """Return common Windows CellProfiler install paths (shallow lookup only)."""
+    candidates: list[Path] = []
+    program_files = os.environ.get("ProgramFiles")
+    if program_files:
+        base = Path(program_files)
+        candidates.append(base / "CellProfiler" / "CellProfiler.exe")
+        try:
+            candidates.extend(sorted(base.glob("CellProfiler*/CellProfiler.exe")))
+        except OSError:
+            pass
+    candidates.append(
+        Path.home()
+        / "AppData"
+        / "Local"
+        / "Programs"
+        / "CellProfiler"
+        / "CellProfiler.exe"
+    )
+    candidates.append(Path.home() / "Desktop" / "CellProfiler" / "CellProfiler.exe")
+    return candidates
+
+
+def _unix_cellprofiler_candidates() -> list[Path]:
+    return [
+        Path("/Applications/CellProfiler.app/Contents/MacOS/CellProfiler"),
+        Path.home() / "Applications" / "CellProfiler.app" / "Contents" / "MacOS" / "CellProfiler",
+        Path("/usr/local/bin/cellprofiler"),
+    ]
+
+
+def find_cellprofiler_executable(explicit: str | Path | None = None) -> Path | None:
+    """Resolve a CellProfiler executable path.
+
+    When *explicit* is provided, return it when the path exists or is on ``PATH``.
+    Otherwise search ``CELLPROFILER_EXECUTABLE``, ``PATH``, and common install
+    locations (Windows only for install-path scan).
+    """
+    if explicit is not None:
+        value = str(explicit).strip()
+        if not value:
+            return None
+        path = Path(value)
+        if path.is_file():
+            return path.resolve()
+        found = shutil.which(value)
+        if found:
+            return Path(found).resolve()
+        return None
+
+    env_value = os.environ.get("CELLPROFILER_EXECUTABLE")
+    if env_value:
+        path = Path(env_value)
+        if path.is_file():
+            return path.resolve()
+
+    for which_name in ("cellprofiler", "CellProfiler", "CellProfiler.exe"):
+        found = shutil.which(which_name)
+        if found:
+            return Path(found).resolve()
+
+    candidates = (
+        _windows_cellprofiler_candidates()
+        if platform.system() == "Windows"
+        else _unix_cellprofiler_candidates()
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
+def cellprofiler_not_found_message() -> str:
+    """Return guidance when CellProfiler cannot be resolved."""
+    return (
+        "CellProfiler not found. Please select executable, install CellProfiler, "
+        "add it to PATH, or set CELLPROFILER_EXECUTABLE."
+    )
+
+
 def _validate_cellprofiler_executable(cellprofiler_executable: str) -> None:
-    executable_path = Path(cellprofiler_executable)
-    if executable_path.is_file():
-        return
-    if shutil.which(cellprofiler_executable) is not None:
+    if find_cellprofiler_executable(cellprofiler_executable) is not None:
         return
 
     raise RuntimeError(
-        f"CellProfiler executable not found: {cellprofiler_executable}. "
-        "Install CellProfiler or pass a valid path via cellprofiler_executable."
+        f"{cellprofiler_not_found_message()} "
+        f"Tried: {cellprofiler_executable!r}."
     )
 
 

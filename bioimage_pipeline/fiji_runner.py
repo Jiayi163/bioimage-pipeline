@@ -138,17 +138,83 @@ def suggest_imagej1_executable(executable: Path) -> Path | None:
     return None
 
 
+def _fiji_launchers_in_dir(directory: Path) -> list[Path]:
+    """Return known Fiji/ImageJ launcher executables inside *directory*."""
+    if not directory.is_dir():
+        return []
+    launchers: list[Path] = []
+    for name in (
+        "fiji-windows-x64.exe",
+        "fiji-windows.exe",
+        "ImageJ-win64.exe",
+        "ImageJ.exe",
+    ):
+        path = directory / name
+        if path.is_file():
+            launchers.append(path.resolve())
+    return launchers
+
+
+def _dedupe_paths(candidates: list[Path]) -> list[Path]:
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(resolved)
+    return unique
+
+
 def _windows_fiji_candidates() -> list[Path]:
     candidates: list[Path] = []
     program_files = os.environ.get("ProgramFiles")
     program_files_x86 = os.environ.get("ProgramFiles(x86)")
-    for base in (program_files, program_files_x86, Path.home()):
-        if not base:
+    local_app_data = os.environ.get("LocalAppData")
+    home = Path.home()
+
+    fixed_dirs = [
+        home / "Fiji.app",
+        home / "Fiji",
+        home / "Desktop" / "Fiji.app",
+        home / "Desktop" / "Fiji",
+        home / "Downloads" / "Fiji.app",
+        home / "Downloads" / "Fiji",
+    ]
+    if local_app_data:
+        fixed_dirs.extend(
+            [
+                Path(local_app_data) / "Programs" / "Fiji.app",
+                Path(local_app_data) / "Programs" / "Fiji",
+            ]
+        )
+    for base in (program_files, program_files_x86):
+        if base:
+            fixed_dirs.extend(
+                [
+                    Path(base) / "Fiji.app",
+                    Path(base) / "Fiji",
+                ]
+            )
+
+    for directory in fixed_dirs:
+        candidates.extend(_fiji_launchers_in_dir(directory))
+
+    for program_root in (program_files, program_files_x86):
+        if not program_root:
             continue
-        fiji_dir = Path(base) / "Fiji.app"
-        candidates.append(fiji_dir / "fiji-windows-x64.exe")
-        candidates.append(fiji_dir / "ImageJ-win64.exe")
-    return candidates
+        root_path = Path(program_root)
+        if not root_path.is_dir():
+            continue
+        try:
+            for folder in root_path.glob("Fiji*"):
+                if folder.is_dir():
+                    candidates.extend(_fiji_launchers_in_dir(folder))
+        except OSError:
+            continue
+
+    return _dedupe_paths(candidates)
 
 
 def _unix_fiji_candidates() -> list[Path]:
@@ -163,10 +229,17 @@ def _unix_fiji_candidates() -> list[Path]:
 def find_fiji_executable(explicit: str | Path | None = None) -> Path | None:
     """Resolve a Fiji/ImageJ executable path."""
     if explicit is not None:
-        path = Path(explicit)
-        if path.is_file():
-            return path.resolve()
-        raise FileNotFoundError(f"Fiji executable not found: {path}")
+        value = str(explicit).strip()
+        if not value:
+            explicit = None
+        else:
+            path = Path(value)
+            if path.is_file():
+                return path.resolve()
+            found = shutil.which(value)
+            if found:
+                return Path(found).resolve()
+            return None
 
     for env_name in ("FIJI_EXECUTABLE", "IMAGEJ_EXECUTABLE", "FIJI_PATH"):
         env_value = os.environ.get(env_name)
@@ -175,7 +248,13 @@ def find_fiji_executable(explicit: str | Path | None = None) -> Path | None:
             if path.is_file():
                 return path.resolve()
 
-    for which_name in ("fiji-windows-x64.exe", "ImageJ-win64.exe", "ImageJ-linux64"):
+    for which_name in (
+        "fiji-windows-x64.exe",
+        "fiji-windows.exe",
+        "ImageJ-win64.exe",
+        "ImageJ-linux64",
+        "fiji",
+    ):
         found = shutil.which(which_name)
         if found:
             return Path(found).resolve()
@@ -256,6 +335,8 @@ def run_fiji_macro(
 
     executable = find_fiji_executable(fiji_executable)
     if executable is None:
+        if fiji_executable is not None and str(fiji_executable).strip():
+            raise FileNotFoundError(f"Fiji executable not found: {fiji_executable}")
         raise FileNotFoundError(fiji_not_found_message())
 
     use_headless = default_fiji_headless() if headless is None else headless
