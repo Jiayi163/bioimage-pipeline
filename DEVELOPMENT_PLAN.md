@@ -1188,17 +1188,27 @@ Status: `PHASE COMPLETE` ✔
 Implemented:
 
 - Finds input `.oir` files recursively.
-- Builds expected `.tif` output names.
-- Generates a manual-run Fiji macro using **Bio-Formats Windowless Importer**.
-- Runs the intended Z Project Max Intensity macro path from Fiji GUI mode.
-- Verifies that expected output files exist before reporting files as processed.
+- Builds expected `.tif` output names under `<output>/oir_projection/`.
+- **GUI (Run workflow panel):** OIR projection engine selector (`python` | `fiji`),
+  Fiji executable path (with `FIJI_EXECUTABLE` fallback), and automatic engine
+  default when `aicsimageio` is unavailable.
+- **Fiji engine:** writes a generated macro with embedded paths to
+  `logs/stacking_zmax_generated.ijm`, launches ImageJ/Fiji (non-headless by
+  default for Bio-Formats `.oir` compatibility), and captures
+  `fiji_oir_projection_{stdout,stderr,command}.log`.
+- Uses **Bio-Formats Windowless Importer** → Z Project Max Intensity → saveAs TIFF
+  (same logic as the working manual `Stacking+Drectly.ijm` macro).
+- Verifies expected output files exist; renames mismatched TIFFs when Fiji saves
+  under a different basename.
+- **Python engine:** optional `aicsimageio`/`bfio` path with a clear error when
+  dependencies are missing.
 
-Validation result:
+Validation result (CLI / manual macro):
 
 - Fiji reference output and Python-generated/manual-macro output are
   **pixel-identical**.
 
-Validated:
+Validated (CLI / manual macro):
 
 - Same input `.oir` files.
 - Same output filenames.
@@ -1206,12 +1216,26 @@ Validated:
 - Same image shapes.
 - Same pixel values (`compare_outputs.py` reported identical TIFF arrays).
 
+Validated (GUI workflow — OIR stack projection):
+
+- [x] OIR stack test through **Run workflow** panel with **OIR projection engine:
+  Fiji** and a configured Fiji executable.
+- [x] Projected TIFFs written to `<output>/oir_projection/` (e.g.
+  `DQMI+4CHI+Ploy A_0007.oir` → `DQMI+4CHI+Ploy A_0007.tif`, including filenames
+  with spaces and `+`).
+- [x] `logs/oir_projection_summary.json` records engine, inputs, outputs, and
+  processed/failed files.
+- [x] Automated tests in `tests/test_oir_zmax_batch.py` and
+  `tests/test_gui_workflow.py` cover engine selection, Fiji launch, output
+  reconciliation, and log artifacts.
+
 Note:
 
-- Command-line Fiji macro execution for `.oir` import remains avoided because it
-  can trigger `java.lang.VerifyError` in `loci.plugins.in.MainDialog` on some
-  Fiji/Bio-Formats/Java combinations. The accepted path is to generate the
-  `.ijm` file from Python and run it manually from the Fiji GUI.
+- Headless `--headless` Fiji macro execution for `.oir` import remains unreliable
+  on some Fiji/Bio-Formats/Java combinations (`java.lang.VerifyError` in
+  `loci.plugins.in.MainDialog`). The GUI workflow runs the generated macro via
+  ImageJ/Fiji **without** `--headless` by default. A manual-run copy can still be
+  written to `oir_projection/run_oir_zmax_manual.ijm` for debugging.
 
 ## Phase 15: GUI — CellProfiler & Fiji Workflow Front-End
 
@@ -1278,7 +1302,10 @@ Status: `PHASE COMPLETE` ✔
 - [x] GUI execution delegates to `run_cellprofiler_workflow()` so CellProfiler and
   Fiji run through headless orchestration rather than showing their desktop UI.
 - [x] `tests/test_gui_workflow.py` covers config validation, headless workflow
-  delegation, output summaries, log tails, and measurement previews.
+  delegation, output summaries, log tails, measurement previews, and OIR
+  projection engine handoff.
+- [x] **OIR stack projection through GUI:** validated on real `.oir` inputs via
+  Run workflow panel (Fiji engine, `oir_projection/` outputs, summary logs).
 
 Self-check:
 

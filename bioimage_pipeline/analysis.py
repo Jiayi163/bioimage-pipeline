@@ -46,6 +46,7 @@ _SUPPORTED_ENGINES = frozenset({"python", "cellprofiler"})
 _SUPPORTED_LABELING = frozenset({"connected", "watershed"})
 
 RESULTS_STAGING_DIR = "staging"
+RESULTS_OIR_PROJECTION_DIR = "oir_projection"
 
 
 def generate_qc_for_cellprofiler_results(*args: Any, **kwargs: Any) -> Any:
@@ -156,6 +157,7 @@ class CellProfilerWorkflowConfig:
     fiji_headless: bool | None = None
     fiji_timeout: float | None = None
     fiji_fallback_to_python: bool = True
+    oir_projection_engine: str | None = None
     adaptive_threshold: bool = False
     adaptive_min_object_size: int = 20
     adaptive_image_pattern: str = "*.tif"
@@ -404,6 +406,99 @@ def run_analysis(
     return _run_cellprofiler_analysis(config)
 
 
+def _format_oir_projection_failure(failed: list[dict[str, Any]]) -> str:
+    return "\n".join(
+        f"- {item.get('file', 'unknown')}: {item.get('error', 'unknown error')}"
+        for item in failed
+    )
+
+
+def _prepare_cellprofiler_input_dir(
+    input_dir: Path,
+    *,
+    results_dir: Path,
+    logs_dir: Path,
+    oir_projection_engine: str | None = None,
+    fiji_executable: str | Path | None = None,
+    fiji_headless: bool | None = None,
+    fiji_timeout: float | None = None,
+) -> tuple[Path, Path | None]:
+    """Project ``.oir`` stacks to TIFF when needed and return the CP input folder."""
+    from bioimage_pipeline.oir_zmax_batch import (
+        OirZmaxEngine,
+        run_oir_zmax_batch,
+    )
+    from bioimage_pipeline.z_projection import iter_oir_files
+
+    source_dir = input_dir.resolve()
+    oir_files = list(iter_oir_files(source_dir))
+    if not oir_files:
+        return source_dir, None
+
+    projection_dir = results_dir / RESULTS_OIR_PROJECTION_DIR
+    engine: OirZmaxEngine = (
+        oir_projection_engine  # type: ignore[assignment]
+        if oir_projection_engine in {"python", "fiji", "auto"}
+        else "auto"
+    )
+    result = run_oir_zmax_batch(
+        source_dir,
+        projection_dir,
+        engine=engine,
+        logs_dir=logs_dir,
+        fiji_executable=fiji_executable,
+        fiji_headless=fiji_headless,
+        fiji_timeout=fiji_timeout,
+    )
+    summary_path = logs_dir / "oir_projection_summary.json"
+    summary_payload: dict[str, Any] = {
+        "input_dir": str(result.input_dir),
+        "output_dir": str(result.output_dir),
+        "engine": result.engine,
+        "input_oir_files": [str(pair.input_oir) for pair in result.file_pairs],
+        "output_tif_paths": [str(pair.output_tif) for pair in result.file_pairs],
+        "processed": list(result.processed),
+        "failed": list(result.failed),
+        "files_created_in_output_dir": list(result.files_created),
+        "remapped_outputs": list(result.remapped_outputs),
+        "file_pairs": [
+            {
+                "input_oir": str(pair.input_oir),
+                "output_tif": str(pair.output_tif),
+            }
+            for pair in result.file_pairs
+        ],
+    }
+    if result.fiji_executable is not None:
+        summary_payload["fiji_executable"] = str(result.fiji_executable)
+    if result.fiji_headless is not None:
+        summary_payload["fiji_headless"] = result.fiji_headless
+    if result.fiji_returncode is not None:
+        summary_payload["fiji_returncode"] = result.fiji_returncode
+    if result.generated_macro_path is not None:
+        summary_payload["generated_macro"] = str(result.generated_macro_path)
+    if result.fiji_log_files:
+        summary_payload["fiji_log_files"] = {
+            key: str(path) for key, path in result.fiji_log_files.items()
+        }
+    summary_path.write_text(
+        json.dumps(summary_payload, indent=2),
+        encoding="utf-8",
+    )
+    if result.failed:
+        raise RuntimeError(
+            "OIR Z-max projection failed for one or more files:\n"
+            + _format_oir_projection_failure(result.failed)
+        )
+    if not result.processed:
+        raise RuntimeError(
+            "Input folder contains .oir files but OIR Z-max produced no projected "
+            "TIFF files. Install aicsimageio/bfio or switch OIR projection engine "
+            "to Fiji."
+        )
+    return projection_dir.resolve(), summary_path
+
+
 def _prepare_workflow_directories(results_dir: Path) -> dict[str, Path]:
     directories = {
         "results": results_dir,
@@ -447,6 +542,7 @@ def run_cellprofiler_workflow(
     fiji_headless: bool | None = None,
     fiji_timeout: float | None = None,
     fiji_fallback_to_python: bool = True,
+    oir_projection_engine: str | None = None,
     adaptive_threshold: bool = False,
     adaptive_min_object_size: int = 20,
     adaptive_image_pattern: str = "*.tif",
@@ -501,6 +597,7 @@ def run_cellprofiler_workflow(
         fiji_headless=fiji_headless,
         fiji_timeout=fiji_timeout,
         fiji_fallback_to_python=fiji_fallback_to_python,
+        oir_projection_engine=oir_projection_engine,
         adaptive_threshold=adaptive_threshold,
         adaptive_min_object_size=adaptive_min_object_size,
         adaptive_image_pattern=adaptive_image_pattern,
@@ -520,6 +617,15 @@ def run_cellprofiler_workflow_from_config(
         "total_seconds": 0.0,
     }
     directories = _prepare_workflow_directories(Path(config.output_dir))
+    cellprofiler_input_dir, oir_projection_log = _prepare_cellprofiler_input_dir(
+        Path(config.input_dir),
+        results_dir=directories["results"],
+        logs_dir=directories["logs"],
+        oir_projection_engine=config.oir_projection_engine,
+        fiji_executable=config.fiji_executable,
+        fiji_headless=config.fiji_headless,
+        fiji_timeout=config.fiji_timeout,
+    )
 
     adaptive_summary: dict[str, Any] | None = None
     if config.adaptive_threshold:
@@ -543,7 +649,7 @@ def run_cellprofiler_workflow_from_config(
     cellprofiler_started = time.perf_counter()
     run_result = run_cellprofiler_pipeline_logged(
         cppipe_path=config.cppipe_path,
-        input_dir=config.input_dir,
+        input_dir=cellprofiler_input_dir,
         output_dir=directories["raw"],
         extra_args=config.cellprofiler_extra_args,
         cellprofiler_executable=config.cellprofiler_executable,
@@ -682,7 +788,7 @@ def run_cellprofiler_workflow_from_config(
     if config.generate_qc and qc_image_names:
         qc_started = time.perf_counter()
         qc_artifacts = generate_qc_for_cellprofiler_results(
-            config.input_dir,
+            cellprofiler_input_dir,
             directories["masks"],
             directories["labels"],
             directories["qc"],
@@ -692,6 +798,8 @@ def run_cellprofiler_workflow_from_config(
     timing["total_seconds"] = time.perf_counter() - total_started
 
     log_files = dict(run_result.log_files)
+    if oir_projection_log is not None:
+        log_files["oir_projection"] = oir_projection_log
     if fiji_export_result is not None:
         log_files.update(
             {f"fiji_{key}": path for key, path in fiji_export_result.log_files.items()}

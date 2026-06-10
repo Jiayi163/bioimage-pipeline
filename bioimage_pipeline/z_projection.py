@@ -10,8 +10,23 @@ import numpy as np
 from bioimage_pipeline.io import save_tiff
 
 
+PYTHON_OIR_MISSING_DEPS_MESSAGE = (
+    "Python OIR projection requires aicsimageio/bfio. "
+    "Install them or switch OIR projection engine to Fiji."
+)
+
+
 class OirPythonReadError(RuntimeError):
     """Raised when the optional Python .oir reader cannot load a file."""
+
+
+def python_oir_dependencies_available() -> bool:
+    """Return ``True`` when the optional Python ``.oir`` reader can be imported."""
+    try:
+        import aicsimageio  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
 
 def oir_output_filename(source_name: str) -> str:
@@ -45,20 +60,14 @@ def format_oir_read_dependency_error(exc: Exception) -> str:
     message = str(exc).strip() or exc.__class__.__name__
     lowered = message.lower()
 
-    if (
+    if isinstance(exc, ImportError) or (
         "java backend is not available" in lowered
         or "bfio" in lowered
         or "bioformats" in lowered
         or "aicsimageio" in lowered
-        or isinstance(exc, ImportError)
+        or "no module named 'aicsimageio'" in lowered
     ):
-        return (
-            "Python .oir reading failed because the aicsimageio/bfio dependency "
-            f"is unavailable or misconfigured on this machine.\n"
-            f"Details: {message}\n"
-            "Recommended fix: run with --engine fiji and pass your Fiji executable "
-            "via --fiji or FIJI_EXECUTABLE."
-        )
+        return PYTHON_OIR_MISSING_DEPS_MESSAGE
 
     return (
         "Python .oir reading failed. This workflow is intended to run through "

@@ -19,6 +19,12 @@ from typing import Any, Callable
 import pandas as pd
 
 from bioimage_pipeline.analysis import CellProfilerWorkflowResult
+from bioimage_pipeline.fiji_runner import find_fiji_executable
+from bioimage_pipeline.z_projection import (
+    PYTHON_OIR_MISSING_DEPS_MESSAGE,
+    iter_oir_files,
+    python_oir_dependencies_available,
+)
 from bioimage_pipeline.cppipe_io import (
     REQUIRED_SETUP_MODULES,
     CppipePipeline,
@@ -63,6 +69,7 @@ class GuiWorkflowConfig:
     fiji_macro_path: str | Path | None = None
     export_fiji_tiffs: bool = True
     generate_qc: bool = True
+    oir_projection_engine: str = "python"
 
 
 @dataclass
@@ -320,6 +327,18 @@ def save_pipeline_builder_state(state: PipelineBuilderState, path: str | Path) -
     return save_cppipe(state.pipeline, path)
 
 
+def default_oir_projection_engine_choice(
+    *,
+    fiji_executable: str | Path | None = None,
+) -> str:
+    """Return the GUI default OIR projection engine for this machine."""
+    if python_oir_dependencies_available():
+        return "python"
+    if find_fiji_executable(fiji_executable) is not None:
+        return "fiji"
+    return "python"
+
+
 def validate_workflow_config(config: GuiWorkflowConfig) -> list[str]:
     """Return validation errors for a GUI workflow config."""
     errors: list[str] = []
@@ -351,6 +370,20 @@ def validate_workflow_config(config: GuiWorkflowConfig) -> list[str]:
         errors.append(f"Fiji executable does not exist: {config.fiji_executable}")
     if config.fiji_macro_path and not Path(config.fiji_macro_path).is_file():
         errors.append(f"Fiji macro does not exist: {config.fiji_macro_path}")
+
+    if input_dir is not None and list(iter_oir_files(input_dir)):
+        engine = (config.oir_projection_engine or "python").strip().lower()
+        if engine not in {"python", "fiji"}:
+            errors.append(
+                "OIR projection engine must be 'python' or 'fiji'."
+            )
+        elif engine == "python" and not python_oir_dependencies_available():
+            errors.append(PYTHON_OIR_MISSING_DEPS_MESSAGE)
+        elif engine == "fiji" and find_fiji_executable(config.fiji_executable) is None:
+            errors.append(
+                "Fiji executable is required for OIR projection. "
+                "Set the Fiji executable field or FIJI_EXECUTABLE."
+            )
     return errors
 
 
@@ -471,6 +504,7 @@ def run_gui_workflow(
         fiji_macro_path=config.fiji_macro_path,
         export_fiji_tiffs=config.export_fiji_tiffs,
         generate_qc=config.generate_qc,
+        oir_projection_engine=config.oir_projection_engine,
     )
     return build_workflow_summary(result)
 
@@ -788,28 +822,47 @@ def launch_workflow_shell() -> None:
     add_run_row(1, "CellProfiler executable", "cellprofiler_executable")
     run_entries["cellprofiler_executable"].insert(0, "cellprofiler")
     add_run_row(2, "Fiji executable", "fiji_executable")
+    if os.environ.get("FIJI_EXECUTABLE"):
+        run_entries["fiji_executable"].insert(0, os.environ["FIJI_EXECUTABLE"])
     add_run_row(3, "Fiji macro", "fiji_macro_path")
+
+    ttk.Label(run_panel, text="OIR projection engine").grid(
+        row=4, column=0, sticky="w", pady=2,
+    )
+    oir_projection_engine = tk.StringVar(
+        value=default_oir_projection_engine_choice(
+            fiji_executable=run_entries["fiji_executable"].get().strip() or None,
+        ),
+    )
+    oir_engine_combo = ttk.Combobox(
+        run_panel,
+        textvariable=oir_projection_engine,
+        values=("python", "fiji"),
+        state="readonly",
+        width=12,
+    )
+    oir_engine_combo.grid(row=4, column=1, sticky="w", padx=(8, 8), pady=2)
 
     export_fiji = tk.BooleanVar(value=True)
     generate_qc = tk.BooleanVar(value=True)
     opts = ttk.Frame(run_panel)
-    opts.grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
+    opts.grid(row=5, column=0, columnspan=3, sticky="w", pady=(4, 0))
     ttk.Checkbutton(opts, text="Run Fiji headless export", variable=export_fiji).pack(side="left")
     ttk.Checkbutton(opts, text="Generate QC overlays", variable=generate_qc).pack(
         side="left", padx=(12, 0),
     )
 
     status = tk.StringVar(value="Ready.")
-    ttk.Label(run_panel, textvariable=status).grid(row=5, column=0, columnspan=3, sticky="w")
+    ttk.Label(run_panel, textvariable=status).grid(row=6, column=0, columnspan=3, sticky="w")
 
     output_text = tk.Text(run_panel, height=6, wrap="word")
-    output_text.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+    output_text.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(4, 0))
 
     results_preview = ttk.Label(run_panel, anchor="w", justify="left")
-    results_preview.grid(row=7, column=0, columnspan=3, sticky="w", pady=(6, 0))
+    results_preview.grid(row=8, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
     run_buttons = ttk.Frame(run_panel)
-    run_buttons.grid(row=8, column=0, columnspan=3, sticky="w", pady=(6, 0))
+    run_buttons.grid(row=9, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
     def write_output(text: str) -> None:
         output_text.delete("1.0", "end")
@@ -1169,6 +1222,7 @@ def launch_workflow_shell() -> None:
             fiji_macro_path=optional_value("fiji_macro_path"),
             export_fiji_tiffs=export_fiji.get(),
             generate_qc=generate_qc.get(),
+            oir_projection_engine=oir_projection_engine.get().strip() or "python",
         )
 
     def run_async() -> None:
@@ -1193,6 +1247,7 @@ def launch_workflow_shell() -> None:
             fiji_macro_path=config.fiji_macro_path,
             export_fiji_tiffs=config.export_fiji_tiffs,
             generate_qc=config.generate_qc,
+            oir_projection_engine=config.oir_projection_engine,
         )
         errors = validate_workflow_config(config)
         if errors:
@@ -1207,9 +1262,9 @@ def launch_workflow_shell() -> None:
             try:
                 summary = run_gui_workflow(config)
             except Exception as exc:
-                root.after(0, lambda: _finish_error(exc))
+                root.after(0, lambda exc=exc: _finish_error(exc))
                 return
-            root.after(0, lambda: _finish_success(summary))
+            root.after(0, lambda summary=summary: _finish_success(summary))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1244,8 +1299,10 @@ def launch_workflow_shell() -> None:
         _show_results_preview(summary)
 
     def _finish_error(exc: Exception) -> None:
+        import traceback
+
         status.set("Workflow failed.")
-        write_output(str(exc))
+        write_output("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
         run_button.configure(state="normal")
 
     def open_results() -> None:

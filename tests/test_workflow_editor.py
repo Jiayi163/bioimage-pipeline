@@ -42,6 +42,17 @@ def test_scan_detected_images_finds_tiffs(tmp_path: Path) -> None:
     assert [p.name for p in found] == ["a.tif"]
 
 
+def test_scan_detected_images_finds_nested_oir_files(tmp_path: Path) -> None:
+    nested = tmp_path / "plate_a"
+    nested.mkdir()
+    (nested / "sample.oir").write_bytes(b"oir")
+    (tmp_path / "skip.txt").write_text("skip", encoding="utf-8")
+
+    found = scan_detected_images(tmp_path)
+
+    assert [p.name for p in found] == ["sample.oir"]
+
+
 def test_list_module_output_lines_includes_save_and_export() -> None:
     from bioimage_pipeline.gui import add_named_module_to_pipeline
 

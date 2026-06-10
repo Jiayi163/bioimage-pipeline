@@ -6,13 +6,22 @@ import subprocess
 import sys
 from pathlib import Path
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 from bioimage_pipeline.fiji_runner import default_fiji_headless, extract_fiji_errors
 from bioimage_pipeline.oir_zmax_batch import (
     DEFAULT_MACRO_PATH,
+    FIJI_OIR_COMMAND_LOG,
+    FIJI_OIR_STDERR_LOG,
+    FIJI_OIR_STDOUT_LOG,
+    GENERATED_MACRO_NAME,
     build_manual_oir_zmax_macro,
+    build_oir_zmax_macro,
     run_oir_zmax_batch,
+    write_manual_oir_zmax_macro,
+    write_oir_zmax_generated_macro,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -41,18 +50,244 @@ def test_run_oir_zmax_batch_missing_input_raises(tmp_path: Path) -> None:
         run_oir_zmax_batch(tmp_path / "missing", tmp_path / "out", engine="python")
 
 
-def test_run_oir_zmax_batch_default_engine_writes_manual_macro(tmp_path: Path) -> None:
+def test_run_oir_zmax_batch_default_engine_uses_fiji_when_python_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "output"
     input_dir.mkdir()
     (input_dir / "sample.oir").write_bytes(b"")
 
-    result = run_oir_zmax_batch(input_dir, output_dir)
+    monkeypatch.setattr(
+        "bioimage_pipeline.oir_zmax_batch.python_oir_dependencies_available",
+        lambda: False,
+    )
+    fiji_exe = tmp_path / "ImageJ-win64.exe"
+    fiji_exe.write_text("stub", encoding="utf-8")
 
-    assert result.engine == "fiji-manual-macro"
-    assert result.manual_macro_path is not None
-    assert result.manual_macro_path.is_file()
-    macro_text = result.manual_macro_path.read_text(encoding="utf-8")
+    with patch(
+        "bioimage_pipeline.oir_zmax_batch._run_fiji_oir_zmax_batch",
+        return_value=MagicMock(
+            input_dir=input_dir.resolve(),
+            output_dir=output_dir.resolve(),
+            engine="fiji",
+            processed=["sample.tif"],
+            failed=[],
+            file_pairs=[],
+            fiji_executable=fiji_exe.resolve(),
+        ),
+    ) as fiji_batch:
+        result = run_oir_zmax_batch(
+            input_dir,
+            output_dir,
+            fiji_executable=fiji_exe,
+        )
+
+    fiji_batch.assert_called_once()
+    assert result.engine == "fiji"
+
+
+def test_run_oir_zmax_batch_python_engine_requires_dependencies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    (input_dir / "sample.oir").write_bytes(b"")
+
+    monkeypatch.setattr(
+        "bioimage_pipeline.oir_zmax_batch.python_oir_dependencies_available",
+        lambda: False,
+    )
+
+    with pytest.raises(RuntimeError, match="aicsimageio/bfio"):
+        run_oir_zmax_batch(input_dir, output_dir, engine="python")
+
+
+def test_run_oir_zmax_batch_fiji_engine_uses_configured_executable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    (input_dir / "sample.oir").write_bytes(b"")
+
+    monkeypatch.setattr(
+        "bioimage_pipeline.oir_zmax_batch.python_oir_dependencies_available",
+        lambda: True,
+    )
+    fiji_exe = tmp_path / "ImageJ-win64.exe"
+    fiji_exe.write_text("stub", encoding="utf-8")
+
+    with patch(
+        "bioimage_pipeline.fiji_runner.run_fiji_macro",
+    ) as run_macro:
+        from bioimage_pipeline.fiji_runner import FijiRunResult
+
+        (output_dir / "sample.tif").write_bytes(b"tiff")
+        run_macro.return_value = FijiRunResult(
+            command=[str(fiji_exe), "--headless"],
+            returncode=0,
+            stdout="",
+            stderr="",
+            macro_path=DEFAULT_MACRO_PATH,
+            executable=fiji_exe.resolve(),
+        )
+
+        result = run_oir_zmax_batch(
+            input_dir,
+            output_dir,
+            engine="fiji",
+            fiji_executable=fiji_exe,
+            logs_dir=tmp_path / "logs",
+        )
+
+    run_macro.assert_called_once()
+    assert run_macro.call_args.args[0].name == GENERATED_MACRO_NAME
+    assert run_macro.call_args.kwargs["fiji_executable"] == fiji_exe.resolve()
+    assert run_macro.call_args.kwargs["headless"] is False
+    assert result.engine == "fiji"
+    assert result.fiji_executable == fiji_exe.resolve()
+    assert result.output_dir == output_dir.resolve()
+
+
+def test_run_oir_zmax_batch_fiji_engine_honors_fiji_executable_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    (input_dir / "sample.oir").write_bytes(b"")
+
+    fiji_exe = tmp_path / "ImageJ-win64.exe"
+    fiji_exe.write_text("stub", encoding="utf-8")
+    monkeypatch.setenv("FIJI_EXECUTABLE", str(fiji_exe))
+
+    with patch(
+        "bioimage_pipeline.fiji_runner.run_fiji_macro",
+    ) as run_macro:
+        from bioimage_pipeline.fiji_runner import FijiRunResult
+
+        run_macro.return_value = FijiRunResult(
+            command=[str(fiji_exe), "--headless"],
+            returncode=0,
+            stdout="",
+            stderr="",
+            macro_path=DEFAULT_MACRO_PATH,
+            executable=fiji_exe.resolve(),
+        )
+        (output_dir / "sample.tif").write_bytes(b"tiff")
+
+        result = run_oir_zmax_batch(
+            input_dir,
+            output_dir,
+            engine="fiji",
+            logs_dir=tmp_path / "logs",
+        )
+
+    assert run_macro.call_args.kwargs["fiji_executable"] == fiji_exe.resolve()
+    assert result.fiji_executable == fiji_exe.resolve()
+
+
+def test_build_oir_zmax_macro_embeds_paths_for_special_filenames(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input with spaces"
+    output_dir = tmp_path / "output+folder"
+    input_dir.mkdir()
+    output_dir.mkdir()
+
+    macro_text = build_oir_zmax_macro(input_dir, output_dir)
+
+    assert "getArgument();" not in macro_text
+    assert str(input_dir.resolve()).replace("\\", "/") in macro_text
+    assert str(output_dir.resolve()).replace("\\", "/") in macro_text
+    assert 'open=[" + inputPath + "]' in macro_text
+    assert "[OIR] input path:" in macro_text
+    assert "[OIR] saveAs called" in macro_text
+
+
+def test_reconcile_fiji_outputs_renames_mismatched_tif(tmp_path: Path) -> None:
+    from bioimage_pipeline.oir_zmax_batch import OirFilePair, _reconcile_fiji_outputs
+
+    output_dir = tmp_path / "oir_projection"
+    output_dir.mkdir()
+    oir_path = tmp_path / "DQMI+4CHI+Ploy A_0007.oir"
+    expected_tif = output_dir / "DQMI+4CHI+Ploy A_0007.tif"
+    alternate_tif = output_dir / "alternate_name.tif"
+    alternate_tif.write_bytes(b"tiff")
+
+    pair = OirFilePair(input_oir=oir_path, output_tif=expected_tif)
+    processed, failed, files_created, remapped = _reconcile_fiji_outputs(
+        output_dir,
+        [pair],
+    )
+
+    assert failed == []
+    assert processed == ["DQMI+4CHI+Ploy A_0007.tif"]
+    assert expected_tif.is_file()
+    assert not alternate_tif.is_file()
+    assert remapped == [
+        {"from": str(alternate_tif), "to": str(expected_tif)},
+    ]
+
+
+def test_run_fiji_batch_writes_projection_logs(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "oir_projection"
+    logs_dir = tmp_path / "logs"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    (input_dir / "sample.oir").write_bytes(b"")
+
+    fiji_exe = tmp_path / "ImageJ-win64.exe"
+    fiji_exe.write_text("stub", encoding="utf-8")
+
+    with patch("bioimage_pipeline.fiji_runner.run_fiji_macro") as run_macro:
+        from bioimage_pipeline.fiji_runner import FijiRunResult
+
+        generated = write_oir_zmax_generated_macro(logs_dir, input_dir, output_dir)
+        (output_dir / "sample.tif").write_bytes(b"tiff")
+        run_macro.return_value = FijiRunResult(
+            command=[str(fiji_exe), "-macro", str(generated)],
+            returncode=0,
+            stdout="[OIR] saveAs called",
+            stderr="",
+            macro_path=generated,
+            executable=fiji_exe.resolve(),
+        )
+
+        result = run_oir_zmax_batch(
+            input_dir,
+            output_dir,
+            engine="fiji",
+            logs_dir=logs_dir,
+            fiji_executable=fiji_exe,
+        )
+
+    assert result.generated_macro_path == generated
+    assert generated.is_file()
+    assert (logs_dir / FIJI_OIR_STDOUT_LOG).read_text(encoding="utf-8") == "[OIR] saveAs called"
+    assert (logs_dir / FIJI_OIR_STDERR_LOG).exists()
+    assert (logs_dir / FIJI_OIR_COMMAND_LOG).exists()
+    assert result.fiji_log_files["stdout"] == logs_dir / FIJI_OIR_STDOUT_LOG
+
+
+def test_run_oir_zmax_batch_manual_macro_helper(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    (input_dir / "sample.oir").write_bytes(b"")
+
+    result = write_manual_oir_zmax_macro(input_dir, output_dir)
+    macro_text = result.read_text(encoding="utf-8")
+
+    assert result.is_file()
     assert "Bio-Formats Windowless Importer" in macro_text
     assert "sample.oir" not in macro_text  # file discovery happens inside Fiji
     assert str(input_dir.resolve()).replace("\\", "/") in macro_text

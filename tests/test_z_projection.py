@@ -76,4 +76,4 @@ def test_format_oir_read_dependency_error_mentions_fiji() -> None:
         RuntimeError("Java backend is not available")
     )
     assert "aicsimageio/bfio" in message
-    assert "--engine fiji" in message
+    assert "Fiji" in message

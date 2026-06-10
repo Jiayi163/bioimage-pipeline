@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -16,7 +18,10 @@ from bioimage_pipeline.gui import (
     run_gui_workflow,
     validate_workflow_config,
 )
-from bioimage_pipeline.gui.workflow_shell import load_measurements_preview
+from bioimage_pipeline.gui.workflow_shell import (
+    default_oir_projection_engine_choice,
+    load_measurements_preview,
+)
 
 
 def _workflow_result(results_dir: Path) -> CellProfilerWorkflowResult:
@@ -167,6 +172,75 @@ def test_run_gui_workflow_delegates_to_headless_workflow(tmp_path: Path) -> None
     assert len(summary.qc_preview_files) == 1
 
 
+def test_run_gui_workflow_passes_oir_projection_engine(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "results"
+    cppipe = tmp_path / "pipeline.cppipe"
+    input_dir.mkdir()
+    (input_dir / "sample.tif").write_bytes(b"image")
+    cppipe.write_text("pipeline", encoding="utf-8")
+    calls: list[dict[str, object]] = []
+
+    def fake_runner(*args, **kwargs):
+        calls.append({"kwargs": kwargs})
+        return _workflow_result(output_dir)
+
+    run_gui_workflow(
+        GuiWorkflowConfig(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            cppipe_path=cppipe,
+            oir_projection_engine="fiji",
+        ),
+        runner=fake_runner,
+    )
+
+    assert calls[0]["kwargs"]["oir_projection_engine"] == "fiji"
+
+
+def test_validate_workflow_config_reports_missing_python_oir_dependencies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "results"
+    cppipe = tmp_path / "pipeline.cppipe"
+    input_dir.mkdir()
+    (input_dir / "sample.oir").write_bytes(b"oir")
+    cppipe.write_text("pipeline", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "bioimage_pipeline.gui.workflow_shell.python_oir_dependencies_available",
+        lambda: False,
+    )
+
+    errors = validate_workflow_config(
+        GuiWorkflowConfig(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            cppipe_path=cppipe,
+            oir_projection_engine="python",
+        )
+    )
+
+    assert any("aicsimageio/bfio" in error for error in errors)
+
+
+def test_default_oir_projection_engine_choice_prefers_fiji_without_python_deps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fiji_exe = tmp_path / "ImageJ-win64.exe"
+    fiji_exe.write_text("stub", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "bioimage_pipeline.gui.workflow_shell.python_oir_dependencies_available",
+        lambda: False,
+    )
+
+    assert default_oir_projection_engine_choice(fiji_executable=fiji_exe) == "fiji"
+
+
 def test_run_gui_workflow_reports_failed_subprocess_without_crashing(tmp_path: Path) -> None:
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "results"
@@ -206,6 +280,65 @@ def test_read_log_tail_returns_last_lines(tmp_path: Path) -> None:
     log_path.write_text("\n".join(f"line {index}" for index in range(5)), encoding="utf-8")
 
     assert read_log_tail(log_path, max_lines=2) == "line 3\nline 4"
+
+
+def test_prepare_cellprofiler_input_dir_projects_oir(tmp_path: Path) -> None:
+    from bioimage_pipeline.analysis import _prepare_cellprofiler_input_dir
+
+    input_dir = tmp_path / "input"
+    nested = input_dir / "plate"
+    results_dir = tmp_path / "results"
+    logs_dir = results_dir / "logs"
+    nested.mkdir(parents=True)
+    logs_dir.mkdir(parents=True)
+    oir_path = nested / "sample.oir"
+    oir_path.write_bytes(b"oir")
+
+    projection_dir = results_dir / "oir_projection"
+    fiji_exe = tmp_path / "ImageJ-win64.exe"
+    fiji_exe.write_text("stub", encoding="utf-8")
+    with patch(
+        "bioimage_pipeline.oir_zmax_batch.run_oir_zmax_batch",
+        return_value=MagicMock(
+            input_dir=input_dir.resolve(),
+            output_dir=projection_dir.resolve(),
+            engine="fiji",
+            processed=["sample.tif"],
+            failed=[],
+            files_created=[str(projection_dir / "sample.tif")],
+            remapped_outputs=[],
+            file_pairs=[MagicMock(input_oir=oir_path, output_tif=projection_dir / "sample.tif")],
+            fiji_executable=fiji_exe.resolve(),
+            fiji_headless=False,
+            fiji_returncode=0,
+            generated_macro_path=logs_dir / "stacking_zmax_generated.ijm",
+            fiji_log_files={},
+        ),
+    ) as oir_batch:
+        resolved_input, summary_log = _prepare_cellprofiler_input_dir(
+            input_dir,
+            results_dir=results_dir,
+            logs_dir=logs_dir,
+            oir_projection_engine="fiji",
+            fiji_executable=fiji_exe,
+        )
+
+    oir_batch.assert_called_once_with(
+        input_dir.resolve(),
+        projection_dir,
+        engine="fiji",
+        logs_dir=logs_dir,
+        fiji_executable=fiji_exe,
+        fiji_headless=None,
+        fiji_timeout=None,
+    )
+    assert resolved_input == projection_dir.resolve()
+    assert summary_log == logs_dir / "oir_projection_summary.json"
+    summary = json.loads(summary_log.read_text(encoding="utf-8"))
+    assert summary["engine"] == "fiji"
+    assert summary["fiji_executable"] == str(fiji_exe.resolve())
+    assert summary["input_oir_files"] == [str(oir_path.resolve())]
+    assert summary["output_tif_paths"] == [str((projection_dir / "sample.tif").resolve())]
 
 
 def test_load_measurements_preview_limits_rows(tmp_path: Path) -> None:

@@ -97,13 +97,21 @@ def scan_detected_images(
     patterns: Iterable[str] = IMAGE_GLOB_PATTERNS,
     limit: int = 500,
 ) -> list[Path]:
-    """List image-like files under a folder (non-recursive, sorted)."""
+    """List image-like files under a folder (sorted).
+
+    Common raster patterns are scanned non-recursively. ``.oir`` files are also
+    discovered recursively so nested Olympus stacks match the batch workflow.
+    """
+    from bioimage_pipeline.z_projection import iter_oir_files
+
     root = Path(folder)
     if not root.is_dir():
         return []
     seen: set[str] = set()
     found: list[Path] = []
     for pattern in patterns:
+        if pattern == "*.oir":
+            continue
         for path in sorted(root.glob(pattern)):
             if not path.is_file():
                 continue
@@ -114,7 +122,15 @@ def scan_detected_images(
             found.append(path)
             if len(found) >= limit:
                 return found
-    return found
+    for path in iter_oir_files(root):
+        key = path.name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(path)
+        if len(found) >= limit:
+            return found
+    return sorted(found, key=lambda item: item.name.lower())
 
 
 def resolve_workflow_input_dir(state: PipelineBuilderState) -> Path:
