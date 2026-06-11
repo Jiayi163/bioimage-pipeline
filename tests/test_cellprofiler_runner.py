@@ -8,9 +8,13 @@ import pytest
 
 from bioimage_pipeline.cellprofiler_runner import (
     _build_cellprofiler_command,
+    cellprofiler_run_succeeded,
     classify_cellprofiler_table,
     discover_cellprofiler_csv_files,
+    extract_cellprofiler_errors,
+    inspect_cellprofiler_logs,
     load_cellprofiler_measurements,
+    load_cellprofiler_measurements_lenient,
     merge_cellprofiler_tables,
     read_cellprofiler_csv,
     run_cellprofiler_pipeline,
@@ -234,6 +238,70 @@ def test_load_cellprofiler_measurements_empty_dir_raises(tmp_path) -> None:
         load_cellprofiler_measurements(empty_dir)
 
 
+def test_load_cellprofiler_measurements_lenient_empty_dir_returns_warning(
+    tmp_path,
+) -> None:
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+
+    load_result = load_cellprofiler_measurements_lenient(empty_dir)
+
+    assert load_result.tables == {}
+    assert load_result.metadata == {}
+    assert any("No CSV files" in warning for warning in load_result.warnings)
+
+
+def test_extract_cellprofiler_errors_detects_module_failures() -> None:
+    stderr = (
+        "Running pipeline\n"
+        "Encountered error in module IdentifyPrimaryObjects\n"
+        "Traceback (most recent call last):\n"
+        "  File \"cp\", line 1, in <module>\n"
+        "KeyError: 'DNA'\n"
+    )
+    errors = extract_cellprofiler_errors("", stderr)
+
+    assert errors == [
+        "Encountered error in module IdentifyPrimaryObjects",
+        "KeyError: 'DNA'",
+    ]
+
+
+def test_extract_cellprofiler_errors_surfaces_saveimages_assertion() -> None:
+    stderr = (
+        "Times reported are CPU seconds\n"
+        "Error detected during run of module SaveImages\n"
+        "Traceback (most recent call last):\n"
+        "  File \"cellprofiler/modules/saveimages.py\", line 42, in run\n"
+        "    self.save_image(...)\n"
+        "AssertionError: Feature FileName_OriginalImage does not exist\n"
+    )
+    errors = extract_cellprofiler_errors("", stderr)
+
+    assert errors == [
+        "Error detected during run of module SaveImages",
+        "AssertionError: Feature FileName_OriginalImage does not exist",
+    ]
+    assert not any("Traceback" in line for line in errors)
+
+
+def test_inspect_cellprofiler_logs_reads_on_disk_files(tmp_path) -> None:
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "cellprofiler_stdout.log").write_text(
+        "Times reported are CPU seconds\n",
+        encoding="utf-8",
+    )
+    (log_dir / "cellprofiler_stderr.log").write_text(
+        "Error in module ExportToSpreadsheet: missing input image\n",
+        encoding="utf-8",
+    )
+
+    errors = inspect_cellprofiler_logs(log_dir=log_dir)
+
+    assert errors == ["Error in module ExportToSpreadsheet: missing input image"]
+
+
 def test_load_cellprofiler_measurements_missing_dir_raises(tmp_path) -> None:
     with pytest.raises(FileNotFoundError, match="Output directory"):
         load_cellprofiler_measurements(tmp_path / "missing")
@@ -443,3 +511,9 @@ def test_merge_cellprofiler_tables_image_only() -> None:
     assert merged is not None
     assert list(merged.columns) == ["Image_Number", "FileName", "Plate_Name"]
     assert not warnings
+
+
+def test_cellprofiler_run_succeeded_rejects_pipeline_load_failures() -> None:
+    assert cellprofiler_run_succeeded(0, stderr="Failed to load pipeline") is False
+    assert cellprofiler_run_succeeded(0, stderr="Times reported are CPU") is True
+    assert cellprofiler_run_succeeded(1, stderr="") is False

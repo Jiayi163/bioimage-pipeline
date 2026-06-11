@@ -24,7 +24,9 @@ from bioimage_pipeline.cellprofiler_runner import (
     format_cellprofiler_failure,
     copy_cellprofiler_measurements,
     extract_processed_image_names,
+    inspect_cellprofiler_logs,
     load_cellprofiler_measurements,
+    load_cellprofiler_measurements_lenient,
     merge_cellprofiler_tables,
     run_cellprofiler_pipeline,
     run_cellprofiler_pipeline_logged,
@@ -696,7 +698,51 @@ def run_cellprofiler_workflow_from_config(
         directories["raw"],
         directories["measurements"],
     )
-    load_result = load_cellprofiler_measurements(directories["measurements"])
+    log_errors = inspect_cellprofiler_logs(
+        log_dir=directories["logs"],
+        log_files=run_result.log_files,
+        stdout=run_result.stdout,
+        stderr=run_result.stderr,
+    )
+    if log_errors:
+        timing["total_seconds"] = time.perf_counter() - total_started
+        _write_workflow_summary(
+            directories["logs"],
+            CellProfilerWorkflowResult(
+                results_dir=directories["results"].resolve(),
+                raw_output_dir=directories["raw"].resolve(),
+                measurements_dir=directories["measurements"].resolve(),
+                masks_dir=directories["masks"].resolve(),
+                labels_dir=directories["labels"].resolve(),
+                qc_dir=directories["qc"].resolve(),
+                logs_dir=directories["logs"].resolve(),
+                processed_images=[],
+                tables={},
+                table_summary={},
+                measurements=None,
+                mask_exports=[],
+                label_exports=[],
+                qc_artifacts={},
+                log_files=run_result.log_files,
+                cellprofiler_run=run_result,
+                timing=timing,
+                export_engine=None,
+                export_mode=None,
+            ),
+        )
+        raise RuntimeError(
+            "CellProfiler pipeline failed: "
+            + format_cellprofiler_failure(
+                returncode=run_result.returncode,
+                stdout=run_result.stdout,
+                stderr="\n".join(log_errors),
+                log_files=run_result.log_files,
+            )
+        )
+
+    load_result = load_cellprofiler_measurements_lenient(
+        directories["measurements"],
+    )
     tables = load_result.tables
     import_warnings = list(load_result.warnings)
     measurements = None
@@ -753,6 +799,22 @@ def run_cellprofiler_workflow_from_config(
                 label_exports = fiji_export_result.label_exports
                 export_engine = "fiji"
                 export_mode = "batch"
+                if not mask_exports and not label_exports:
+                    organized = organize_cellprofiler_tiffs_for_fiji(
+                        directories["raw"],
+                        directories["masks"],
+                        directories["labels"],
+                        pattern=config.fiji_image_pattern,
+                    )
+                    mask_exports = organized.masks
+                    label_exports = organized.labels
+                    if mask_exports or label_exports:
+                        export_warnings.append(
+                            "Fiji batch export found no mask/label TIFFs by filename; "
+                            "classified CellProfiler TIFF outputs in Python."
+                        )
+                        export_engine = "fiji+python_classify"
+                        export_mode = "batch+in_process"
             else:
                 if fiji_export_result is not None:
                     export_warnings.append(

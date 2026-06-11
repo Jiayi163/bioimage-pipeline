@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -65,7 +66,28 @@ class CellProfilerRunResult:
 
     @property
     def succeeded(self) -> bool:
-        return self.returncode == 0
+        return cellprofiler_run_succeeded(
+            self.returncode,
+            stderr=self.stderr,
+            stdout=self.stdout,
+        )
+
+
+def cellprofiler_run_succeeded(
+    returncode: int,
+    *,
+    stderr: str = "",
+    stdout: str = "",
+) -> bool:
+    """Return whether CellProfiler finished without a pipeline or runtime failure."""
+    if returncode != 0:
+        return False
+    combined = f"{stderr}\n{stdout}".lower()
+    failure_markers = (
+        "failed to load pipeline",
+        "could not find the ",
+    )
+    return not any(marker in combined for marker in failure_markers)
 
 
 def _resolve_existing_path(path: str | Path, label: str) -> Path:
@@ -225,6 +247,122 @@ def format_cellprofiler_failure(
         if stderr_log is not None:
             details = f"{details} (see {stderr_log})"
     return details
+
+
+_CELLPROFILER_ERROR_MARKERS = (
+    "failed to load pipeline",
+    "could not find the ",
+    "error detected during run of module",
+    "error in module",
+    "exception in module",
+    "encountered error",
+    "unable to complete",
+    "moduleexception",
+    "analysisexception",
+    "worker exception",
+)
+
+_MODULE_LINE_RE = re.compile(
+    r".*\b(?:error detected during run of|error in|exception in|encountered error in)\s+module\b",
+    re.IGNORECASE,
+)
+_EXCEPTION_LINE_RE = re.compile(
+    r"^[A-Z]\w*(?:Error|Exception)(?::\s*.+)?$"
+)
+
+
+def extract_cellprofiler_errors(stdout: str, stderr: str) -> list[str]:
+    """Return notable CellProfiler pipeline/module error lines from process output.
+
+    When a traceback is present, skips the traceback header and stack frames and
+    instead returns the module context line (when present) plus the final
+    exception line (for example ``AssertionError: Feature ... does not exist``).
+    """
+    lines = [line.strip() for line in f"{stdout}\n{stderr}".splitlines() if line.strip()]
+
+    module_lines: list[str] = []
+    marker_lines: list[str] = []
+    exception_lines: list[str] = []
+    has_traceback = False
+
+    for line in lines:
+        lowered = line.lower()
+        if "traceback (most recent call last)" in lowered:
+            has_traceback = True
+            continue
+
+        if _MODULE_LINE_RE.match(line):
+            if line not in module_lines:
+                module_lines.append(line)
+            continue
+
+        if _EXCEPTION_LINE_RE.match(line):
+            exception_lines.append(line)
+            continue
+
+        if any(marker in lowered for marker in _CELLPROFILER_ERROR_MARKERS):
+            if line not in marker_lines:
+                marker_lines.append(line)
+
+    if has_traceback or exception_lines:
+        summary: list[str] = []
+        summary.extend(module_lines)
+        if exception_lines:
+            terminal = exception_lines[-1]
+            if terminal not in summary:
+                summary.append(terminal)
+        if summary:
+            return summary
+
+    summary = list(module_lines)
+    for line in marker_lines:
+        if line not in summary:
+            summary.append(line)
+    if not summary and exception_lines:
+        summary.append(exception_lines[-1])
+    return summary
+
+
+def read_cellprofiler_log_streams(
+    *,
+    log_dir: str | Path | None = None,
+    log_files: dict[str, Path] | None = None,
+    stdout: str = "",
+    stderr: str = "",
+) -> tuple[str, str]:
+    """Return CellProfiler stdout/stderr text, preferring on-disk log files."""
+    stdout_path: Path | None = None
+    stderr_path: Path | None = None
+    if log_files:
+        stdout_path = log_files.get("stdout")
+        stderr_path = log_files.get("stderr")
+    elif log_dir is not None:
+        log_path = Path(log_dir)
+        stdout_path = log_path / "cellprofiler_stdout.log"
+        stderr_path = log_path / "cellprofiler_stderr.log"
+
+    if stdout_path is not None and stdout_path.is_file():
+        stdout = stdout_path.read_text(encoding="utf-8")
+    if stderr_path is not None and stderr_path.is_file():
+        stderr = stderr_path.read_text(encoding="utf-8")
+    return stdout, stderr
+
+
+def inspect_cellprofiler_logs(
+    *,
+    log_dir: str | Path | None = None,
+    log_files: dict[str, Path] | None = None,
+    stdout: str = "",
+    stderr: str = "",
+) -> list[str]:
+    """Read CellProfiler log files and return notable error lines."""
+    log_stdout, log_stderr = read_cellprofiler_log_streams(
+        log_dir=log_dir,
+        log_files=log_files,
+        stdout=stdout,
+        stderr=stderr,
+    )
+    return extract_cellprofiler_errors(log_stdout, log_stderr)
 
 
 def run_cellprofiler_pipeline(
@@ -563,6 +701,45 @@ def load_cellprofiler_measurements(
         metadata=metadata,
         warnings=warnings,
     )
+
+
+def load_cellprofiler_measurements_lenient(
+    output_dir: str | Path,
+    *,
+    pattern: str = "*.csv",
+    strict: bool = False,
+) -> CellProfilerMeasurementsResult:
+    """Load CellProfiler CSV exports without raising when none are present.
+
+    When the measurements directory is missing or contains no matching CSV
+    files, returns empty tables and a warning instead of raising
+    :class:`FileNotFoundError`.
+    """
+    output_path = Path(output_dir)
+    if not output_path.exists():
+        return CellProfilerMeasurementsResult(
+            tables={},
+            metadata={},
+            warnings=[f"Measurements directory not found: {output_path}"],
+        )
+    if not output_path.is_dir():
+        return CellProfilerMeasurementsResult(
+            tables={},
+            metadata={},
+            warnings=[f"Measurements path is not a directory: {output_path}"],
+        )
+
+    csv_files = sorted(output_path.glob(pattern))
+    if not csv_files:
+        return CellProfilerMeasurementsResult(
+            tables={},
+            metadata={},
+            warnings=[
+                f"No CSV files matching {pattern!r} in {output_path}",
+            ],
+        )
+
+    return load_cellprofiler_measurements(output_path, pattern=pattern, strict=strict)
 
 
 def _merge_object_tables(

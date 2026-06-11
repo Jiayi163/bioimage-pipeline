@@ -33,6 +33,11 @@ REQUIRED_SETUP_MODULES = (
     "Groups",
 )
 MINIMAL_GUI_PIPELINE_MODULES = REQUIRED_SETUP_MODULES
+GUI_MANAGED_CPPIPE_SETTINGS = frozenset({"Input folder path"})
+INPUT_MODULES_TO_RESET_FOR_CELLPROFILER = frozenset(
+    {"Metadata", "NamesAndTypes", "Groups"},
+)
+ANALYSIS_MODULES_REQUIRING_EXPORT = frozenset({"IdentifyPrimaryObjects"})
 
 
 @dataclass
@@ -253,6 +258,67 @@ def remove_module(pipeline: CppipePipeline, index: int) -> CppipePipeline:
     )
 
 
+def rewrite_groups_module_settings(
+    pipeline: CppipePipeline,
+    module_index: int,
+    *,
+    wants_groups: str | None = None,
+    metadata_categories: list[str] | None = None,
+) -> CppipePipeline:
+    """Rewrite a Groups module body to match CellProfiler v2 structure."""
+    modules = list(pipeline.modules)
+    module = modules[module_index]
+    if module.name != "Groups":
+        raise ValueError(f"Expected Groups module, got {module.name!r}")
+
+    current_wants = "No"
+    current_categories: list[str] = []
+    for setting in module.settings:
+        if setting.key == "Do you want to group your images?":
+            current_wants = setting.value
+        elif setting.key == "Metadata category":
+            current_categories.append(setting.value)
+    if not current_categories:
+        current_categories = ["None"]
+
+    resolved_wants = current_wants if wants_groups is None else wants_groups
+    resolved_categories = (
+        current_categories if metadata_categories is None else metadata_categories
+    )
+    if not resolved_categories:
+        resolved_categories = ["None"]
+
+    lines = [
+        module.lines[0],
+        f"    Do you want to group your images?:{resolved_wants}",
+        f"    grouping metadata count:{len(resolved_categories)}",
+        *(
+            f"    Metadata category:{category}"
+            for category in resolved_categories
+        ),
+        "",
+    ]
+    modules[module_index] = _module_from_lines(
+        lines, module.start_line, module.module_num,
+    )
+    return CppipePipeline(
+        preamble=list(pipeline.preamble),
+        modules=modules,
+        trailing=list(pipeline.trailing),
+        source_path=pipeline.source_path,
+    )
+
+
+def _append_module_setting_line(lines: list[str], setting_key: str, value: str) -> list[str]:
+    """Append an indented setting line before the module's trailing blank line."""
+    trimmed = list(lines)
+    while trimmed and not trimmed[-1].strip():
+        trimmed.pop()
+    trimmed.append(f"    {setting_key}:{value}")
+    trimmed.append("")
+    return trimmed
+
+
 def update_module_setting(
     pipeline: CppipePipeline,
     module_index: int,
@@ -271,7 +337,7 @@ def update_module_setting(
             lines[setting.line_index] = f"{indent}{setting.key}:{value}"
             updated = True
     if not updated:
-        lines.append(f"{setting_key}:{value}")
+        lines = _append_module_setting_line(lines, setting_key, value)
 
     modules[module_index] = _module_from_lines(lines, module.start_line, module.module_num)
     return CppipePipeline(
@@ -279,6 +345,235 @@ def update_module_setting(
         modules=modules,
         trailing=list(pipeline.trailing),
         source_path=pipeline.source_path,
+    )
+
+
+def _module_settings_dict(module: CppipeModule) -> dict[str, str]:
+    return {setting.key: setting.value for setting in module.settings}
+
+
+def _primary_object_name(pipeline: CppipePipeline) -> str:
+    reserved = frozenset(
+        {"IdentifyPrimaryObjects", "IdentifySecondaryObjects", "SaveImages"},
+    )
+    for module in pipeline.modules:
+        if module.name != "IdentifyPrimaryObjects":
+            continue
+        for setting in module.settings:
+            if setting.key == "Name the primary objects to be identified":
+                name = setting.value.strip()
+                if name and name not in reserved:
+                    return name
+    return "Nuclei"
+
+
+def save_images_needs_normalization(settings: dict[str, str]) -> bool:
+    """Return whether SaveImages settings would skip mask/QC export paths."""
+    save_type = settings.get("Select the type of image to save", "Image")
+    if save_type == "Image":
+        return True
+    if settings.get("Select method for constructing file names") == "Sequential numbers":
+        return True
+
+    prefix = settings.get("Enter file prefix", "").lower()
+    suffix = settings.get("Text to append to the image name", "").lower()
+    if settings.get("Append a suffix to the image file name?", "No") == "Yes":
+        combined = f"{prefix}{suffix}"
+    else:
+        combined = prefix
+
+    if save_type == "Mask":
+        return "mask" not in combined
+    if save_type == "Objects":
+        return not any(
+            keyword in combined for keyword in ("object", "label", "segmented")
+        )
+    return False
+
+
+def _rewrite_save_images_module(
+    pipeline: CppipePipeline,
+    module_index: int,
+    *,
+    object_name: str,
+    mask_prefix: str,
+) -> CppipePipeline:
+    """Write a headless-safe SaveImages block that names files from DNA filenames."""
+    definition = get_module_definition("SaveImages")
+    modules = list(pipeline.modules)
+    modules[module_index] = module_template(
+        definition,
+        module_num=modules[module_index].module_num,
+        include_hidden=False,
+    )
+    updated = CppipePipeline(
+        preamble=list(pipeline.preamble),
+        modules=modules,
+        trailing=list(pipeline.trailing),
+        source_path=pipeline.source_path,
+    )
+    updated = update_module_setting(
+        updated, module_index, "Select the type of image to save", "Mask",
+    )
+    updated = update_module_setting(
+        updated, module_index, "Select the image to save", object_name,
+    )
+    updated = update_module_setting(
+        updated,
+        module_index,
+        "Select method for constructing file names",
+        "From image filename",
+    )
+    updated = update_module_setting(
+        updated, module_index, "Select image name for file prefix", "DNA",
+    )
+    updated = update_module_setting(updated, module_index, "Enter file prefix", mask_prefix)
+    updated = update_module_setting(
+        updated, module_index, "Append a suffix to the image file name?", "No",
+    )
+    updated = update_module_setting(updated, module_index, "Image bit depth", "8-bit integer")
+    return updated
+
+
+def normalize_save_images_for_cellprofiler(pipeline: CppipePipeline) -> CppipePipeline:
+    """Replace SaveImages with a catalog template that exports object masks."""
+    object_name = _primary_object_name(pipeline)
+    mask_prefix = f"{object_name}_mask"
+    for index, module in enumerate(pipeline.modules):
+        if module.name != "SaveImages":
+            continue
+        return _rewrite_save_images_module(
+            pipeline,
+            index,
+            object_name=object_name,
+            mask_prefix=mask_prefix,
+        )
+    return pipeline
+
+
+def normalize_save_images_in_pipeline(pipeline: CppipePipeline) -> CppipePipeline:
+    """Rewrite misconfigured SaveImages modules to export segmentation masks."""
+    updated = pipeline
+    object_name = _primary_object_name(pipeline)
+    mask_prefix = f"{object_name}_mask"
+    for index, module in enumerate(pipeline.modules):
+        if module.name != "SaveImages":
+            continue
+        settings = _module_settings_dict(module)
+        if not save_images_needs_normalization(settings):
+            if (
+                settings.get("Select the type of image to save") == "Mask"
+                and settings.get("Select the image to save") != object_name
+            ):
+                updated = update_module_setting(
+                    updated, index, "Select the image to save", object_name,
+                )
+            continue
+        updated = _rewrite_save_images_module(
+            updated,
+            index,
+            object_name=object_name,
+            mask_prefix=mask_prefix,
+        )
+    return updated
+
+
+def _clean_module_lines_for_cellprofiler(module_name: str, lines: list[str]) -> list[str]:
+    """Drop GUI-managed settings and malformed lines CellProfiler cannot load."""
+    header = lines[0]
+    cleaned: list[str] = []
+    for line in lines[1:]:
+        if not line.strip():
+            continue
+        if not line.startswith("    "):
+            continue
+        stripped = line.strip()
+        if ":" not in stripped:
+            continue
+        key = stripped.split(":", 1)[0]
+        if not key or key in GUI_MANAGED_CPPIPE_SETTINGS:
+            continue
+        cleaned.append(line)
+    return [header, *cleaned, ""]
+
+
+def normalize_identify_primary_objects_for_cellprofiler(
+    pipeline: CppipePipeline,
+) -> CppipePipeline:
+    """Reset IdentifyPrimaryObjects to a catalog template CellProfiler can load."""
+    modules = list(pipeline.modules)
+    for index, module in enumerate(modules):
+        if module.name != "IdentifyPrimaryObjects":
+            continue
+        definition = get_module_definition("IdentifyPrimaryObjects")
+        modules[index] = module_template(
+            definition, module_num=module.module_num, include_hidden=True,
+        )
+        updated = CppipePipeline(
+            preamble=list(pipeline.preamble),
+            modules=modules,
+            trailing=list(pipeline.trailing),
+            source_path=pipeline.source_path,
+        )
+        return update_module_setting(
+            updated,
+            index,
+            "Name the primary objects to be identified",
+            _primary_object_name(pipeline),
+        )
+    return pipeline
+
+
+def normalize_input_modules_for_cellprofiler(
+    pipeline: CppipePipeline,
+) -> CppipePipeline:
+    """Reset input modules to catalog templates CellProfiler headless can load."""
+    modules = list(pipeline.modules)
+    for index, module in enumerate(modules):
+        if module.name not in INPUT_MODULES_TO_RESET_FOR_CELLPROFILER:
+            continue
+        definition = get_module_definition(module.name)
+        modules[index] = module_template(
+            definition, module_num=module.module_num, include_hidden=True,
+        )
+    return CppipePipeline(
+        preamble=list(pipeline.preamble),
+        modules=modules,
+        trailing=list(pipeline.trailing),
+        source_path=pipeline.source_path,
+    )
+
+
+def ensure_export_to_spreadsheet(pipeline: CppipePipeline) -> CppipePipeline:
+    """Append ExportToSpreadsheet when analysis modules need measurement CSVs."""
+    module_names = {module.name for module in pipeline.modules}
+    if "ExportToSpreadsheet" in module_names:
+        return pipeline
+    if not module_names.intersection(ANALYSIS_MODULES_REQUIRING_EXPORT):
+        return pipeline
+    return append_module(pipeline, "ExportToSpreadsheet")
+
+
+def prepare_pipeline_for_cellprofiler(pipeline: CppipePipeline) -> CppipePipeline:
+    """Return a copy safe to hand to headless CellProfiler."""
+    prepared = normalize_input_modules_for_cellprofiler(pipeline)
+    prepared = normalize_identify_primary_objects_for_cellprofiler(prepared)
+    prepared = normalize_save_images_for_cellprofiler(prepared)
+    prepared = ensure_export_to_spreadsheet(prepared)
+    prepared = renumber_modules(prepared)
+    modules = [
+        _module_from_lines(
+            _clean_module_lines_for_cellprofiler(module.name, list(module.lines)),
+            module.start_line,
+            module.module_num,
+        )
+        for module in prepared.modules
+    ]
+    return CppipePipeline(
+        preamble=list(prepared.preamble),
+        modules=modules,
+        trailing=list(prepared.trailing),
+        source_path=prepared.source_path,
     )
 
 
@@ -313,7 +608,12 @@ def create_pipeline_from_catalog(
     return pipeline
 
 
-def module_template(module: ModuleDefinition, *, module_num: int = 1) -> CppipeModule:
+def module_template(
+    module: ModuleDefinition,
+    *,
+    module_num: int = 1,
+    include_hidden: bool = False,
+) -> CppipeModule:
     """Create a conservative ``.cppipe`` module block for a catalog module."""
     lines = [
         (
@@ -323,7 +623,18 @@ def module_template(module: ModuleDefinition, *, module_num: int = 1) -> CppipeM
             "enabled:True|wants_pause:False]"
         )
     ]
-    lines.extend(f"    {parameter.label}:{parameter.default}" for parameter in module.parameters)
+    default_settings = {
+        parameter.label: parameter.default for parameter in module.parameters
+    }
+    for parameter in module.parameters:
+        if parameter.label in GUI_MANAGED_CPPIPE_SETTINGS:
+            continue
+        if (
+            include_hidden
+            or parameter.internal
+            or parameter.visibility.is_visible(default_settings)
+        ):
+            lines.append(f"    {parameter.label}:{parameter.default}")
     lines.append("")
     return _module_from_lines(lines, start_line=0, fallback_num=module_num)
 

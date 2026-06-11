@@ -93,6 +93,7 @@ _MODULES: tuple[ModuleDefinition, ...] = (
                 "Input folder path",
                 "",
                 "Folder containing input images for this pipeline (GUI-managed).",
+                internal=True,
             ),
             ModuleParameter(
                 "Filter images?",
@@ -281,42 +282,27 @@ _MODULES: tuple[ModuleDefinition, ...] = (
                 "Treat images as 3D volumes.",
                 ("Yes", "No"),
             ),
-            ModuleParameter("Relative pixel spacing in X", "1.0"),
-            ModuleParameter("Relative pixel spacing in Y", "1.0"),
-            ModuleParameter("Relative pixel spacing in Z", "1.0"),
+            ModuleParameter(
+                "Relative pixel spacing in X",
+                "1.0",
+                visibility=visible_when("Process as 3D?", "Yes"),
+            ),
+            ModuleParameter(
+                "Relative pixel spacing in Y",
+                "1.0",
+                visibility=visible_when("Process as 3D?", "Yes"),
+            ),
+            ModuleParameter(
+                "Relative pixel spacing in Z",
+                "1.0",
+                visibility=visible_when("Process as 3D?", "Yes"),
+            ),
             ModuleParameter(
                 "Select the rule criteria",
                 "and (extension does isimage)",
                 "Rules used to select files for this image name.",
                 visibility=visible_when("Assign a name to", "Images matching rules"),
             ),
-            ModuleParameter(
-                "Name to assign these images",
-                "DNA",
-                "Per-assignment image name used by analysis modules.",
-                internal=True,
-            ),
-            ModuleParameter(
-                "Name to assign these objects",
-                "Cell",
-                "Object name placeholder used by object-image assignments.",
-                internal=True,
-            ),
-            ModuleParameter(
-                "Select the image type",
-                "Grayscale image",
-                "Per-assignment image type.",
-                ("Grayscale image", "Color image", "Mask", "Illumination function"),
-                internal=True,
-            ),
-            ModuleParameter(
-                "Set intensity range from",
-                "Image metadata",
-                "Per-assignment intensity range source.",
-                ("Image metadata", "Manual"),
-                internal=True,
-            ),
-            ModuleParameter("Maximum intensity", "255.0", internal=True),
         ),
         variable_revision_number=8,
     ),
@@ -324,8 +310,31 @@ _MODULES: tuple[ModuleDefinition, ...] = (
         name="Groups",
         display_name="Groups",
         category="Input",
-        description="Group images for batch processing.",
-        parameters=(ModuleParameter("Do you want to group your images?", "No"),),
+        description=(
+            "Optionally split your list of images into image subsets (groups) "
+            "which will be processed independently of each other."
+        ),
+        parameters=(
+            ModuleParameter(
+                "Do you want to group your images?",
+                "No",
+                "Enable independent processing of image subsets such as plates, wells, or movies.",
+                ("Yes", "No"),
+            ),
+            ModuleParameter(
+                "grouping metadata count",
+                "1",
+                "Number of metadata tags used to define groups.",
+                internal=True,
+            ),
+            ModuleParameter(
+                "Metadata category",
+                "None",
+                "Metadata tag used to define a group.",
+                internal=True,
+            ),
+        ),
+        variable_revision_number=2,
     ),
     ModuleDefinition(
         name="IdentifyPrimaryObjects",
@@ -523,28 +532,34 @@ _MODULES: tuple[ModuleDefinition, ...] = (
         parameters=(
             ModuleParameter(
                 "Select the type of image to save",
-                "Image",
+                "Mask",
                 "Choose whether to save images, masks, or labeled objects.",
                 ("Image", "Mask", "Objects"),
             ),
             ModuleParameter(
                 "Select the image to save",
-                "DNA",
+                "Nuclei",
                 "Image or mask name to save.",
                 visibility=visible_when("Select the type of image to save", "Image", "Mask"),
             ),
             ModuleParameter(
+                "Select object to save",
+                "Nuclei",
+                "Object set to save as a label image.",
+                visibility=visible_when("Select the type of image to save", "Objects"),
+            ),
+            ModuleParameter(
                 "Select method for constructing file names",
-                "Sequential numbers",
+                "From image filename",
                 "How output file names are created.",
                 ("Sequential numbers", "Single name", "From image filename"),
             ),
             ModuleParameter("Select image name for file prefix", "DNA"),
-            ModuleParameter("Enter file prefix", "Nuclei"),
+            ModuleParameter("Enter file prefix", "Nuclei_mask"),
             ModuleParameter("Number of digits", "4"),
             ModuleParameter(
                 "Append a suffix to the image file name?",
-                "Yes",
+                "No",
                 choices=("Yes", "No"),
             ),
             ModuleParameter("Text to append to the image name", "Objects"),
@@ -560,7 +575,7 @@ _MODULES: tuple[ModuleDefinition, ...] = (
                 "Folder CellProfiler writes to during headless execution.",
                 ("Default Output Folder|None", "Default Input Folder|None"),
             ),
-            ModuleParameter("Image bit depth", "16-bit integer"),
+            ModuleParameter("Image bit depth", "8-bit integer"),
             ModuleParameter(
                 "Overwrite existing files without warning?",
                 "Yes",

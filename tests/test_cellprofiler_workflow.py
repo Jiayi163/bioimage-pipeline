@@ -210,7 +210,7 @@ def test_generate_qc_for_cellprofiler_results_creates_overlays(tmp_path) -> None
 @patch("bioimage_pipeline.analysis.organize_cellprofiler_tiffs_for_fiji")
 @patch("bioimage_pipeline.analysis.generate_qc_for_cellprofiler_results")
 @patch("bioimage_pipeline.analysis.copy_cellprofiler_measurements")
-@patch("bioimage_pipeline.analysis.load_cellprofiler_measurements")
+@patch("bioimage_pipeline.analysis.load_cellprofiler_measurements_lenient")
 @patch("bioimage_pipeline.analysis.merge_cellprofiler_tables")
 @patch("bioimage_pipeline.analysis.run_cellprofiler_pipeline_logged")
 def test_run_cellprofiler_workflow_organizes_results(
@@ -319,7 +319,7 @@ def test_run_cellprofiler_workflow_organizes_results(
 @patch("bioimage_pipeline.analysis.organize_cellprofiler_tiffs_for_fiji")
 @patch("bioimage_pipeline.analysis.generate_qc_for_cellprofiler_results")
 @patch("bioimage_pipeline.analysis.copy_cellprofiler_measurements")
-@patch("bioimage_pipeline.analysis.load_cellprofiler_measurements")
+@patch("bioimage_pipeline.analysis.load_cellprofiler_measurements_lenient")
 @patch("bioimage_pipeline.analysis.merge_cellprofiler_tables")
 @patch("bioimage_pipeline.analysis.run_cellprofiler_pipeline_logged")
 def test_run_cellprofiler_workflow_can_skip_fiji_and_qc(
@@ -425,7 +425,7 @@ def test_run_cellprofiler_workflow_from_config_uses_structured_dirs(
             return_value=[],
         ),
         patch(
-            "bioimage_pipeline.analysis.load_cellprofiler_measurements",
+            "bioimage_pipeline.analysis.load_cellprofiler_measurements_lenient",
             return_value=CellProfilerMeasurementsResult(
                 tables={"MyExpt_Image": pd.DataFrame({"Image_Number": [1]})},
                 metadata={},
@@ -449,3 +449,80 @@ def test_run_cellprofiler_workflow_from_config_uses_structured_dirs(
 
     assert result.results_dir == results_dir.resolve()
     assert result.measurements_dir == (results_dir / RESULTS_MEASUREMENTS_DIR).resolve()
+
+
+@patch("bioimage_pipeline.analysis.run_cellprofiler_pipeline_logged")
+def test_run_cellprofiler_workflow_surfaces_module_error_from_logs(
+    mock_run_logged: MagicMock,
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "input"
+    results_dir = tmp_path / "results"
+    cppipe = tmp_path / "pipeline.cppipe"
+    input_dir.mkdir()
+    cppipe.write_text("pipeline", encoding="utf-8")
+
+    raw_dir = results_dir / RESULTS_RAW_DIR
+    logs_dir = results_dir / RESULTS_LOGS_DIR
+    raw_dir.mkdir(parents=True)
+    logs_dir.mkdir(parents=True)
+    stdout_log = logs_dir / "cellprofiler_stdout.log"
+    stderr_log = logs_dir / "cellprofiler_stderr.log"
+    stdout_log.write_text("Times reported are CPU seconds\n", encoding="utf-8")
+    stderr_log.write_text(
+        "Error in module IdentifyPrimaryObjects: missing input image DNA\n",
+        encoding="utf-8",
+    )
+
+    mock_run_logged.return_value = CellProfilerRunResult(
+        output_dir=raw_dir.resolve(),
+        command=["cellprofiler"],
+        returncode=0,
+        stdout="Times reported are CPU seconds\n",
+        stderr="",
+        log_files={"stdout": stdout_log, "stderr": stderr_log},
+    )
+
+    with pytest.raises(RuntimeError, match="CellProfiler pipeline failed"):
+        run_cellprofiler_workflow(
+            input_dir,
+            results_dir,
+            cppipe,
+            export_fiji_tiffs=False,
+            generate_qc=False,
+        )
+
+    assert (logs_dir / "workflow_summary.json").exists()
+
+
+@patch("bioimage_pipeline.analysis.run_cellprofiler_pipeline_logged")
+def test_run_cellprofiler_workflow_continues_when_no_csv_exports(
+    mock_run_logged: MagicMock,
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "input"
+    results_dir = tmp_path / "results"
+    cppipe = tmp_path / "pipeline.cppipe"
+    input_dir.mkdir()
+    cppipe.write_text("pipeline", encoding="utf-8")
+
+    raw_dir = results_dir / RESULTS_RAW_DIR
+    logs_dir = results_dir / RESULTS_LOGS_DIR
+    raw_dir.mkdir(parents=True)
+    (results_dir / RESULTS_MEASUREMENTS_DIR).mkdir(parents=True)
+
+    mock_run_logged.return_value = _successful_run_result(raw_dir, logs_dir)
+
+    result = run_cellprofiler_workflow(
+        input_dir,
+        results_dir,
+        cppipe,
+        export_fiji_tiffs=False,
+        generate_qc=False,
+        merge_measurements=False,
+    )
+
+    assert result.tables == {}
+    assert result.import_warnings is not None
+    assert any("No CSV files" in warning for warning in result.import_warnings)
+    assert (logs_dir / "workflow_summary.json").exists()

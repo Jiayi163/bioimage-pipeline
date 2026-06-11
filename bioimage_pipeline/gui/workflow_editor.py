@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import ast
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
 
-from bioimage_pipeline.cppipe_io import CppipePipeline, update_module_setting
+from bioimage_pipeline.cppipe_io import (
+    CppipeModule,
+    CppipePipeline,
+    rewrite_groups_module_settings,
+    update_module_setting,
+)
 
 if TYPE_CHECKING:
     from bioimage_pipeline.gui.workflow_shell import PipelineBuilderState
@@ -38,6 +45,96 @@ class EditorSession:
         self.dirty = pipeline_text != self.baseline_text
 
 
+def module_settings_label(module_name: str, module_num: int) -> str:
+    """Format the CellProfiler-style module settings panel title."""
+    return f"Module settings ({module_name} #{module_num:02d})"
+
+
+def should_show_path_list(module_name: str | None) -> bool:
+    """Return whether the file list sash should be visible for a module."""
+    return module_name == "Images"
+
+
+IMAGESET_MODULES = frozenset({"Images", "Metadata", "NamesAndTypes", "Groups"})
+_MODULE_NOTES_RE = re.compile(r"notes:\[(.*)\]\|batch_state", re.DOTALL)
+_NAMED_GROUP_RE = re.compile(r"\(\?P<([^>]+)>")
+GROUPS_WANTS_SETTING = "Do you want to group your images?"
+GROUPS_METADATA_CATEGORY = "Metadata category"
+GROUPS_GROUPING_HELP = (
+    "Each unique metadata value (or combination of values) will be defined as a group."
+)
+
+
+def should_show_imageset(module_name: str | None) -> bool:
+    """Return whether the image-set panel should be visible for a module."""
+    return module_name in IMAGESET_MODULES
+
+
+def parse_module_notes(module: CppipeModule) -> str:
+    """Extract module notes from a ``.cppipe`` module header line."""
+    if not module.lines:
+        return ""
+    header = module.lines[0]
+    match = _MODULE_NOTES_RE.search(header)
+    if not match:
+        return ""
+    inner = match.group(1).strip()
+    if not inner:
+        return ""
+    try:
+        values = ast.literal_eval(f"[{inner}]")
+    except (SyntaxError, ValueError):
+        return inner
+    if not isinstance(values, list):
+        return str(values)
+    return "\n".join(str(value) for value in values)
+
+
+def list_assigned_image_names(pipeline: CppipePipeline) -> list[str]:
+    """Return image names configured in NamesAndTypes."""
+    index = find_module_index(pipeline, "NamesAndTypes")
+    if index is None:
+        return ["DNA"]
+    names: list[str] = []
+    for setting in pipeline.modules[index].settings:
+        if setting.key != "Name to assign these images":
+            continue
+        if setting.value and setting.value not in names:
+            names.append(setting.value)
+    return names or ["DNA"]
+
+
+def build_imageset_rows(
+    pipeline: CppipePipeline,
+    folder: str | Path,
+    *,
+    limit: int = 50,
+) -> tuple[list[str], list[tuple[int, dict[str, str]]]]:
+    """Build CellProfiler-style image-set rows from the input folder."""
+    columns = list_assigned_image_names(pipeline)
+    images = scan_detected_images(folder, limit=limit) if folder else []
+    if not images:
+        return columns, []
+    rows: list[tuple[int, dict[str, str]]] = []
+    for cycle, path in enumerate(images, start=1):
+        values = {columns[0]: path.name}
+        for column in columns[1:]:
+            values[column] = ""
+        rows.append((cycle, values))
+    return columns, rows
+
+
+def scan_folder_files(folder: str | Path, *, limit: int = 500) -> list[Path]:
+    """List all files directly under a folder (for filter preview)."""
+    root = Path(folder)
+    if not root.is_dir():
+        return []
+    return sorted(
+        (path for path in root.iterdir() if path.is_file()),
+        key=lambda item: item.name.lower(),
+    )[:limit]
+
+
 def window_title(*, base: str = "Bioimage Pipeline", path: Path | None, dirty: bool) -> str:
     """Format the main window title with optional path and modified marker."""
     if path is None:
@@ -53,6 +150,63 @@ def find_module_index(pipeline: CppipePipeline, module_name: str) -> int | None:
         if module.name == module_name:
             return index
     return None
+
+
+def list_metadata_keys(pipeline: CppipePipeline) -> list[str]:
+    """Return metadata column names configured in the Metadata module."""
+    if get_module_setting_value(pipeline, "Metadata", "Extract metadata?") != "Yes":
+        return []
+    index = find_module_index(pipeline, "Metadata")
+    if index is None:
+        return []
+    keys: list[str] = []
+    seen: set[str] = set()
+    for setting in pipeline.modules[index].settings:
+        if not setting.key.startswith("Regular expression"):
+            continue
+        for match in _NAMED_GROUP_RE.finditer(setting.value):
+            name = match.group(1)
+            if name not in seen:
+                seen.add(name)
+                keys.append(name)
+    return keys
+
+
+def list_metadata_category_choices(pipeline: CppipePipeline) -> list[str]:
+    """Return metadata category choices for the Groups module."""
+    keys = list_metadata_keys(pipeline)
+    return keys if keys else ["None"]
+
+
+def groups_wants_grouping(pipeline: CppipePipeline) -> bool:
+    """Return whether the Groups module is configured to group images."""
+    return get_module_setting_value(pipeline, "Groups", GROUPS_WANTS_SETTING) == "Yes"
+
+
+def list_groups_metadata_categories(pipeline: CppipePipeline) -> list[str]:
+    """Return metadata categories configured on the Groups module."""
+    index = find_module_index(pipeline, "Groups")
+    if index is None:
+        return ["None"]
+    categories = [
+        setting.value
+        for setting in pipeline.modules[index].settings
+        if setting.key == GROUPS_METADATA_CATEGORY
+    ]
+    return categories or ["None"]
+
+
+def update_groups_metadata_categories(
+    pipeline: CppipePipeline,
+    module_index: int,
+    categories: list[str],
+) -> CppipePipeline:
+    """Update the metadata categories used for Groups."""
+    if not categories:
+        categories = ["None"]
+    return rewrite_groups_module_settings(
+        pipeline, module_index, metadata_categories=categories,
+    )
 
 
 def get_module_setting_value(pipeline: CppipePipeline, module_name: str, key: str) -> str | None:

@@ -48,18 +48,28 @@ from bioimage_pipeline.cppipe_io import (
 from bioimage_pipeline.pipeline_catalog import (
     ModuleDefinition,
     list_modules,
-    list_modules_by_category,
     search_modules,
 )
+from bioimage_pipeline.gui.add_module_dialog import open_add_module_dialog
 from bioimage_pipeline.gui.workflow_editor import (
     EditorSession,
-    IMAGES_INPUT_FOLDER_KEY,
+    GROUPS_GROUPING_HELP,
+    GROUPS_METADATA_CATEGORY,
+    build_imageset_rows,
     get_images_input_folder,
+    groups_wants_grouping,
     launch_cellprofiler_gui,
-    list_module_output_lines,
+    list_groups_metadata_categories,
+    list_metadata_category_choices,
+    module_settings_label,
+    parse_module_notes,
     resolve_workflow_input_dir,
     scan_detected_images,
+    scan_folder_files,
     set_images_input_folder,
+    should_show_imageset,
+    should_show_path_list,
+    update_groups_metadata_categories,
     window_title,
 )
 
@@ -328,10 +338,13 @@ def update_pipeline_module_setting(
 
 def save_pipeline_builder_state(state: PipelineBuilderState, path: str | Path) -> Path:
     """Validate and save the builder pipeline."""
-    errors = validate_cppipe(state.pipeline)
+    from bioimage_pipeline.cppipe_io import prepare_pipeline_for_cellprofiler
+
+    pipeline = prepare_pipeline_for_cellprofiler(state.pipeline)
+    errors = validate_cppipe(pipeline)
     if errors:
         raise ValueError("\n".join(errors))
-    return save_cppipe(state.pipeline, path)
+    return save_cppipe(pipeline, path)
 
 
 def default_oir_projection_engine_choice(
@@ -540,8 +553,8 @@ def launch_workflow_shell() -> None:
     from tkinter import filedialog, messagebox, ttk
 
     root = tk.Tk()
-    root.geometry("1280x820")
-    root.minsize(960, 640)
+    root.geometry("1024x600")
+    root.minsize(800, 500)
 
     editor_session = EditorSession()
     builder_state: dict[str, PipelineBuilderState | None] = {"state": None}
@@ -605,9 +618,8 @@ def launch_workflow_shell() -> None:
         editor_session.path = None
         editor_session.baseline_text = state.pipeline.to_text()
         editor_session.dirty = False
-        refresh_catalog()
         refresh_pipeline_list()
-        builder_status.set("New pipeline with required setup modules.")
+        status.set("New pipeline with required setup modules.")
         refresh_title()
 
     def file_open() -> None:
@@ -619,15 +631,14 @@ def launch_workflow_shell() -> None:
         if not selected:
             return
         try:
-            state = load_pipeline_builder_state(selected, query=catalog_query.get().strip())
+            state = load_pipeline_builder_state(selected)
         except Exception as exc:
             messagebox.showerror("Open pipeline", str(exc))
             return
         builder_state["state"] = state
         editor_session.mark_saved(Path(selected), state.pipeline.to_text())
-        refresh_catalog(state.catalog_modules)
         refresh_pipeline_list()
-        builder_status.set(f"Opened {selected}")
+        status.set(f"Opened {selected}")
         refresh_title()
 
     def file_save() -> None:
@@ -645,7 +656,7 @@ def launch_workflow_shell() -> None:
             messagebox.showerror("Save pipeline", str(exc))
             return
         editor_session.mark_saved(target, state.pipeline.to_text())
-        builder_status.set(f"Saved {target}")
+        status.set(f"Saved {target}")
         refresh_title()
 
     def file_save_as() -> None:
@@ -665,7 +676,7 @@ def launch_workflow_shell() -> None:
             messagebox.showerror("Save pipeline", str(exc))
             return
         editor_session.mark_saved(saved, state.pipeline.to_text())
-        builder_status.set(f"Saved {saved}")
+        status.set(f"Saved {saved}")
         refresh_title()
 
     def tools_open_in_cellprofiler() -> None:
@@ -737,52 +748,100 @@ def launch_workflow_shell() -> None:
     editor = ttk.Frame(main)
     editor.grid(row=0, column=0, sticky="nsew")
     editor.columnconfigure(0, weight=1)
-    editor.columnconfigure(1, weight=2)
-    editor.rowconfigure(1, weight=1)
+    editor.rowconfigure(0, weight=1)
 
-    ttk.Label(editor, text="Pipeline modules", font=("Segoe UI", 10, "bold")).grid(
-        row=0, column=0, sticky="w",
-    )
-    ttk.Label(editor, text="Module settings", font=("Segoe UI", 10, "bold")).grid(
-        row=0, column=1, sticky="w", padx=(12, 0),
-    )
+    # CellProfiler uses a vertical splitter: pipeline list (left), file list +
+    # module settings (right).
+    editor_paned = ttk.Panedwindow(editor, orient="horizontal")
+    editor_paned.grid(row=0, column=0, sticky="nsew")
 
-    left_panel = ttk.Frame(editor)
-    left_panel.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
-    left_panel.rowconfigure(3, weight=1)
+    left_panel = ttk.Frame(editor_paned, padding=4)
+    right_panel = ttk.Frame(editor_paned, padding=4)
+    editor_paned.add(left_panel, weight=1)
+    editor_paned.add(right_panel, weight=2)
     left_panel.columnconfigure(0, weight=1)
+    left_panel.rowconfigure(1, weight=1)
+    right_panel.columnconfigure(0, weight=1)
+    right_panel.rowconfigure(1, weight=1)
 
-    # Input modules (always present, protected): mirrors CellProfiler's
-    # separate, unnumbered "Input modules" group at the top of the pipeline.
-    ttk.Label(left_panel, text="Input modules", font=("Segoe UI", 9, "bold")).grid(
-        row=0, column=0, columnspan=2, sticky="w",
-    )
+    input_frame = ttk.LabelFrame(left_panel, text="Input", padding=4)
+    input_frame.grid(row=0, column=0, sticky="ew")
+    input_frame.columnconfigure(0, weight=1)
     input_list = tk.Listbox(
-        left_panel, height=4, exportselection=False,
+        input_frame, height=4, exportselection=False,
         background="#eef3f8", activestyle="none", highlightthickness=1,
     )
-    input_list.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+    input_list.grid(row=0, column=0, sticky="ew")
 
-    ttk.Label(left_panel, text="Analysis modules", font=("Segoe UI", 9, "bold")).grid(
-        row=2, column=0, columnspan=2, sticky="w",
-    )
-    pipeline_list = tk.Listbox(left_panel, height=14, exportselection=False)
-    pipeline_list.grid(row=3, column=0, sticky="nsew")
-    pipeline_scroll = ttk.Scrollbar(left_panel, orient="vertical", command=pipeline_list.yview)
-    pipeline_scroll.grid(row=3, column=1, sticky="ns")
+    modules_frame = ttk.LabelFrame(left_panel, text="Modules", padding=4)
+    modules_frame.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+    modules_frame.columnconfigure(0, weight=1)
+    modules_frame.rowconfigure(0, weight=1)
+    pipeline_list = tk.Listbox(modules_frame, height=14, exportselection=False)
+    pipeline_list.grid(row=0, column=0, sticky="nsew")
+    pipeline_scroll = ttk.Scrollbar(modules_frame, orient="vertical", command=pipeline_list.yview)
+    pipeline_scroll.grid(row=0, column=1, sticky="ns")
     pipeline_list.configure(yscrollcommand=pipeline_scroll.set)
 
     module_controls = ttk.Frame(left_panel)
-    module_controls.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+    module_controls.grid(row=2, column=0, sticky="ew", pady=(8, 0))
 
-    settings_panel = ttk.Frame(editor)
-    settings_panel.grid(row=1, column=1, sticky="nsew", padx=(12, 0), pady=(6, 0))
-    settings_panel.rowconfigure(0, weight=1)
-    settings_panel.columnconfigure(0, weight=1)
+    outputs_row = ttk.Frame(left_panel)
+    outputs_row.grid(row=3, column=0, sticky="ew", pady=(8, 0))
 
-    settings_canvas = tk.Canvas(settings_panel, highlightthickness=0)
+    module_ui_frame = ttk.Frame(right_panel)
+    module_ui_frame.grid(row=0, column=0, sticky="nsew")
+    module_ui_frame.columnconfigure(0, weight=1)
+    module_ui_frame.rowconfigure(2, weight=1)
+
+    notes_panel = ttk.LabelFrame(module_ui_frame, text="Module notes", padding=4)
+    notes_panel.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+    notes_panel.columnconfigure(0, weight=1)
+    module_notes_text = tk.Text(notes_panel, height=3, wrap="word", state="disabled")
+    module_notes_text.grid(row=0, column=0, sticky="ew")
+
+    module_settings_title = tk.StringVar(value="Module settings")
+    file_list_panel = ttk.LabelFrame(module_ui_frame, text="File list", padding=4)
+    file_list_panel.grid(row=1, column=0, sticky="nsew", pady=(0, 6))
+    file_list_panel.columnconfigure(0, weight=1)
+    file_list_panel.rowconfigure(1, weight=1)
+    file_list_tools = ttk.Frame(file_list_panel)
+    file_list_tools.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+    input_folder_var = tk.StringVar()
+    input_folder_entry = ttk.Entry(file_list_tools, textvariable=input_folder_var)
+    input_folder_entry.pack(side="left", fill="x", expand=True)
+    file_list_tree = ttk.Treeview(file_list_panel, height=5, show="tree", selectmode="browse")
+    file_list_tree.grid(row=1, column=0, sticky="nsew")
+    file_list_scroll = ttk.Scrollbar(file_list_panel, orient="vertical", command=file_list_tree.yview)
+    file_list_scroll.grid(row=1, column=1, sticky="ns")
+    file_list_tree.configure(yscrollcommand=file_list_scroll.set)
+    file_list_footer = ttk.Frame(file_list_panel)
+    file_list_footer.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+    show_excluded_var = tk.BooleanVar(value=False)
+    ttk.Checkbutton(
+        file_list_footer, text="Show files excluded by filters", variable=show_excluded_var,
+    ).pack(side="left")
+    file_list_status = tk.StringVar(value="Drop files and folders here")
+    ttk.Label(file_list_footer, textvariable=file_list_status).pack(side="right")
+    file_list_panel.grid_remove()
+
+    module_settings_box = ttk.LabelFrame(
+        module_ui_frame, text=module_settings_title.get(), padding=4,
+    )
+    module_settings_box.grid(row=2, column=0, sticky="nsew")
+
+    def _sync_module_settings_box_title(*_args: Any) -> None:
+        module_settings_box.configure(text=module_settings_title.get())
+
+    module_settings_title.trace_add("write", _sync_module_settings_box_title)
+    module_settings_box.rowconfigure(0, weight=1)
+    module_settings_box.columnconfigure(0, weight=1)
+
+    settings_canvas = tk.Canvas(module_settings_box, highlightthickness=0)
     settings_canvas.grid(row=0, column=0, sticky="nsew")
-    settings_scroll = ttk.Scrollbar(settings_panel, orient="vertical", command=settings_canvas.yview)
+    settings_scroll = ttk.Scrollbar(
+        module_settings_box, orient="vertical", command=settings_canvas.yview,
+    )
     settings_scroll.grid(row=0, column=1, sticky="ns")
     settings_canvas.configure(yscrollcommand=settings_scroll.set)
     settings_frame = ttk.Frame(settings_canvas)
@@ -797,27 +856,39 @@ def launch_workflow_shell() -> None:
     settings_frame.bind("<Configure>", _sync_settings_scroll_region)
     settings_canvas.bind("<Configure>", _sync_settings_width)
 
-    catalog_panel = ttk.LabelFrame(editor, text="Add module from catalog", padding=6)
-    catalog_panel.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
-    editor.rowconfigure(2, weight=1)
-    catalog_panel.columnconfigure(0, weight=1)
-    catalog_panel.rowconfigure(1, weight=1)
-    catalog_query = ttk.Entry(catalog_panel)
-    catalog_query.grid(row=0, column=0, sticky="ew")
-    catalog_tree = ttk.Treeview(catalog_panel, height=8, show="tree", selectmode="browse")
-    catalog_tree.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
-    catalog_tree_scroll = ttk.Scrollbar(catalog_panel, orient="vertical", command=catalog_tree.yview)
-    catalog_tree_scroll.grid(row=1, column=1, sticky="ns", pady=(4, 0))
-    catalog_tree.configure(yscrollcommand=catalog_tree_scroll.set)
+    imageset_panel = ttk.LabelFrame(module_ui_frame, text="Image sets", padding=4)
+    imageset_panel.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+    imageset_panel.columnconfigure(0, weight=1)
+    imageset_tree = ttk.Treeview(imageset_panel, height=5, show="headings", selectmode="browse")
+    imageset_tree.grid(row=0, column=0, sticky="ew")
+    imageset_scroll = ttk.Scrollbar(imageset_panel, orient="vertical", command=imageset_tree.yview)
+    imageset_scroll.grid(row=0, column=1, sticky="ns")
+    imageset_tree.configure(yscrollcommand=imageset_scroll.set)
+    imageset_panel.grid_remove()
 
-    builder_status = tk.StringVar(value="Ready.")
-    ttk.Label(editor, textvariable=builder_status, wraplength=900).grid(
-        row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0),
+    output_settings_frame = ttk.Frame(right_panel, padding=4)
+    output_settings_frame.columnconfigure(1, weight=1)
+    output_settings_frame.grid_remove()
+
+    status = tk.StringVar(
+        value=(
+            startup_warnings[0]
+            if len(startup_warnings) == 1
+            else (
+                f"{len(startup_warnings)} startup warning(s). See output after run."
+                if startup_warnings
+                else "Your pipeline is ready. Select your images and press Analyze Images."
+            )
+        ),
+    )
+    status_frame = ttk.Frame(main)
+    status_frame.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+    ttk.Label(status_frame, textvariable=status, relief="sunken", anchor="w").pack(
+        fill="x", expand=True,
     )
 
-    # --- Run panel (Phase F: demoted) ---------------------------------------
-    run_panel = ttk.LabelFrame(main, text="Run workflow", padding=8)
-    run_panel.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+    # --- Output settings (CellProfiler preferences panel) -------------------
+    run_panel = output_settings_frame
     run_panel.columnconfigure(1, weight=1)
 
     def add_run_row(row: int, label: str, key: str, *, browse: str = "file") -> None:
@@ -831,19 +902,23 @@ def launch_workflow_shell() -> None:
             cmd = lambda e=entry: _browse_file(e)
         ttk.Button(run_panel, text="Browse", command=cmd).grid(row=row, column=2, pady=2)
 
-    add_run_row(0, "Output folder", "output_dir", browse="folder")
-    add_run_row(1, "CellProfiler executable", "cellprofiler_executable")
+    ttk.Label(
+        run_panel, text="Output Settings", font=("Segoe UI", 10, "bold"),
+    ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+    add_run_row(1, "Default Input Folder", "input_dir", browse="folder")
+    add_run_row(2, "Default Output Folder", "output_dir", browse="folder")
+    add_run_row(3, "CellProfiler executable", "cellprofiler_executable")
     run_entries["cellprofiler_executable"].insert(
         0,
         executable_cache.cellprofiler.display_value,
     )
-    add_run_row(2, "Fiji executable", "fiji_executable")
+    add_run_row(4, "Fiji executable", "fiji_executable")
     if executable_cache.fiji.display_value:
         run_entries["fiji_executable"].insert(0, executable_cache.fiji.display_value)
-    add_run_row(3, "Fiji macro", "fiji_macro_path")
+    add_run_row(5, "Fiji macro", "fiji_macro_path")
 
     ttk.Label(run_panel, text="OIR projection engine").grid(
-        row=4, column=0, sticky="w", pady=2,
+        row=6, column=0, sticky="w", pady=2,
     )
     oir_projection_engine = tk.StringVar(
         value=default_oir_projection_engine_choice(
@@ -857,173 +932,199 @@ def launch_workflow_shell() -> None:
         state="readonly",
         width=12,
     )
-    oir_engine_combo.grid(row=4, column=1, sticky="w", padx=(8, 8), pady=2)
+    oir_engine_combo.grid(row=6, column=1, sticky="w", padx=(8, 8), pady=2)
 
     export_fiji = tk.BooleanVar(value=True)
     generate_qc = tk.BooleanVar(value=True)
     opts = ttk.Frame(run_panel)
-    opts.grid(row=5, column=0, columnspan=3, sticky="w", pady=(4, 0))
+    opts.grid(row=7, column=0, columnspan=3, sticky="w", pady=(4, 0))
     ttk.Checkbutton(opts, text="Run Fiji headless export", variable=export_fiji).pack(side="left")
     ttk.Checkbutton(opts, text="Generate QC overlays", variable=generate_qc).pack(
         side="left", padx=(12, 0),
     )
 
-    status = tk.StringVar(
-        value=(
-            startup_warnings[0]
-            if len(startup_warnings) == 1
-            else (
-                f"{len(startup_warnings)} startup warning(s). See output after run."
-                if startup_warnings
-                else "Ready."
-            )
-        ),
-    )
-    ttk.Label(run_panel, textvariable=status).grid(row=6, column=0, columnspan=3, sticky="w")
-
     output_text = tk.Text(run_panel, height=6, wrap="word")
-    output_text.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+    output_text.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(4, 0))
 
     results_preview = ttk.Label(run_panel, anchor="w", justify="left")
-    results_preview.grid(row=8, column=0, columnspan=3, sticky="w", pady=(6, 0))
+    results_preview.grid(row=9, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
     run_buttons = ttk.Frame(run_panel)
-    run_buttons.grid(row=9, column=0, columnspan=3, sticky="w", pady=(6, 0))
+    run_buttons.grid(row=10, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
     def write_output(text: str) -> None:
         output_text.delete("1.0", "end")
         output_text.insert("end", text)
 
-    def refresh_catalog(modules: list[ModuleDefinition] | None = None) -> None:
-        catalog_tree.delete(*catalog_tree.get_children())
-        if modules is None:
-            grouped = list_modules_by_category()
-            expand = False
+    def show_module_ui(show: bool = True) -> None:
+        if show:
+            output_settings_frame.grid_remove()
+            module_ui_frame.grid(row=0, column=0, sticky="nsew")
         else:
-            allowed = {module.name for module in modules}
-            grouped = [
-                (category, [m for m in mods if m.name in allowed])
-                for category, mods in list_modules_by_category()
-            ]
-            grouped = [(category, mods) for category, mods in grouped if mods]
-            expand = True
-        for category, category_modules in grouped:
-            category_id = f"cat::{category}"
-            catalog_tree.insert(
-                "", "end", iid=category_id,
-                text=f"{category} ({len(category_modules)})", open=expand,
-            )
-            for module in category_modules:
-                catalog_tree.insert(category_id, "end", iid=f"mod::{module.name}", text=module.name)
+            module_ui_frame.grid_remove()
 
-    def selected_catalog_module_name() -> str | None:
-        selection = catalog_tree.selection()
-        if not selection:
-            return None
-        item_id = selection[0]
-        if item_id.startswith("mod::"):
-            return item_id[len("mod::"):]
-        return None
+    def show_output_settings(show: bool = True) -> None:
+        if show:
+            module_ui_frame.grid_remove()
+            output_settings_frame.grid(row=0, column=0, sticky="nsew")
+            state = builder_state["state"]
+            if state is not None:
+                run_entries["input_dir"].delete(0, "end")
+                run_entries["input_dir"].insert(0, get_images_input_folder(state))
+        else:
+            output_settings_frame.grid_remove()
 
-    def refresh_detected_images_panel(parent: ttk.Frame, row_start: int, folder: str) -> int:
-        from PIL import ImageTk
+    def sync_input_folder_fields(folder: str) -> None:
+        if input_folder_var.get() != folder:
+            input_folder_var.set(folder)
+        if "input_dir" in run_entries:
+            entry = run_entries["input_dir"]
+            if entry.get().strip() != folder:
+                entry.delete(0, "end")
+                entry.insert(0, folder)
 
-        ttk.Label(parent, text="Detected images", font=("Segoe UI", 9, "bold")).grid(
-            row=row_start, column=0, columnspan=2, sticky="w", pady=(10, 4),
-        )
-        images = scan_detected_images(folder) if folder else []
-        listbox = tk.Listbox(
-            parent, height=min(8, max(3, len(images) or 3)), exportselection=False,
-        )
-        listbox.grid(row=row_start + 1, column=0, columnspan=2, sticky="ew", pady=(0, 4))
-        for path in images[:200]:
-            listbox.insert("end", path.name)
-        if not images:
-            listbox.insert("end", "(no images found)")
-        ttk.Label(
-            parent,
-            text=f"{len(images)} file(s) in {folder or '(not set)'}",
-            wraplength=420,
-        ).grid(row=row_start + 2, column=0, columnspan=2, sticky="w")
+    def sync_path_list_visibility(module_name: str | None) -> None:
+        """Show the file list only for the Images module, like CellProfiler."""
+        if should_show_path_list(module_name):
+            file_list_panel.grid()
+        else:
+            file_list_panel.grid_remove()
 
-        preview_label = ttk.Label(parent, anchor="center", relief="groove", padding=4)
-        preview_label.grid(row=row_start + 3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+    def sync_imageset_visibility(module_name: str | None) -> None:
+        if should_show_imageset(module_name):
+            imageset_panel.grid()
+        else:
+            imageset_panel.grid_remove()
 
-        def show_preview(_event: Any | None = None) -> None:
-            if not images:
-                preview_label.configure(image="", text="No image to preview.")
-                preview_label.image = None  # type: ignore[attr-defined]
-                return
-            selection = listbox.curselection()
-            index = selection[0] if selection else 0
-            if index >= len(images):
-                return
-            try:
-                photo = ImageTk.PhotoImage(load_preview_image(images[index]))
-            except Exception as exc:  # noqa: BLE001 - show any decode error inline
-                preview_label.configure(image="", text=f"Preview unavailable: {exc}")
-                preview_label.image = None  # type: ignore[attr-defined]
-                return
-            preview_label.configure(image=photo, text="")
-            preview_label.image = photo  # type: ignore[attr-defined]  # keep a reference
-
-        listbox.bind("<<ListboxSelect>>", show_preview)
-        if images:
-            listbox.selection_set(0)
-        show_preview()
-        return row_start + 4
-
-    def refresh_output_module_panel(parent: ttk.Frame, row_start: int) -> int:
+    def refresh_notes_panel() -> None:
         state = builder_state["state"]
-        lines = list_module_output_lines(state) if state is not None else []
-        ttk.Label(parent, text="Module output paths", font=("Segoe UI", 9, "bold")).grid(
-            row=row_start, column=0, columnspan=2, sticky="w", pady=(10, 4),
-        )
-        if lines:
-            body = "\n".join(f"• {line}" for line in lines)
+        module_notes_text.configure(state="normal")
+        module_notes_text.delete("1.0", "end")
+        if state is None or state.selected_module is None:
+            module_notes_text.configure(state="disabled")
+            return
+        selected = state.selected_module
+        notes = parse_module_notes(selected)
+        if not notes and state.selected_definition is not None:
+            notes = state.selected_definition.description
+        module_notes_text.insert("1.0", notes)
+        module_notes_text.configure(state="disabled")
+
+    def refresh_imageset_panel() -> None:
+        imageset_tree.delete(*imageset_tree.get_children())
+        state = builder_state["state"]
+        if state is None:
+            return
+        folder = get_images_input_folder(state)
+        columns, rows = build_imageset_rows(state.pipeline, folder)
+        imageset_tree.configure(columns=["cycle", *columns])
+        imageset_tree.heading("cycle", text="#")
+        imageset_tree.column("cycle", width=40, anchor="center")
+        for column in columns:
+            imageset_tree.heading(column, text=column)
+            imageset_tree.column(column, width=140, anchor="w")
+        for cycle, values in rows:
+            imageset_tree.insert("", "end", values=(cycle, *[values.get(col, "") for col in columns]))
+
+    def refresh_file_list_panel() -> None:
+        state = builder_state["state"]
+        folder = get_images_input_folder(state) if state is not None else ""
+        sync_input_folder_fields(folder)
+        file_list_tree.delete(*file_list_tree.get_children())
+        if not folder:
+            file_list_tree.insert("", "end", text="Drop files and folders here")
+            file_list_status.set("Browse for a folder to populate the file list.")
+            return
+        if show_excluded_var.get():
+            files = scan_folder_files(folder)
         else:
-            body = "Add SaveImages or ExportToSpreadsheet to configure module output."
-        ttk.Label(parent, text=body, wraplength=420, justify="left").grid(
-            row=row_start + 1, column=0, columnspan=2, sticky="w",
-        )
-        ttk.Label(
-            parent,
-            text=f"Global run output: {run_entries['output_dir'].get().strip() or '(not set)'}",
-            wraplength=420,
-        ).grid(row=row_start + 2, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        return row_start + 3
+            files = scan_detected_images(folder)
+        root_id = file_list_tree.insert("", "end", text=Path(folder).name, open=True)
+        if files:
+            for path in files[:500]:
+                file_list_tree.insert(root_id, "end", text=path.name)
+            file_list_status.set(f"{len(files)} file(s) in {folder}")
+        else:
+            file_list_tree.insert(root_id, "end", text="(no files found)")
+            file_list_status.set(f"0 file(s) in {folder}")
+
+    def apply_input_folder(*_args: Any) -> None:
+        state = builder_state["state"]
+        if state is None:
+            return
+        folder = input_folder_var.get().strip()
+        builder_state["state"] = set_images_input_folder(state, folder)
+        mark_modified()
+        sync_input_folder_fields(folder)
+        refresh_file_list_panel()
+        refresh_imageset_panel()
+
+    def browse_input_folder() -> None:
+        selected = filedialog.askdirectory()
+        if not selected:
+            return
+        input_folder_var.set(selected)
+        apply_input_folder()
+
+    def clear_file_list() -> None:
+        input_folder_var.set("")
+        apply_input_folder()
+
+    ttk.Button(file_list_tools, text="Browse...", command=browse_input_folder).pack(
+        side="left", padx=(6, 0),
+    )
+    ttk.Button(file_list_tools, text="Clear", command=clear_file_list).pack(
+        side="left", padx=(6, 0),
+    )
+    input_folder_entry.bind("<KeyRelease>", apply_input_folder)
+    show_excluded_var.trace_add("write", lambda *_args: refresh_file_list_panel())
+
+    def bind_default_input_folder() -> None:
+        def sync_from_output_settings(*_args: Any) -> None:
+            folder = run_entries["input_dir"].get().strip()
+            input_folder_var.set(folder)
+            apply_input_folder()
+
+        run_entries["input_dir"].bind("<KeyRelease>", sync_from_output_settings)
+
+    bind_default_input_folder()
 
     def refresh_settings_panel() -> None:
         for child in settings_frame.winfo_children():
             child.destroy()
         state = builder_state["state"]
         if state is None or state.selected_module is None:
-            ttk.Label(settings_frame, text="Select a pipeline module to edit settings.").grid(
-                row=0, column=0, sticky="w", pady=4,
-            )
+            module_settings_title.set("Module settings")
+            sync_path_list_visibility(None)
+            sync_imageset_visibility(None)
+            refresh_notes_panel()
+            ttk.Label(
+                settings_frame,
+                text="Select a pipeline module to edit settings.",
+                columnspan=2,
+            ).grid(row=0, column=0, sticky="w", pady=4)
             return
 
         selected_module = state.selected_module
-        definition = state.selected_definition
         values = state.selected_setting_values
-        title = selected_module.display_name
-        if definition is not None:
-            title = f"{selected_module.display_name} — {definition.category}"
-        ttk.Label(settings_frame, text=title, font=("Segoe UI", 10, "bold")).grid(
-            row=0, column=0, columnspan=2, sticky="w",
+        module_settings_title.set(
+            module_settings_label(selected_module.name, selected_module.module_num),
         )
-        if definition is not None and definition.description:
-            ttk.Label(settings_frame, text=definition.description, wraplength=480).grid(
-                row=1, column=0, columnspan=2, sticky="ew", pady=(2, 8),
-            )
+        sync_path_list_visibility(selected_module.name)
+        sync_imageset_visibility(selected_module.name)
+        refresh_notes_panel()
+        if should_show_path_list(selected_module.name):
+            refresh_file_list_panel()
+        if should_show_imageset(selected_module.name):
+            refresh_imageset_panel()
 
-        next_row = 2
+        next_row = 0
         parameters = state.selected_visible_parameters
         for parameter in parameters:
             current_value = values.get(parameter.label, parameter.default)
-            ttk.Label(settings_frame, text=parameter.label, wraplength=200).grid(
-                row=next_row, column=0, sticky="nw", pady=3, padx=(0, 8),
-            )
+            ttk.Label(
+                settings_frame, text=parameter.label, wraplength=240, justify="right",
+            ).grid(row=next_row, column=0, sticky="e", pady=3, padx=(0, 8))
             value_var = tk.StringVar(value=current_value)
 
             def apply_value(
@@ -1038,32 +1139,10 @@ def launch_workflow_shell() -> None:
                     st, st.selected_module_index, label, variable.get(),
                 )
                 mark_modified()
-                builder_status.set("Setting updated.")
+                status.set("Setting updated.")
                 refresh_settings_panel()
 
-            if parameter.label == IMAGES_INPUT_FOLDER_KEY:
-                row_frame = ttk.Frame(settings_frame)
-                row_frame.grid(row=next_row, column=1, sticky="ew", pady=3)
-                entry = ttk.Entry(row_frame, textvariable=value_var)
-                entry.pack(side="left", fill="x", expand=True)
-                entry.bind("<KeyRelease>", apply_value)
-
-                def browse_input_folder(var: tk.StringVar = value_var) -> None:
-                    selected = filedialog.askdirectory()
-                    if not selected:
-                        return
-                    st = builder_state["state"]
-                    if st is None:
-                        return
-                    builder_state["state"] = set_images_input_folder(st, selected)
-                    var.set(selected)
-                    mark_modified()
-                    refresh_settings_panel()
-
-                ttk.Button(row_frame, text="Browse...", command=browse_input_folder).pack(
-                    side="left", padx=(6, 0),
-                )
-            elif parameter.choices:
+            if parameter.choices:
                 widget = ttk.Combobox(
                     settings_frame, textvariable=value_var,
                     values=list(parameter.choices), state="readonly",
@@ -1076,20 +1155,130 @@ def launch_workflow_shell() -> None:
                 widget.grid(row=next_row, column=1, sticky="ew", pady=3)
             next_row += 1
 
-        if not parameters:
-            ttk.Label(settings_frame, text="No cataloged settings for this module.").grid(
-                row=next_row, column=0, sticky="w", pady=4,
-            )
+        if (
+            selected_module.name == "Groups"
+            and groups_wants_grouping(state.pipeline)
+        ):
+            ttk.Label(
+                settings_frame,
+                text=GROUPS_GROUPING_HELP,
+                wraplength=420,
+                justify="left",
+            ).grid(row=next_row, column=0, columnspan=2, sticky="w", pady=(8, 4))
             next_row += 1
 
-        if selected_module.name == "Images":
-            next_row = refresh_detected_images_panel(
-                settings_frame, next_row, get_images_input_folder(state),
-            )
-        if selected_module.name in {"SaveImages", "ExportToSpreadsheet"}:
-            next_row = refresh_output_module_panel(settings_frame, next_row)
+            metadata_choices = list_metadata_category_choices(state.pipeline)
+            categories = list_groups_metadata_categories(state.pipeline)
 
-        settings_frame.columnconfigure(1, weight=1)
+            for category_index, category_value in enumerate(categories):
+                ttk.Label(
+                    settings_frame,
+                    text=GROUPS_METADATA_CATEGORY,
+                    wraplength=240,
+                    justify="right",
+                ).grid(row=next_row, column=0, sticky="e", pady=3, padx=(0, 8))
+                category_var = tk.StringVar(value=category_value)
+
+                def apply_category(
+                    *_args: Any,
+                    index: int = category_index,
+                    variable: tk.StringVar = category_var,
+                ) -> None:
+                    st = builder_state["state"]
+                    if st is None or st.selected_module_index is None:
+                        return
+                    updated_categories = list_groups_metadata_categories(st.pipeline)
+                    if index >= len(updated_categories):
+                        return
+                    updated_categories[index] = variable.get()
+                    pipeline = update_groups_metadata_categories(
+                        st.pipeline,
+                        st.selected_module_index,
+                        updated_categories,
+                    )
+                    builder_state["state"] = PipelineBuilderState(
+                        pipeline=pipeline,
+                        catalog_modules=list(st.catalog_modules),
+                        selected_module_index=st.selected_module_index,
+                    )
+                    mark_modified()
+                    status.set("Grouping metadata updated.")
+                    refresh_settings_panel()
+
+                category_widget = ttk.Combobox(
+                    settings_frame,
+                    textvariable=category_var,
+                    values=metadata_choices,
+                    state="readonly",
+                )
+                category_widget.bind("<<ComboboxSelected>>", apply_category)
+                category_widget.grid(row=next_row, column=1, sticky="ew", pady=3)
+
+                if category_index > 0:
+                    def remove_category(index: int = category_index) -> None:
+                        st = builder_state["state"]
+                        if st is None or st.selected_module_index is None:
+                            return
+                        updated_categories = list_groups_metadata_categories(st.pipeline)
+                        if len(updated_categories) <= 1 or index >= len(updated_categories):
+                            return
+                        del updated_categories[index]
+                        pipeline = update_groups_metadata_categories(
+                            st.pipeline,
+                            st.selected_module_index,
+                            updated_categories,
+                        )
+                        builder_state["state"] = PipelineBuilderState(
+                            pipeline=pipeline,
+                            catalog_modules=list(st.catalog_modules),
+                            selected_module_index=st.selected_module_index,
+                        )
+                        mark_modified()
+                        status.set("Grouping metadata removed.")
+                        refresh_settings_panel()
+
+                    ttk.Button(
+                        settings_frame,
+                        text="Remove this metadata item",
+                        command=remove_category,
+                    ).grid(row=next_row, column=2, sticky="w", padx=(8, 0), pady=3)
+                next_row += 1
+
+            def add_metadata_category() -> None:
+                st = builder_state["state"]
+                if st is None or st.selected_module_index is None:
+                    return
+                updated_categories = list_groups_metadata_categories(st.pipeline)
+                default_category = metadata_choices[0]
+                updated_categories.append(default_category)
+                pipeline = update_groups_metadata_categories(
+                    st.pipeline,
+                    st.selected_module_index,
+                    updated_categories,
+                )
+                builder_state["state"] = PipelineBuilderState(
+                    pipeline=pipeline,
+                    catalog_modules=list(st.catalog_modules),
+                    selected_module_index=st.selected_module_index,
+                )
+                mark_modified()
+                status.set("Grouping metadata added.")
+                refresh_settings_panel()
+
+            ttk.Button(
+                settings_frame,
+                text="Add another metadata item",
+                command=add_metadata_category,
+            ).grid(row=next_row, column=0, columnspan=2, sticky="w", pady=(4, 0))
+            next_row += 1
+
+        if not parameters:
+            ttk.Label(
+                settings_frame, text="No cataloged settings for this module.", columnspan=2,
+            ).grid(row=next_row, column=0, sticky="w", pady=4)
+
+        settings_frame.columnconfigure(0, weight=1)
+        settings_frame.columnconfigure(1, weight=2)
 
     def refresh_pipeline_list() -> None:
         input_list.delete(0, "end")
@@ -1097,6 +1286,7 @@ def launch_workflow_shell() -> None:
         state = builder_state["state"]
         if state is None:
             refresh_settings_panel()
+            refresh_file_list_panel()
             return
         input_rows, analysis_rows, protected = split_pipeline_rows(state.pipeline.modules)
         for row in input_rows:
@@ -1115,10 +1305,8 @@ def launch_workflow_shell() -> None:
                 pipeline_list.selection_set(analysis_index)
                 pipeline_list.see(analysis_index)
         refresh_settings_panel()
-
-    def search_catalog() -> None:
-        query = catalog_query.get().strip()
-        refresh_catalog(None if not query else search_modules(query))
+        refresh_file_list_panel()
+        show_module_ui(True)
 
     def add_module(module_name: str) -> None:
         state = builder_state["state"]
@@ -1131,29 +1319,15 @@ def launch_workflow_shell() -> None:
             messagebox.showerror("Pipeline builder", str(exc))
             return
         mark_modified()
+        show_module_ui(True)
         refresh_pipeline_list()
-        builder_status.set(f"Added {module_name}.")
+        status.set(f"Added {module_name}.")
 
-    def add_selected_module(_event: Any | None = None) -> None:
-        module_name = selected_catalog_module_name()
-        if module_name is None:
-            messagebox.showerror("Pipeline builder", "Select a module from a category first.")
-            return
-        add_module(module_name)
+    def show_add_module_dialog() -> None:
+        def on_help(definition: ModuleDefinition) -> None:
+            messagebox.showinfo(f"Help: {definition.name}", definition.description)
 
-    add_module_menu = tk.Menu(root, tearoff=0)
-    for _category, _category_modules in list_modules_by_category():
-        _submenu = tk.Menu(add_module_menu, tearoff=0)
-        for _module in _category_modules:
-            _submenu.add_command(
-                label=_module.name, command=lambda n=_module.name: add_module(n),
-            )
-        add_module_menu.add_cascade(label=_category, menu=_submenu)
-
-    def show_add_module_menu() -> None:
-        x = add_module_button.winfo_rootx()
-        y = add_module_button.winfo_rooty() + add_module_button.winfo_height()
-        add_module_menu.tk_popup(x, y)
+        open_add_module_dialog(root, on_add=add_module, on_help=on_help)
 
     def protected_count() -> int:
         state = builder_state["state"]
@@ -1180,6 +1354,7 @@ def launch_workflow_shell() -> None:
         builder_state["state"] = select_pipeline_module(
             state, protected_count() + selection[0],
         )
+        show_module_ui(True)
         refresh_settings_panel()
 
     def select_input_module_from_list(_event: Any | None = None) -> None:
@@ -1191,6 +1366,7 @@ def launch_workflow_shell() -> None:
             return
         pipeline_list.selection_clear(0, "end")
         builder_state["state"] = select_pipeline_module(state, selection[0])
+        show_module_ui(True)
         refresh_settings_panel()
 
     def delete_selected_module(_event: Any | None = None) -> None:
@@ -1209,7 +1385,7 @@ def launch_workflow_shell() -> None:
         builder_state["state"] = remove_pipeline_module(state, index)
         mark_modified()
         refresh_pipeline_list()
-        builder_status.set(f"Removed {module.name}.")
+        status.set(f"Removed {module.name}.")
 
     def move_selected_module_by(delta: int) -> None:
         state = builder_state["state"]
@@ -1219,7 +1395,7 @@ def launch_workflow_shell() -> None:
             return
         module = state.pipeline.modules[index]
         if is_protected_module_name(module.name):
-            builder_status.set("Required setup modules keep a fixed position.")
+            status.set("Required setup modules keep a fixed position.")
             return
         floor = leading_protected_count(state.pipeline.modules)
         target = max(floor, min(index + delta, len(state.pipeline.modules) - 1))
@@ -1228,7 +1404,7 @@ def launch_workflow_shell() -> None:
         builder_state["state"] = move_pipeline_module(state, index, target)
         mark_modified()
         refresh_pipeline_list()
-        builder_status.set("Module order updated.")
+        status.set("Module order updated.")
 
     def current_config() -> GuiWorkflowConfig:
         state = builder_state["state"]
@@ -1343,7 +1519,7 @@ def launch_workflow_shell() -> None:
         if output_dir:
             open_path(output_dir)
 
-    run_button = ttk.Button(run_buttons, text="Run Pipeline", command=run_async)
+    run_button = ttk.Button(run_buttons, text="Analyze Images", command=run_async)
     run_button.pack(side="left")
     ttk.Button(run_buttons, text="Open Results Folder", command=open_results).pack(
         side="left", padx=(8, 0),
@@ -1374,32 +1550,25 @@ def launch_workflow_shell() -> None:
     pipeline_list.bind("<Button-3>", show_pipeline_menu)
     pipeline_list.bind("<Delete>", delete_selected_module)
 
+    ttk.Button(module_controls, text="?", width=3, command=help_module).pack(side="left")
+    ttk.Label(module_controls, text="Adjust modules:").pack(side="left", padx=(8, 4))
     add_module_button = ttk.Button(
-        module_controls, text="+ Add Module", command=show_add_module_menu,
+        module_controls, text="+", width=3, command=show_add_module_dialog,
     )
     add_module_button.pack(side="left")
-    ttk.Button(module_controls, text="Delete", command=delete_selected_module).pack(
-        side="left", padx=(6, 0),
+    ttk.Button(module_controls, text="-", width=3, command=delete_selected_module).pack(
+        side="left", padx=(4, 0),
     )
-    ttk.Button(module_controls, text="Up", command=lambda: move_selected_module_by(-1)).pack(
-        side="left", padx=(6, 0),
-    )
-    ttk.Button(module_controls, text="Down", command=lambda: move_selected_module_by(1)).pack(
-        side="left", padx=(6, 0),
-    )
-
-    catalog_buttons = ttk.Frame(catalog_panel)
-    catalog_buttons.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
-    ttk.Button(catalog_buttons, text="Search", command=search_catalog).pack(side="left")
     ttk.Button(
-        catalog_buttons, text="Clear",
-        command=lambda: (catalog_query.delete(0, "end"), refresh_catalog()),
-    ).pack(side="left", padx=(8, 0))
-    ttk.Button(catalog_buttons, text="Add Module", command=add_selected_module).pack(
-        side="left", padx=(8, 0),
+        module_controls, text="^", width=3, command=lambda: move_selected_module_by(-1),
+    ).pack(side="left", padx=(4, 0))
+    ttk.Button(
+        module_controls, text="v", width=3, command=lambda: move_selected_module_by(1),
+    ).pack(side="left", padx=(4, 0))
+
+    ttk.Button(outputs_row, text="Output Settings", command=lambda: show_output_settings(True)).pack(
+        fill="x",
     )
-    catalog_tree.bind("<Double-1>", lambda _e: add_selected_module() if selected_catalog_module_name() else None)
-    catalog_query.bind("<Return>", lambda _e: search_catalog())
 
     if startup_warnings:
         write_output("\n".join(startup_warnings))

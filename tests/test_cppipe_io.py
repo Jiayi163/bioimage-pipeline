@@ -194,6 +194,150 @@ def test_phase_15_2_catalog_includes_setting_metadata() -> None:
     assert parameters["Enter single file name"].visibility.mode == "conditional"
 
 
+def test_images_input_folder_is_managed_in_file_list_not_module_settings() -> None:
+    images = get_module_definition("Images")
+    visible_labels = [parameter.label for parameter in images.visible_parameters()]
+    assert "Input folder path" not in visible_labels
+    assert "Filter images?" in visible_labels
+
+
+def test_save_images_defaults_export_segmentation_masks() -> None:
+    module = get_module_definition("SaveImages")
+    parameters = {parameter.label: parameter.default for parameter in module.parameters}
+
+    assert parameters["Select the type of image to save"] == "Mask"
+    assert parameters["Select the image to save"] == "Nuclei"
+    assert parameters["Enter file prefix"] == "Nuclei_mask"
+    assert parameters["Select method for constructing file names"] == "From image filename"
+    assert parameters["Image bit depth"] == "8-bit integer"
+
+
+def test_prepare_pipeline_save_images_uses_image_filename_not_sequential() -> None:
+    from bioimage_pipeline.cppipe_io import prepare_pipeline_for_cellprofiler
+
+    pipeline = create_pipeline_from_catalog()
+    pipeline = append_module(pipeline, "IdentifyPrimaryObjects")
+    pipeline = append_module(pipeline, "SaveImages")
+
+    prepared = prepare_pipeline_for_cellprofiler(pipeline)
+    save_images = next(module for module in prepared.modules if module.name == "SaveImages")
+    settings = {setting.key: setting.value for setting in save_images.settings}
+
+    assert settings["Select method for constructing file names"] == "From image filename"
+    assert settings["Select image name for file prefix"] == "DNA"
+    assert "Select object to save" not in settings
+    assert prepared.to_text().count("Sequential numbers") == 0
+
+
+def test_update_module_setting_appends_indented_lines() -> None:
+    pipeline = create_pipeline_from_catalog()
+    images_index = next(
+        index for index, module in enumerate(pipeline.modules) if module.name == "Images"
+    )
+    updated = update_module_setting(
+        pipeline,
+        images_index,
+        "Input folder path",
+        r"C:\data\images",
+    )
+    images_module = updated.modules[images_index]
+    assert any(
+        line == r"    Input folder path:C:\data\images"
+        for line in images_module.lines
+    )
+    assert "Input folder path:C:\\data\\images" not in images_module.lines
+
+
+def test_prepare_pipeline_adds_export_to_spreadsheet_for_analysis_modules() -> None:
+    from bioimage_pipeline.cppipe_io import prepare_pipeline_for_cellprofiler
+
+    pipeline = create_pipeline_from_catalog()
+    pipeline = append_module(pipeline, "IdentifyPrimaryObjects")
+    pipeline = append_module(pipeline, "SaveImages")
+
+    prepared = prepare_pipeline_for_cellprofiler(pipeline)
+    assert "ExportToSpreadsheet" in [module.name for module in prepared.modules]
+
+
+def test_prepare_pipeline_for_cellprofiler_strips_gui_only_settings() -> None:
+    from bioimage_pipeline.cppipe_io import prepare_pipeline_for_cellprofiler
+
+    corrupted = parse_cppipe_text(
+        """CellProfiler Pipeline: http://www.cellprofiler.org
+Version:5
+ModuleCount:2
+HasImagePlaneDetails:False
+
+Images:[module_num:1|svn_version:'Unknown'|variable_revision_number:2|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+    :
+    Filter images?:Images only
+Input folder path:C:\\data\\images
+Metadata:[module_num:2|svn_version:'Unknown'|variable_revision_number:6|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+    Extract metadata?:No
+"""
+    )
+
+    prepared = prepare_pipeline_for_cellprofiler(corrupted)
+    prepared_text = prepared.to_text()
+    assert "Input folder path" not in prepared_text
+    assert "Metadata:" in prepared_text
+    assert "Filter images?:Images only" in prepared_text
+
+
+def test_normalize_save_images_rewrites_image_exports() -> None:
+    from bioimage_pipeline.cppipe_io import (
+        append_module,
+        create_pipeline_from_catalog,
+        normalize_save_images_in_pipeline,
+        save_images_needs_normalization,
+    )
+
+    pipeline = create_pipeline_from_catalog()
+    pipeline = append_module(pipeline, "IdentifyPrimaryObjects")
+    pipeline = append_module(pipeline, "SaveImages")
+
+    save_index = next(
+        index for index, module in enumerate(pipeline.modules) if module.name == "SaveImages"
+    )
+    settings = {
+        setting.key: setting.value
+        for setting in pipeline.modules[save_index].settings
+    }
+    assert save_images_needs_normalization(settings) is False
+
+    legacy = create_pipeline_from_catalog()
+    legacy = append_module(legacy, "IdentifyPrimaryObjects")
+    legacy = append_module(legacy, get_module_definition("SaveImages"))
+    legacy_index = next(
+        index for index, module in enumerate(legacy.modules) if module.name == "SaveImages"
+    )
+    legacy = update_module_setting(
+        legacy,
+        legacy_index,
+        "Select the type of image to save",
+        "Image",
+    )
+    legacy = update_module_setting(legacy, legacy_index, "Select the image to save", "DNA")
+    legacy = update_module_setting(legacy, legacy_index, "Enter file prefix", "Nuclei")
+
+    legacy_settings = {
+        setting.key: setting.value for setting in legacy.modules[legacy_index].settings
+    }
+    assert save_images_needs_normalization(legacy_settings) is True
+
+    normalized = normalize_save_images_in_pipeline(legacy)
+    normalized_index = next(
+        index for index, module in enumerate(normalized.modules) if module.name == "SaveImages"
+    )
+    normalized_settings = {
+        setting.key: setting.value
+        for setting in normalized.modules[normalized_index].settings
+    }
+    assert normalized_settings["Select the type of image to save"] == "Mask"
+    assert normalized_settings["Select the image to save"] == "Nuclei"
+    assert normalized_settings["Enter file prefix"] == "Nuclei_mask"
+
+
 def test_conditional_visible_settings_follow_current_values() -> None:
     metadata = get_module_definition("Metadata")
     default_labels = [parameter.label for parameter in metadata.visible_parameters()]
@@ -251,22 +395,88 @@ def test_names_and_types_visible_settings_follow_manual_intensity_choice() -> No
     assert manual_labels.count("Maximum intensity") == 1
 
 
-def test_names_and_types_cppipe_preserves_hidden_per_assignment_settings() -> None:
+def test_names_and_types_pixel_spacing_hidden_unless_process_as_3d() -> None:
+    names_and_types = get_module_definition("NamesAndTypes")
+    default_labels = [
+        parameter.label for parameter in names_and_types.visible_parameters()
+    ]
+    three_d_labels = [
+        parameter.label
+        for parameter in names_and_types.visible_parameters({"Process as 3D?": "Yes"})
+    ]
+
+    for axis in ("X", "Y", "Z"):
+        label = f"Relative pixel spacing in {axis}"
+        assert label not in default_labels
+        assert label in three_d_labels
+
+
+def test_groups_module_matches_cellprofiler_v2_structure() -> None:
+    groups = get_module_definition("Groups")
+    pipeline = create_pipeline_from_catalog()
+    groups_module = next(module for module in pipeline.modules if module.name == "Groups")
+    text = pipeline.to_text()
+
+    assert groups.variable_revision_number == 2
+    assert groups_module.lines.count("    Do you want to group your images?:No") == 1
+    assert groups_module.lines.count("    grouping metadata count:1") == 1
+    assert groups_module.lines.count("    Metadata category:None") == 1
+    assert "variable_revision_number:2" in text
+
+
+def test_groups_visible_settings_follow_grouping_choice() -> None:
+    groups = get_module_definition("Groups")
+    default_labels = [parameter.label for parameter in groups.visible_parameters()]
+    grouping_labels = [
+        parameter.label
+        for parameter in groups.visible_parameters({"Do you want to group your images?": "Yes"})
+    ]
+
+    assert default_labels == ["Do you want to group your images?"]
+    assert grouping_labels == ["Do you want to group your images?"]
+    assert "Metadata category" not in default_labels
+
+
+def test_rewrite_groups_module_settings_supports_multiple_metadata_categories() -> None:
+    from bioimage_pipeline.cppipe_io import rewrite_groups_module_settings
+
+    pipeline = create_pipeline_from_catalog()
+    groups_index = next(
+        index for index, module in enumerate(pipeline.modules) if module.name == "Groups"
+    )
+
+    updated = rewrite_groups_module_settings(
+        pipeline,
+        groups_index,
+        wants_groups="Yes",
+        metadata_categories=["Plate", "Well"],
+    )
+    module = updated.modules[groups_index]
+    text = updated.to_text()
+
+    assert module.lines.count("    Do you want to group your images?:Yes") == 1
+    assert module.lines.count("    grouping metadata count:2") == 1
+    assert module.lines.count("    Metadata category:Plate") == 1
+    assert module.lines.count("    Metadata category:Well") == 1
+    assert "Metadata category:None" not in text
+
+
+def test_names_and_types_cppipe_has_single_assignment_block() -> None:
     pipeline = create_pipeline_from_catalog()
     names_module = next(
         module for module in pipeline.modules if module.name == "NamesAndTypes"
     )
     text = pipeline.to_text()
 
-    assert names_module.lines.count("    Name to assign these images:DNA") == 2
-    assert "    Name to assign these objects:Cell" in text
-    assert names_module.lines.count("    Select the image type:Grayscale image") == 2
-    assert names_module.lines.count("    Set intensity range from:Image metadata") == 2
-    assert names_module.lines.count("    Maximum intensity:255.0") == 2
+    assert names_module.lines.count("    Name to assign these images:DNA") == 1
+    assert "    Name to assign these objects:Cell" not in text
+    assert names_module.lines.count("    Select the image type:Grayscale image") == 1
+    assert names_module.lines.count("    Set intensity range from:Image metadata") == 1
+    assert names_module.lines.count("    Maximum intensity:255.0") == 0
     assert "NamesAndTypes:" in text
 
 
-def test_update_module_setting_syncs_duplicate_setting_keys() -> None:
+def test_update_module_setting_updates_single_names_and_types_assignment() -> None:
     pipeline = create_pipeline_from_catalog()
     names_index = next(
         index
@@ -279,7 +489,7 @@ def test_update_module_setting_syncs_duplicate_setting_keys() -> None:
     )
     module = updated.modules[names_index]
 
-    assert module.lines.count("    Name to assign these images:DAPI") == 2
+    assert module.lines.count("    Name to assign these images:DAPI") == 1
     assert module.lines.count("    Name to assign these images:DNA") == 0
 
 

@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 
 from bioimage_pipeline.analysis import run_cellprofiler_workflow
+from bioimage_pipeline.export import OrganizedFijiExports
 from bioimage_pipeline.cellprofiler_runner import (
     CellProfilerMeasurementsResult,
     CellProfilerRunResult,
@@ -201,6 +202,76 @@ def test_workflow_uses_batch_fiji_export_when_available(
         "total_seconds",
     }
     assert (logs_dir / "workflow_summary.json").exists()
+
+
+@patch("bioimage_pipeline.analysis.organize_cellprofiler_tiffs_for_fiji")
+@patch("bioimage_pipeline.analysis.run_fiji_batch_export")
+@patch("bioimage_pipeline.analysis.generate_qc_for_cellprofiler_results")
+@patch("bioimage_pipeline.analysis.copy_cellprofiler_measurements")
+@patch("bioimage_pipeline.analysis.load_cellprofiler_measurements")
+@patch("bioimage_pipeline.analysis.merge_cellprofiler_tables")
+@patch("bioimage_pipeline.analysis.run_cellprofiler_pipeline_logged")
+def test_workflow_classifies_tiffs_when_fiji_finds_no_exports(
+    mock_run_logged: MagicMock,
+    mock_merge: MagicMock,
+    mock_load: MagicMock,
+    mock_copy: MagicMock,
+    mock_generate_qc: MagicMock,
+    mock_run_fiji: MagicMock,
+    mock_organize: MagicMock,
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "input"
+    results_dir = tmp_path / "results"
+    cppipe = tmp_path / "pipeline.cppipe"
+    input_dir.mkdir()
+    cppipe.write_text("pipeline", encoding="utf-8")
+
+    raw_dir = results_dir / RESULTS_RAW_DIR
+    logs_dir = results_dir / RESULTS_LOGS_DIR
+    masks_dir = results_dir / RESULTS_MASKS_DIR
+    labels_dir = results_dir / RESULTS_LABELS_DIR
+    mask_export = masks_dir / "Nuclei_mask0001.tif"
+
+    mock_run_logged.return_value = _successful_cp_run(raw_dir, logs_dir)
+    mock_copy.return_value = []
+    mock_load.return_value = CellProfilerMeasurementsResult(
+        tables={"MyExpt_Image": pd.DataFrame({"Image_Number": [1], "FileName": ["sample.tif"]})},
+        metadata={},
+        warnings=[],
+    )
+    mock_merge.return_value = (pd.DataFrame({"Image_Number": [1]}), [])
+    mock_generate_qc.return_value = {}
+    mock_run_fiji.return_value = FijiExportResult(
+        input_dir=raw_dir.resolve(),
+        masks_dir=masks_dir.resolve(),
+        labels_dir=labels_dir.resolve(),
+        macro_path=DEFAULT_FIJI_EXPORT_MACRO.resolve(),
+        executable=(tmp_path / "ImageJ-win64.exe").resolve(),
+        command=["ImageJ-win64.exe", "--headless", "-macro", "export_folder.ijm"],
+        returncode=0,
+        stdout="done",
+        stderr="",
+        log_files={"stdout": logs_dir / "fiji_stdout.log"},
+        mask_exports=[],
+        label_exports=[],
+    )
+    mock_organize.return_value = OrganizedFijiExports(
+        masks=[mask_export],
+        labels=[],
+        intensity=[],
+    )
+
+    result = run_cellprofiler_workflow(
+        input_dir,
+        results_dir,
+        cppipe,
+        fiji_executable=tmp_path / "ImageJ-win64.exe",
+    )
+
+    mock_organize.assert_called_once()
+    assert result.export_engine == "fiji+python_classify"
+    assert result.mask_exports == [mask_export]
 
 
 def test_run_fiji_export_cli_help() -> None:
