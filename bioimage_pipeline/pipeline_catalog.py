@@ -1,4 +1,8 @@
-"""Curated CellProfiler module catalog for the Phase 15.2 GUI builder.
+"""Curated CellProfiler module catalog for the deprecated Phase 15.2 GUI builder.
+
+.. deprecated::
+    Pipelines should be authored in native CellProfiler and imported by path.
+    This catalog remains for legacy tests and optional ``apply_legacy_rewrites``.
 
 The catalog intentionally stores only lightweight metadata that our GUI needs
 to build a conservative CellProfiler headless pipeline. It is not a vendored

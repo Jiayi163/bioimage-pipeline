@@ -1,20 +1,20 @@
-# GUI Direction (Phase 15 — 15.1 → 15.2)
+# GUI Direction (Phase 15 — import-only orchestration shell)
 
 The GUI is a **front-end and workflow manager** for CellProfiler and Fiji. It
-exposes CellProfiler functionality through pipeline configuration and orchestration
-— it does **not** reimplement CellProfiler algorithms.
+imports user-authored ``.cppipe`` files and orchestrates headless batch runs — it
+does **not** reimplement CellProfiler algorithms or edit module settings in-app.
 
-Phase 15 ships in two steps: **15.1** (proper workflow shell, complete) and
-**15.2** (pipeline builder, complete).
+Phase 15 ships as an **import-only shell**: pipeline path, read-only module summary,
+input/output folders, run controls, logs, and QC preview.
 
 ## Product goal
 
 | Goal | Yes / No |
 |------|----------|
-| Expose CellProfiler modules and pipelines through our application | **Yes** |
+| Expose CellProfiler modules and pipelines through our application | **Yes** (import + read-only summary) |
 | Reimplement CellProfiler segmentation/measurement algorithms in Python | **No** |
 | Run CellProfiler headlessly as the analysis engine | **Yes** |
-| Provide visual pipeline building and parameter configuration | **Yes** |
+| Provide visual pipeline building and parameter configuration | **No** — use native CellProfiler |
 | Replace CellProfiler desktop app for execution | **No** — we delegate to CP CLI |
 
 ## Architecture

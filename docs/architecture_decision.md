@@ -1,8 +1,8 @@
 # Architecture Decision: Custom App vs CellProfiler Fork
 
-**Date:** 2026-06-10  
+**Date:** 2026-06-10 (updated 2026-06-11)  
 **Status:** Accepted  
-**Decision:** **Hybrid strategy (Option 1 + native CellProfiler authoring)**
+**Decision:** **Import-only orchestration shell + native CellProfiler authoring**
 
 ## Context
 
@@ -18,36 +18,37 @@ See the feasibility analysis for full comparison.
 
 ## Decision
 
-Adopt a **hybrid strategy**:
+Adopt an **import-only orchestration shell**:
 
-1. **Continue Option 1** as the primary product shell for pipeline editing (lightweight)
-   and integrated **CP → Fiji → QC execution**.
-2. **Do not fork CellProfiler** for the editor unless full module-setting fidelity
-   and Bio-Formats preview become hard blockers.
-3. **Use native CellProfiler** for advanced pipeline authoring when catalog stubs are
-   insufficient (`.cppipe` round-trip via **Pipeline → Open in CellProfiler**).
-4. **Defer full CP fork**; document CP-native workflows (OIR Z-max via MakeProjection)
-   instead of porting the entire stack into a fork.
+1. **Author pipelines in native CellProfiler** — the GUI imports a ``.cppipe`` path and
+   runs it headlessly without rewriting module settings.
+2. **Continue this app** as the batch orchestration shell: **CP → Fiji → QC**, OIR
+   projection, logs, and organized results folders.
+3. **Do not fork CellProfiler** for an in-app module editor.
+4. **Deprecate the Phase 15.2 catalog builder** for production use; keep parse/validate
+   utilities and legacy tests only.
 
 ## Consequences
 
 ### In scope (custom app)
 
-- Phases C–F: file menu, Images-centric input, output path surfacing, editor-first layout
+- Import-only GUI: pipeline path, read-only module list, input/output folders, run/logs/QC
 - Headless CellProfiler + Fiji orchestration (existing)
 - OIR Z-max and stack batch tools (existing Python/Fiji paths)
 
 ### Out of scope (for now)
 
+- In-app CellProfiler module editor / catalog builder (deprecated)
 - Full CellProfiler ModuleView parity (92 modules × all setting types)
 - Maintaining a CellProfiler fork
 - Bio-Formats preview inside the Tkinter shell
+- Automatic pipeline rewrites (SaveImages normalization, auto ExportToSpreadsheet)
 
-### Hybrid authoring workflow
+### Import-only workflow
 
-1. Build or edit pipeline in the custom editor (setup modules + catalog modules).
-2. For complex module settings, use **Open in CellProfiler**, save `.cppipe`, reload.
-3. Run from the custom app (materializes working pipeline, no separate file pick required).
+1. Author and save pipeline in CellProfiler.
+2. **File → Open Pipeline...** in this app; optional **Open in CellProfiler** for edits.
+3. Set input/output folders; **Analyze Images** runs the imported file via ``-p`` and ``-i``.
 
 ## References
 

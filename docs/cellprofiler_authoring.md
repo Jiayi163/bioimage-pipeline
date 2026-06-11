@@ -1,16 +1,34 @@
-# CellProfiler Authoring (Hybrid Workflow)
+# CellProfiler Authoring (Import-Only Workflow)
 
-Use native CellProfiler when the custom editor's catalog stubs are not enough for
-complex module settings (Filters, Joiners, measurement pickers, etc.).
+Author pipelines in **native CellProfiler**. This application imports the saved
+``.cppipe`` file and runs it headlessly with batch orchestration (OIR projection,
+Fiji export, QC, organized results).
 
 ## Workflow
 
-1. Build the setup block in the custom editor: **Images → Metadata → NamesAndTypes → Groups**.
-2. Add analysis modules from the catalog, or start from a saved `.cppipe`.
-3. **Tools → Open in CellProfiler...** (materializes the current pipeline to a working file and launches CellProfiler).
-4. Edit settings in CellProfiler; **File → Save** in CellProfiler.
-5. **File → Open Pipeline...** in the custom editor to reload the updated `.cppipe`.
-6. Set the **Images → Input folder path** in the custom editor and **Run Pipeline**.
+1. Create or edit a pipeline in CellProfiler (all module settings, file lists, exports).
+2. **File → Save** in CellProfiler.
+3. In this app: **File → Open Pipeline...** and select the ``.cppipe`` file.
+4. Set **Default Input Folder** and **Default Output Folder** in the workflow panel.
+5. **Analyze Images** — the imported file is passed to CellProfiler as-is (no rewrites).
+
+Use **Tools → Open in CellProfiler...** to jump back to CellProfiler for edits, then
+re-import the saved pipeline.
+
+## Required pipeline outputs (your responsibility)
+
+The app does not auto-insert modules. Include whatever you need:
+
+| Goal | Typical CellProfiler module |
+|------|----------------------------|
+| Measurement CSVs | **ExportToSpreadsheet** |
+| Mask/label TIFFs for Fiji/QC | **SaveImages** (mask or objects) |
+
+Before each run, the GUI shows **advisories** (not auto-fixes) when export modules
+are missing or when embedded input paths do not exist on this machine.
+
+Input images are passed via CellProfiler's ``-i`` CLI flag from **Default Input
+Folder**, not by rewriting the pipeline file.
 
 ## OIR Z-max via native CellProfiler (MakeProjection)
 

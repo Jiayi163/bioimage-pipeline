@@ -287,6 +287,19 @@ def scan_detected_images(
     return sorted(found, key=lambda item: item.name.lower())
 
 
+def resolve_workflow_input_dir_from_string(input_dir: str | Path) -> Path:
+    """Resolve the run input directory from the GUI default input folder field."""
+    folder = str(input_dir).strip()
+    if not folder:
+        raise ValueError("Select an input folder before running.")
+    path = Path(folder)
+    if not path.is_dir():
+        raise ValueError(f"Input folder does not exist: {path}")
+    if not scan_detected_images(path, limit=1):
+        raise ValueError(f"No image files detected in: {path}")
+    return path
+
+
 def resolve_workflow_input_dir(state: PipelineBuilderState) -> Path:
     """Resolve the run input directory from the Images module."""
     folder = get_images_input_folder(state)
@@ -300,10 +313,10 @@ def resolve_workflow_input_dir(state: PipelineBuilderState) -> Path:
     return path
 
 
-def list_module_output_lines(state: PipelineBuilderState) -> list[str]:
-    """Summarize SaveImages / ExportToSpreadsheet output settings in the pipeline."""
+def list_module_output_lines_for_pipeline(pipeline: CppipePipeline) -> list[str]:
+    """Summarize SaveImages / ExportToSpreadsheet output settings in a pipeline."""
     lines: list[str] = []
-    for module in state.pipeline.modules:
+    for module in pipeline.modules:
         if module.name not in OUTPUT_MODULES:
             continue
         values = {setting.key: setting.value for setting in module.settings}
@@ -316,6 +329,11 @@ def list_module_output_lines(state: PipelineBuilderState) -> list[str]:
             prefix = values.get("Filename prefix", "MyExpt_")
             lines.append(f"ExportToSpreadsheet → {location} (prefix: {prefix})")
     return lines
+
+
+def list_module_output_lines(state: PipelineBuilderState) -> list[str]:
+    """Summarize SaveImages / ExportToSpreadsheet output settings in the pipeline."""
+    return list_module_output_lines_for_pipeline(state.pipeline)
 
 
 def launch_cellprofiler_gui(

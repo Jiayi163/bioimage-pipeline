@@ -118,7 +118,7 @@ def test_validate_workflow_config_reports_missing_paths(tmp_path: Path) -> None:
 
     errors = validate_workflow_config(config)
 
-    assert "Set an input folder in the Images module before running." in errors
+    assert "Select an input folder before running." in errors
     assert "Output folder is required." in errors
 
 
@@ -377,3 +377,25 @@ def test_load_measurements_preview_limits_rows(tmp_path: Path) -> None:
     preview = load_measurements_preview(csv_path, max_rows=2)
 
     assert preview["a"].tolist() == [1, 2]
+
+
+def test_load_imported_pipeline_validates_cppipe(tmp_path: Path) -> None:
+    from bioimage_pipeline.gui.workflow_shell import load_imported_pipeline
+
+    cppipe = tmp_path / "pipeline.cppipe"
+    cppipe.write_text(
+        """CellProfiler Pipeline: http://www.cellprofiler.org
+Version:5
+ModuleCount:1
+HasImagePlaneDetails:False
+
+Images:[module_num:1|svn_version:'Unknown'|variable_revision_number:2|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+    Filter images?:Images only
+""",
+        encoding="utf-8",
+    )
+
+    state = load_imported_pipeline(cppipe)
+
+    assert state.path == cppipe.resolve()
+    assert state.pipeline.modules[0].name == "Images"

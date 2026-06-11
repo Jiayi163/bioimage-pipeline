@@ -219,7 +219,7 @@ def test_prepare_pipeline_save_images_uses_image_filename_not_sequential() -> No
     pipeline = append_module(pipeline, "IdentifyPrimaryObjects")
     pipeline = append_module(pipeline, "SaveImages")
 
-    prepared = prepare_pipeline_for_cellprofiler(pipeline)
+    prepared = prepare_pipeline_for_cellprofiler(pipeline, apply_legacy_rewrites=True)
     save_images = next(module for module in prepared.modules if module.name == "SaveImages")
     settings = {setting.key: setting.value for setting in save_images.settings}
 
@@ -255,7 +255,7 @@ def test_prepare_pipeline_adds_export_to_spreadsheet_for_analysis_modules() -> N
     pipeline = append_module(pipeline, "IdentifyPrimaryObjects")
     pipeline = append_module(pipeline, "SaveImages")
 
-    prepared = prepare_pipeline_for_cellprofiler(pipeline)
+    prepared = prepare_pipeline_for_cellprofiler(pipeline, apply_legacy_rewrites=True)
     assert "ExportToSpreadsheet" in [module.name for module in prepared.modules]
 
 
@@ -277,7 +277,7 @@ Metadata:[module_num:2|svn_version:'Unknown'|variable_revision_number:6|show_win
 """
     )
 
-    prepared = prepare_pipeline_for_cellprofiler(corrupted)
+    prepared = prepare_pipeline_for_cellprofiler(corrupted, apply_legacy_rewrites=True)
     prepared_text = prepared.to_text()
     assert "Input folder path" not in prepared_text
     assert "Metadata:" in prepared_text
@@ -573,3 +573,49 @@ def test_generated_pipeline_can_be_passed_to_cellprofiler_runner(tmp_path: Path)
     assert str(pipeline_path) in command
     assert str(input_dir) in command
     assert str(output_dir) in command
+
+
+def test_prepare_pipeline_for_cellprofiler_default_is_identity() -> None:
+    from bioimage_pipeline.cppipe_io import prepare_pipeline_for_cellprofiler
+
+    pipeline = create_pipeline_from_catalog()
+    pipeline = append_module(pipeline, "IdentifyPrimaryObjects")
+
+    prepared = prepare_pipeline_for_cellprofiler(pipeline)
+
+    assert prepared.to_text() == pipeline.to_text()
+
+
+def test_advise_pipeline_for_run_warns_on_missing_exports() -> None:
+    from bioimage_pipeline.cppipe_io import advise_pipeline_for_run
+
+    pipeline = create_pipeline_from_catalog()
+    pipeline = append_module(pipeline, "IdentifyPrimaryObjects")
+
+    advisories = advise_pipeline_for_run(pipeline)
+
+    assert any("ExportToSpreadsheet" in line for line in advisories)
+    assert any("SaveImages" in line for line in advisories)
+
+
+def test_prepare_pipeline_for_cellprofiler_default_is_identity() -> None:
+    from bioimage_pipeline.cppipe_io import prepare_pipeline_for_cellprofiler
+
+    pipeline = create_pipeline_from_catalog()
+    pipeline = append_module(pipeline, "IdentifyPrimaryObjects")
+
+    prepared = prepare_pipeline_for_cellprofiler(pipeline)
+
+    assert prepared.to_text() == pipeline.to_text()
+
+
+def test_advise_pipeline_for_run_warns_on_missing_exports() -> None:
+    from bioimage_pipeline.cppipe_io import advise_pipeline_for_run
+
+    pipeline = create_pipeline_from_catalog()
+    pipeline = append_module(pipeline, "IdentifyPrimaryObjects")
+
+    advisories = advise_pipeline_for_run(pipeline)
+
+    assert any("ExportToSpreadsheet" in line for line in advisories)
+    assert any("SaveImages" in line for line in advisories)

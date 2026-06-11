@@ -544,6 +544,52 @@ def normalize_input_modules_for_cellprofiler(
     )
 
 
+def load_and_validate_imported_pipeline(cppipe_path: str | Path) -> CppipePipeline:
+    """Load a user-authored ``.cppipe`` file and validate structure only."""
+    path = Path(cppipe_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"CellProfiler pipeline file not found: {path}")
+    pipeline = load_cppipe(path)
+    errors = validate_cppipe(pipeline)
+    if errors:
+        raise ValueError("\n".join(errors))
+    return pipeline
+
+
+def advise_pipeline_for_run(pipeline: CppipePipeline) -> list[str]:
+    """Return advisory warnings before running an imported pipeline headlessly."""
+    advisories: list[str] = []
+    module_names = {module.name for module in pipeline.modules}
+    if not module_names:
+        advisories.append("Pipeline has no CellProfiler modules.")
+        return advisories
+    if "ExportToSpreadsheet" not in module_names:
+        advisories.append(
+            "No ExportToSpreadsheet module found — measurement CSVs may be empty."
+        )
+    if "SaveImages" not in module_names:
+        advisories.append(
+            "No SaveImages module found — mask/label TIFF exports and QC overlays "
+            "may be empty."
+        )
+    for module in pipeline.modules:
+        if module.name != "Images":
+            continue
+        for setting in module.settings:
+            if setting.key != "Input folder path":
+                continue
+            folder = setting.value.strip()
+            if not folder:
+                continue
+            folder_path = Path(folder)
+            if not folder_path.is_dir():
+                advisories.append(
+                    "Images module references an input folder path that does not "
+                    f"exist on this machine: {folder_path}"
+                )
+    return advisories
+
+
 def ensure_export_to_spreadsheet(pipeline: CppipePipeline) -> CppipePipeline:
     """Append ExportToSpreadsheet when analysis modules need measurement CSVs."""
     module_names = {module.name for module in pipeline.modules}
@@ -554,8 +600,33 @@ def ensure_export_to_spreadsheet(pipeline: CppipePipeline) -> CppipePipeline:
     return append_module(pipeline, "ExportToSpreadsheet")
 
 
-def prepare_pipeline_for_cellprofiler(pipeline: CppipePipeline) -> CppipePipeline:
-    """Return a copy safe to hand to headless CellProfiler."""
+def prepare_pipeline_for_cellprofiler(
+    pipeline: CppipePipeline,
+    *,
+    apply_legacy_rewrites: bool = False,
+) -> CppipePipeline:
+    """Return a copy of a pipeline for headless CellProfiler.
+
+    By default (import-only mode) the pipeline is returned unchanged. Set
+    ``apply_legacy_rewrites=True`` to apply deprecated GUI-builder normalization
+    (SaveImages rewrite, module template resets, auto ExportToSpreadsheet).
+    """
+    if not apply_legacy_rewrites:
+        return CppipePipeline(
+            preamble=list(pipeline.preamble),
+            modules=list(pipeline.modules),
+            trailing=list(pipeline.trailing),
+            source_path=pipeline.source_path,
+        )
+
+    import warnings
+
+    warnings.warn(
+        "prepare_pipeline_for_cellprofiler(apply_legacy_rewrites=True) is deprecated "
+        "and will be removed. Author pipelines in CellProfiler and run them import-only.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     prepared = normalize_input_modules_for_cellprofiler(pipeline)
     prepared = normalize_identify_primary_objects_for_cellprofiler(prepared)
     prepared = normalize_save_images_for_cellprofiler(prepared)
