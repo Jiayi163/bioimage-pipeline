@@ -138,6 +138,7 @@ def process_oir_file_python_timed(
     output_dir: str | Path,
     *,
     z_axis: int = 0,
+    audit_logs_dir: str | Path | None = None,
 ) -> tuple[Path, "PrepareInputFileRecord"]:
     """Z-max project one ``.oir`` file and return output path plus timing record."""
     import time
@@ -167,7 +168,7 @@ def process_oir_file_python_timed(
     conversion_seconds = time.perf_counter() - conversion_started
 
     write_started = time.perf_counter()
-    save_tiff(output_path, projected)
+    save_tiff(output_path, projected, audit_logs_dir=audit_logs_dir)
     write_seconds = time.perf_counter() - write_started
 
     resolved_output = output_path.resolve()

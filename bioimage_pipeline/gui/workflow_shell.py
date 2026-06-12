@@ -17,7 +17,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from bioimage_pipeline.analysis import CellProfilerWorkflowResult
+from bioimage_pipeline.analysis import CellProfilerWorkflowResult, resolve_workflow_output_dir
 from bioimage_pipeline.cellprofiler_runner import find_cellprofiler_executable
 from bioimage_pipeline.fiji_runner import find_fiji_executable, fiji_not_found_message
 from bioimage_pipeline.gui.run_settings import (
@@ -368,7 +368,11 @@ def validate_workflow_config(config: GuiWorkflowConfig) -> list[str]:
         errors.append("Output folder is required.")
 
     input_dir = Path(config.input_dir) if str(config.input_dir).strip() else None
-    output_dir = Path(config.output_dir) if str(config.output_dir).strip() else None
+    output_dir = (
+        Path(config.output_dir).expanduser().resolve()
+        if str(config.output_dir).strip()
+        else None
+    )
 
     if input_dir is not None:
         if not input_dir.is_dir():
@@ -515,9 +519,10 @@ def run_gui_workflow(
 
         runner = run_cellprofiler_workflow
 
+    resolved_output_dir = resolve_workflow_output_dir(config.output_dir)
     result = runner(
         config.input_dir,
-        config.output_dir,
+        str(resolved_output_dir),
         config.cppipe_path,
         cellprofiler_executable=config.cellprofiler_executable,
         fiji_executable=config.fiji_executable,
@@ -847,6 +852,26 @@ def launch_workflow_shell() -> None:
         if errors:
             messagebox.showerror("Invalid workflow settings", "\n".join(errors))
             return
+
+        try:
+            resolved_output_dir = resolve_workflow_output_dir(config.output_dir)
+        except ValueError as exc:
+            messagebox.showerror("Invalid workflow settings", str(exc))
+            return
+
+        run_entries["output_dir"].delete(0, "end")
+        run_entries["output_dir"].insert(0, str(resolved_output_dir))
+        config = GuiWorkflowConfig(
+            input_dir=str(input_path),
+            output_dir=str(resolved_output_dir),
+            cppipe_path=str(cppipe_path),
+            cellprofiler_executable=config.cellprofiler_executable,
+            fiji_executable=config.fiji_executable,
+            fiji_macro_path=config.fiji_macro_path,
+            export_fiji_tiffs=config.export_fiji_tiffs,
+            generate_qc=config.generate_qc,
+            oir_projection_engine=config.oir_projection_engine,
+        )
 
         save_gui_run_settings(
             collect_run_settings_from_values(

@@ -44,6 +44,7 @@ def save_tiff(
     *,
     metadata: TiffExportMetadata | None = None,
     imagej_compatible: bool = False,
+    audit_logs_dir: str | Path | None = None,
 ) -> Path:
     """Save image data to a TIFF file.
 
@@ -70,7 +71,20 @@ def save_tiff(
         tifffile.imwrite(image_path, image)
     except Exception as exc:
         raise OSError(f"Could not save TIFF file: {image_path}") from exc
-    return image_path.resolve()
+    resolved = image_path.resolve()
+    if audit_logs_dir is not None:
+        from bioimage_pipeline.oir_projection_lifecycle import (
+            is_oir_projection_path,
+            log_oir_projection_audit,
+        )
+
+        if is_oir_projection_path(resolved):
+            log_oir_projection_audit(
+                audit_logs_dir,
+                "write_tif",
+                {"path": str(resolved)},
+            )
+    return resolved
 
 
 # ---------------------------------------------------------------------------

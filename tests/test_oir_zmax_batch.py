@@ -509,3 +509,93 @@ def test_build_oir_zmax_macro_includes_cache_skip(tmp_path: Path) -> None:
     macro_text = build_oir_zmax_macro(tmp_path / "input", tmp_path / "output")
     assert "cache hit, skipping" in macro_text
     assert "lastModified()" in macro_text
+
+
+def test_resolve_workflow_output_dir_relative_path(tmp_path: Path, monkeypatch) -> None:
+    from bioimage_pipeline.analysis import resolve_workflow_output_dir
+
+    monkeypatch.chdir(tmp_path)
+    resolved = resolve_workflow_output_dir("output")
+
+    assert resolved == (tmp_path / "output").resolve()
+    assert resolved.is_dir()
+
+
+def test_build_pre_cache_snapshot_lists_existing_tifs(tmp_path: Path) -> None:
+    from bioimage_pipeline.oir_zmax_batch import OirFilePair, build_pre_cache_snapshot
+
+    projection_dir = tmp_path / "oir_projection"
+    projection_dir.mkdir()
+    existing = projection_dir / "existing.tif"
+    existing.write_bytes(b"x" * 100)
+    oir_path = tmp_path / "input" / "sample.oir"
+    oir_path.parent.mkdir()
+    oir_path.write_bytes(b"oir")
+
+    snapshot = build_pre_cache_snapshot(
+        projection_dir,
+        [
+            OirFilePair(
+                input_oir=oir_path.resolve(),
+                output_tif=(projection_dir / "sample.tif").resolve(),
+            )
+        ],
+    )
+
+    assert snapshot["projection_output_dir"] == str(projection_dir.resolve())
+    assert snapshot["projection_output_dir_exists"] is True
+    assert len(snapshot["existing_tifs"]) == 1
+    assert snapshot["existing_tifs"][0]["path"] == str(existing.resolve())
+    assert snapshot["existing_tifs"][0]["size_bytes"] == 100
+    assert snapshot["expected_pairs"] == [
+        {
+            "input_oir": str(oir_path.resolve()),
+            "expected_output_tif": str((projection_dir / "sample.tif").resolve()),
+        }
+    ]
+
+
+def test_log_projection_cache_decisions_writes_pre_cache_snapshot(tmp_path: Path) -> None:
+    import json
+
+    from bioimage_pipeline.oir_zmax_batch import (
+        OirFilePair,
+        build_pre_cache_snapshot,
+        log_projection_cache_decisions,
+    )
+
+    projection_dir = tmp_path / "oir_projection"
+    projection_dir.mkdir()
+    oir_path = tmp_path / "sample.oir"
+    oir_path.write_bytes(b"oir")
+    pair = OirFilePair(
+        input_oir=oir_path.resolve(),
+        output_tif=(projection_dir / "sample.tif").resolve(),
+    )
+    snapshot = build_pre_cache_snapshot(projection_dir, [pair])
+    logs_dir = tmp_path / "logs"
+
+    log_projection_cache_decisions(
+        [pair],
+        engine="python",
+        force_reproject=False,
+        cached_pairs=[],
+        to_project=[pair],
+        skip_fiji=False,
+        logs_dir=logs_dir,
+        pre_cache_snapshot=snapshot,
+    )
+
+    debug_json = json.loads(
+        (logs_dir / "oir_projection_cache_debug.json").read_text(encoding="utf-8")
+    )
+    debug_text = (logs_dir / "oir_projection_cache_debug.txt").read_text(encoding="utf-8")
+
+    assert debug_json["pre_cache_snapshot"]["projection_output_dir"] == str(
+        projection_dir.resolve()
+    )
+    assert debug_json["pre_cache_snapshot"]["expected_pairs"][0]["input_oir"] == str(
+        oir_path.resolve()
+    )
+    assert "Pre-cache snapshot:" in debug_text
+    assert "expected_output_tif:" in debug_text

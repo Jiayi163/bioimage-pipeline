@@ -13,6 +13,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from bioimage_pipeline.oir_projection_lifecycle import (
+    OirProjectionLifecycleRecorder,
+    list_projection_tiff_entries,
+    log_oir_projection_audit,
+)
 from bioimage_pipeline.z_projection import (
     OirPythonReadError,
     PYTHON_OIR_MISSING_DEPS_MESSAGE,
@@ -109,7 +114,77 @@ def _ijm_path(path: Path) -> str:
     return str(path.resolve()).replace("\\", "/").replace('"', '\\"')
 
 
-    force_oir_reproject: bool = False
+def _ensure_projection_output_dir(
+    output_path: Path,
+    *,
+    logs_dir: Path | None = None,
+) -> None:
+    """Create the projection output folder and audit when it is newly created."""
+    existed = output_path.is_dir()
+    output_path.mkdir(parents=True, exist_ok=True)
+    if not existed:
+        log_oir_projection_audit(
+            logs_dir,
+            "mkdir_projection_dir",
+            {"path": str(output_path.resolve())},
+        )
+
+
+def build_pre_cache_snapshot(
+    projection_output_dir: Path,
+    file_pairs: list[OirFilePair],
+) -> dict[str, Any]:
+    """Capture projection folder state immediately before cache evaluation."""
+    resolved_dir = projection_output_dir.expanduser().resolve()
+    return {
+        "projection_output_dir": str(resolved_dir),
+        "projection_output_dir_exists": resolved_dir.is_dir(),
+        "existing_tifs": list_projection_tiff_entries(resolved_dir),
+        "expected_pairs": [
+            {
+                "input_oir": str(pair.input_oir.resolve()),
+                "expected_output_tif": str(pair.output_tif.resolve()),
+            }
+            for pair in file_pairs
+        ],
+    }
+
+
+def format_pre_cache_snapshot_report(snapshot: dict[str, Any]) -> str:
+    """Format a pre-cache snapshot for human-readable debug logs."""
+    lines = [
+        "Pre-cache snapshot:",
+        f"  projection_output_dir: {snapshot['projection_output_dir']}",
+        f"  projection_output_dir_exists: {snapshot['projection_output_dir_exists']}",
+        "  existing_tifs:",
+    ]
+    existing_tifs = snapshot.get("existing_tifs") or []
+    if existing_tifs:
+        for entry in existing_tifs:
+            lines.append(
+                "    - "
+                f"path={entry['path']} "
+                f"size_bytes={entry['size_bytes']} "
+                f"mtime={entry['mtime']} "
+                f"mtime_ns={entry['mtime_ns']}"
+            )
+    else:
+        lines.append("    (none)")
+
+    lines.append("  expected_pairs:")
+    expected_pairs = snapshot.get("expected_pairs") or []
+    if expected_pairs:
+        for pair in expected_pairs:
+            lines.extend(
+                [
+                    f"    - input_oir: {pair['input_oir']}",
+                    f"      expected_output_tif: {pair['expected_output_tif']}",
+                ]
+            )
+    else:
+        lines.append("    (none)")
+    lines.append("")
+    return "\n".join(lines)
 
 
 @dataclass
@@ -244,18 +319,25 @@ def format_projection_cache_debug_report(
     cached_count: int,
     to_project_count: int,
     skip_fiji: bool,
+    pre_cache_snapshot: dict[str, Any] | None = None,
 ) -> str:
     """Format cache decisions for logs and on-disk debugging."""
-    lines = [
-        "OIR projection cache debug:",
-        f"  engine: {engine}",
-        f"  force_oir_reproject: {decisions[0].force_oir_reproject if decisions else False}",
-        f"  cache_hits: {cached_count}",
-        f"  to_project: {to_project_count}",
-        f"  skip_fiji_launch: {skip_fiji}",
-        "",
-        "Per-pair decisions:",
-    ]
+    lines: list[str] = []
+    if pre_cache_snapshot is not None:
+        lines.append(format_pre_cache_snapshot_report(pre_cache_snapshot).rstrip())
+        lines.append("")
+    lines.extend(
+        [
+            "OIR projection cache debug:",
+            f"  engine: {engine}",
+            f"  force_oir_reproject: {decisions[0].force_oir_reproject if decisions else False}",
+            f"  cache_hits: {cached_count}",
+            f"  to_project: {to_project_count}",
+            f"  skip_fiji_launch: {skip_fiji}",
+            "",
+            "Per-pair decisions:",
+        ]
+    )
     for decision in decisions:
         lines.extend(
             [
@@ -285,6 +367,7 @@ def log_projection_cache_decisions(
     to_project: list[OirFilePair],
     skip_fiji: bool,
     logs_dir: Path | None = None,
+    pre_cache_snapshot: dict[str, Any] | None = None,
 ) -> list[ProjectionCacheDecision]:
     """Log per-pair cache decisions and optionally persist them under logs_dir."""
     decisions = [
@@ -297,6 +380,7 @@ def log_projection_cache_decisions(
         cached_count=len(cached_pairs),
         to_project_count=len(to_project),
         skip_fiji=skip_fiji,
+        pre_cache_snapshot=pre_cache_snapshot,
     )
     logger.info("\n%s", report.rstrip())
     if logs_dir is not None:
@@ -304,18 +388,18 @@ def log_projection_cache_decisions(
         debug_path = logs_dir / OIR_PROJECTION_CACHE_DEBUG_LOG
         debug_path.write_text(report, encoding="utf-8")
         summary_path = logs_dir / "oir_projection_cache_debug.json"
+        payload: dict[str, Any] = {
+            "engine": engine,
+            "force_oir_reproject": force_reproject,
+            "cache_hits": len(cached_pairs),
+            "to_project": len(to_project),
+            "skip_fiji_launch": skip_fiji,
+            "decisions": [asdict(decision) for decision in decisions],
+        }
+        if pre_cache_snapshot is not None:
+            payload["pre_cache_snapshot"] = pre_cache_snapshot
         summary_path.write_text(
-            json.dumps(
-                {
-                    "engine": engine,
-                    "force_oir_reproject": force_reproject,
-                    "cache_hits": len(cached_pairs),
-                    "to_project": len(to_project),
-                    "skip_fiji_launch": skip_fiji,
-                    "decisions": [asdict(decision) for decision in decisions],
-                },
-                indent=2,
-            ),
+            json.dumps(payload, indent=2),
             encoding="utf-8",
         )
     return decisions
@@ -622,6 +706,8 @@ def _list_output_tiffs(output_dir: Path) -> list[Path]:
 def _reconcile_fiji_outputs(
     output_dir: Path,
     file_pairs: list[OirFilePair],
+    *,
+    logs_dir: Path | None = None,
 ) -> tuple[list[str], list[dict[str, Any]], list[str], list[dict[str, str]]]:
     """Match created TIFFs to expected outputs and rename when needed."""
     actual_files = _list_output_tiffs(output_dir)
@@ -656,6 +742,11 @@ def _reconcile_fiji_outputs(
             source = candidates[0]
             if source.resolve() != pair.output_tif.resolve():
                 pair.output_tif.parent.mkdir(parents=True, exist_ok=True)
+                log_oir_projection_audit(
+                    logs_dir,
+                    "move_within_projection_dir",
+                    {"from": str(source.resolve()), "to": str(pair.output_tif.resolve())},
+                )
                 shutil.move(str(source), str(pair.output_tif))
                 remapped.append({"from": str(source), "to": str(pair.output_tif)})
             processed.append(pair.output_tif.name)
@@ -684,6 +775,11 @@ def _reconcile_fiji_outputs(
         for pair, source in zip(unmatched_pairs, unused_files, strict=False):
             if source.resolve() != pair.output_tif.resolve():
                 pair.output_tif.parent.mkdir(parents=True, exist_ok=True)
+                log_oir_projection_audit(
+                    logs_dir,
+                    "move_within_projection_dir",
+                    {"from": str(source.resolve()), "to": str(pair.output_tif.resolve())},
+                )
                 shutil.move(str(source), str(pair.output_tif))
                 remapped.append({"from": str(source), "to": str(pair.output_tif)})
             processed.append(pair.output_tif.name)
@@ -751,6 +847,13 @@ def _write_fiji_oir_projection_logs(
     return log_files
 
 
+def _record_after_projection(
+    lifecycle: OirProjectionLifecycleRecorder | None,
+) -> None:
+    if lifecycle is not None:
+        lifecycle.record_stage("after_projection")
+
+
 def _run_fiji_oir_zmax_batch(
     input_path: Path,
     output_path: Path,
@@ -761,6 +864,8 @@ def _run_fiji_oir_zmax_batch(
     fiji_headless: bool | None = None,
     fiji_timeout: float | None = None,
     force_oir_reproject: bool = False,
+    pre_cache_snapshot: dict[str, Any] | None = None,
+    lifecycle: OirProjectionLifecycleRecorder | None = None,
 ) -> OirZmaxBatchResult:
     from bioimage_pipeline.fiji_runner import (
         find_fiji_executable,
@@ -768,6 +873,9 @@ def _run_fiji_oir_zmax_batch(
         format_fiji_error_summary,
         run_fiji_macro,
     )
+
+    if pre_cache_snapshot is None:
+        pre_cache_snapshot = build_pre_cache_snapshot(output_path, file_pairs)
 
     cached_pairs, to_project = partition_projection_pairs(
         file_pairs,
@@ -785,6 +893,7 @@ def _run_fiji_oir_zmax_batch(
         to_project=to_project,
         skip_fiji=skip_fiji,
         logs_dir=logs_dir,
+        pre_cache_snapshot=pre_cache_snapshot,
     )
 
     if skip_fiji:
@@ -792,7 +901,7 @@ def _run_fiji_oir_zmax_batch(
             "Skipping Fiji OIR projection: all %d file(s) satisfied output-folder cache.",
             len(cached_pairs),
         )
-        return _build_cache_only_result(
+        result = _build_cache_only_result(
             input_path=input_path,
             output_path=output_path,
             engine="fiji",
@@ -800,6 +909,8 @@ def _run_fiji_oir_zmax_batch(
             cached_pairs=cached_pairs,
             force_oir_reproject=force_oir_reproject,
         )
+        _record_after_projection(lifecycle)
+        return result
 
     executable = find_fiji_executable(fiji_executable)
     if executable is None:
@@ -834,6 +945,7 @@ def _run_fiji_oir_zmax_batch(
     processed, failed, files_created, remapped = _reconcile_fiji_outputs(
         output_path,
         to_project,
+        logs_dir=logs_dir,
     )
     from bioimage_pipeline.prepare_input_profile import parse_fiji_oir_file_records
 
@@ -878,6 +990,7 @@ def _run_fiji_oir_zmax_batch(
                     f"Fiji output:\n{fiji_error}"
                 )
 
+    _record_after_projection(lifecycle)
     return OirZmaxBatchResult(
         input_dir=input_path,
         output_dir=output_path.resolve(),
@@ -910,6 +1023,7 @@ def run_oir_zmax_batch(
     fiji_headless: bool | None = None,
     fiji_timeout: float | None = None,
     force_oir_reproject: bool = False,
+    lifecycle: OirProjectionLifecycleRecorder | None = None,
 ) -> OirZmaxBatchResult:
     """Z-max project every ``.oir`` file under *input_dir* into *output_dir*.
 
@@ -920,8 +1034,8 @@ def run_oir_zmax_batch(
     """
     input_path = _normalize_input_dir(input_dir)
     output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
     logs_path = Path(logs_dir) if logs_dir is not None else None
+    _ensure_projection_output_dir(output_path, logs_dir=logs_path)
 
     resolved_engine = resolve_oir_projection_engine(
         engine,
@@ -929,10 +1043,12 @@ def run_oir_zmax_batch(
     )
     oir_files = list(iter_oir_files(input_path))
     file_pairs = _build_file_pairs(oir_files, output_path)
-    cached_pairs, to_project = partition_projection_pairs(
-        file_pairs,
-        force_reproject=force_oir_reproject,
-    )
+    pre_cache_snapshot = build_pre_cache_snapshot(output_path, file_pairs)
+    if lifecycle is not None:
+        lifecycle.record_stage(
+            "before_cache_evaluation",
+            snapshot=pre_cache_snapshot,
+        )
 
     if resolved_engine == "fiji":
         return _run_fiji_oir_zmax_batch(
@@ -944,7 +1060,14 @@ def run_oir_zmax_batch(
             fiji_headless=fiji_headless,
             fiji_timeout=fiji_timeout,
             force_oir_reproject=force_oir_reproject,
+            pre_cache_snapshot=pre_cache_snapshot,
+            lifecycle=lifecycle,
         )
+
+    cached_pairs, to_project = partition_projection_pairs(
+        file_pairs,
+        force_reproject=force_oir_reproject,
+    )
 
     log_projection_cache_decisions(
         file_pairs,
@@ -954,13 +1077,14 @@ def run_oir_zmax_batch(
         to_project=to_project,
         skip_fiji=False,
         logs_dir=logs_path,
+        pre_cache_snapshot=pre_cache_snapshot,
     )
 
     cache_hits = [pair.output_tif.name for pair in cached_pairs]
     file_profiles = [_cache_hit_record(pair, engine="python") for pair in cached_pairs]
 
     if not to_project:
-        return _build_cache_only_result(
+        result = _build_cache_only_result(
             input_path=input_path,
             output_path=output_path,
             engine="python",
@@ -968,6 +1092,8 @@ def run_oir_zmax_batch(
             cached_pairs=cached_pairs,
             force_oir_reproject=force_oir_reproject,
         )
+        _record_after_projection(lifecycle)
+        return result
 
     if not python_oir_dependencies_available():
         raise RuntimeError(PYTHON_OIR_MISSING_DEPS_MESSAGE)
@@ -980,6 +1106,7 @@ def run_oir_zmax_batch(
             _output_path, record = process_oir_file_python_timed(
                 pair.input_oir,
                 output_path,
+                audit_logs_dir=logs_path,
             )
             file_profiles.append(record)
             if pair.output_tif.is_file():
@@ -1015,6 +1142,7 @@ def run_oir_zmax_batch(
                 )
             )
 
+    _record_after_projection(lifecycle)
     return OirZmaxBatchResult(
         input_dir=input_path,
         output_dir=output_path.resolve(),

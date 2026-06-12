@@ -192,7 +192,7 @@ def test_run_gui_workflow_delegates_to_headless_workflow(tmp_path: Path) -> None
     )
 
     assert len(calls) == 1
-    assert calls[0]["args"] == (input_dir, output_dir, cppipe)
+    assert calls[0]["args"] == (input_dir, str(output_dir.resolve()), cppipe)
     assert calls[0]["kwargs"]["cellprofiler_executable"] == "cellprofiler"
     assert calls[0]["kwargs"]["export_fiji_tiffs"] is True
     assert summary.processed_count == 1
@@ -365,6 +365,7 @@ def test_prepare_cellprofiler_input_dir_projects_oir(tmp_path: Path) -> None:
         fiji_headless=None,
         fiji_timeout=None,
         force_oir_reproject=False,
+        lifecycle=None,
     )
     assert resolved_input == projection_dir.resolve()
     assert summary_log == logs_dir / "oir_projection_summary.json"

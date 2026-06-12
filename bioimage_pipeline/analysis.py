@@ -47,6 +47,10 @@ from bioimage_pipeline.workflow_timing import (
     init_workflow_timing,
     log_timing_breakdown,
 )
+from bioimage_pipeline.oir_projection_lifecycle import (
+    AUDIT_LOG,
+    OirProjectionLifecycleRecorder,
+)
 
 AnalysisEngine = Literal["python", "cellprofiler"]
 LabelingMethod = Literal["connected", "watershed"]
@@ -55,6 +59,16 @@ _SUPPORTED_LABELING = frozenset({"connected", "watershed"})
 
 RESULTS_STAGING_DIR = "staging"
 RESULTS_OIR_PROJECTION_DIR = "oir_projection"
+
+
+def resolve_workflow_output_dir(output_dir: str | Path) -> Path:
+    """Return a stable absolute results directory for workflow outputs."""
+    path = Path(output_dir).expanduser()
+    if not str(path).strip():
+        raise ValueError("Output directory is required.")
+    resolved = path.resolve()
+    resolved.mkdir(parents=True, exist_ok=True)
+    return resolved
 
 
 def generate_qc_for_cellprofiler_results(*args: Any, **kwargs: Any) -> Any:
@@ -422,6 +436,17 @@ def _format_oir_projection_failure(failed: list[dict[str, Any]]) -> str:
     )
 
 
+def _attach_oir_projection_lifecycle_logs(
+    log_files: dict[str, Path],
+    lifecycle: OirProjectionLifecycleRecorder | None,
+) -> None:
+    if lifecycle is None:
+        return
+    lifecycle.record_stage("workflow_end")
+    log_files["oir_projection_lifecycle"] = lifecycle.lifecycle_path
+    log_files["oir_projection_audit"] = lifecycle.logs_dir / AUDIT_LOG
+
+
 def _prepare_cellprofiler_input_dir(
     input_dir: Path,
     *,
@@ -432,6 +457,7 @@ def _prepare_cellprofiler_input_dir(
     fiji_headless: bool | None = None,
     fiji_timeout: float | None = None,
     force_oir_reproject: bool = False,
+    lifecycle: OirProjectionLifecycleRecorder | None = None,
 ) -> tuple[Path, Path | None]:
     """Project ``.oir`` stacks to TIFF when needed and return the CP input folder."""
     import time
@@ -474,6 +500,8 @@ def _prepare_cellprofiler_input_dir(
         return source_dir, profile_path
 
     projection_dir = results_dir / RESULTS_OIR_PROJECTION_DIR
+    if lifecycle is not None:
+        lifecycle.record_stage("prepare_input_entry")
     engine: OirZmaxEngine = (
         oir_projection_engine  # type: ignore[assignment]
         if oir_projection_engine in {"python", "fiji", "auto"}
@@ -489,6 +517,7 @@ def _prepare_cellprofiler_input_dir(
         fiji_headless=fiji_headless,
         fiji_timeout=fiji_timeout,
         force_oir_reproject=force_oir_reproject,
+        lifecycle=lifecycle,
     )
     projection_seconds = time.perf_counter() - projection_started
 
@@ -594,6 +623,7 @@ def _prepare_workflow_directories(results_dir: Path) -> dict[str, Path]:
         "labels": results_dir / RESULTS_LABELS_DIR,
         "qc": results_dir / RESULTS_QC_DIR,
         "logs": results_dir / RESULTS_LOGS_DIR,
+        "oir_projection": results_dir / RESULTS_OIR_PROJECTION_DIR,
     }
     for path in directories.values():
         path.mkdir(parents=True, exist_ok=True)
@@ -778,7 +808,15 @@ def run_cellprofiler_workflow_from_config(
     timing["pipeline_materialization_seconds"] = elapsed_since(checkpoint)
 
     checkpoint = time.perf_counter()
-    directories = _prepare_workflow_directories(Path(config.output_dir))
+    results_dir = resolve_workflow_output_dir(config.output_dir)
+    lifecycle = OirProjectionLifecycleRecorder(
+        logs_dir=results_dir / RESULTS_LOGS_DIR,
+        results_dir=results_dir,
+        projection_dir=results_dir / RESULTS_OIR_PROJECTION_DIR,
+    )
+    lifecycle.record_workflow_start()
+    directories = _prepare_workflow_directories(results_dir)
+    lifecycle.record_stage("setup_directories")
     timing["setup_directories_seconds"] = elapsed_since(checkpoint)
 
     checkpoint = time.perf_counter()
@@ -791,6 +829,7 @@ def run_cellprofiler_workflow_from_config(
         fiji_headless=config.fiji_headless,
         fiji_timeout=config.fiji_timeout,
         force_oir_reproject=config.force_oir_reproject,
+        lifecycle=lifecycle,
     )
     timing["prepare_input_seconds"] = elapsed_since(checkpoint)
 
@@ -827,6 +866,10 @@ def run_cellprofiler_workflow_from_config(
     timing["cellprofiler_subprocess_seconds"] = run_result.subprocess_seconds
     if not run_result.succeeded:
         _finalize_and_log_timing(timing, total_started, directories["logs"])
+        failure_log_files = dict(run_result.log_files)
+        if oir_projection_log is not None:
+            failure_log_files["oir_projection"] = oir_projection_log
+        _attach_oir_projection_lifecycle_logs(failure_log_files, lifecycle)
         _write_workflow_summary(
             directories["logs"],
             CellProfilerWorkflowResult(
@@ -844,7 +887,7 @@ def run_cellprofiler_workflow_from_config(
                 mask_exports=[],
                 label_exports=[],
                 qc_artifacts={},
-                log_files=run_result.log_files,
+                log_files=failure_log_files,
                 cellprofiler_run=run_result,
                 timing=timing,
                 export_engine=None,
@@ -878,6 +921,10 @@ def run_cellprofiler_workflow_from_config(
     timing["inspect_cp_logs_seconds"] = elapsed_since(checkpoint)
     if log_errors:
         _finalize_and_log_timing(timing, total_started, directories["logs"])
+        failure_log_files = dict(run_result.log_files)
+        if oir_projection_log is not None:
+            failure_log_files["oir_projection"] = oir_projection_log
+        _attach_oir_projection_lifecycle_logs(failure_log_files, lifecycle)
         _write_workflow_summary(
             directories["logs"],
             CellProfilerWorkflowResult(
@@ -895,7 +942,7 @@ def run_cellprofiler_workflow_from_config(
                 mask_exports=[],
                 label_exports=[],
                 qc_artifacts={},
-                log_files=run_result.log_files,
+                log_files=failure_log_files,
                 cellprofiler_run=run_result,
                 timing=timing,
                 export_engine=None,
@@ -1050,6 +1097,7 @@ def run_cellprofiler_workflow_from_config(
         )
     if export_warning_log is not None:
         log_files["fiji_warning"] = export_warning_log
+    _attach_oir_projection_lifecycle_logs(log_files, lifecycle)
 
     result = CellProfilerWorkflowResult(
         results_dir=directories["results"].resolve(),
