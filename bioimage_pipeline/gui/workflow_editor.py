@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import ast
 import re
-import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
 
+from bioimage_pipeline.cellprofiler_runner import (
+    build_cellprofiler_gui_command,
+    launch_cellprofiler_gui_process,
+)
 from bioimage_pipeline.cppipe_io import (
     CppipeModule,
     CppipePipeline,
@@ -342,11 +344,8 @@ def launch_cellprofiler_gui(
     cellprofiler_executable: str = "cellprofiler",
 ) -> None:
     """Open a pipeline in the native CellProfiler desktop application."""
-    path = Path(cppipe_path)
-    if not path.is_file():
-        raise FileNotFoundError(f"Pipeline file not found: {path}")
-    command = [cellprofiler_executable, str(path)]
-    if sys.platform.startswith("win"):
-        subprocess.Popen(command, creationflags=subprocess.DETACHED_PROCESS)  # type: ignore[attr-defined]
-    else:
-        subprocess.Popen(command, start_new_session=True)
+    command = build_cellprofiler_gui_command(
+        cppipe_path,
+        cellprofiler_executable=cellprofiler_executable,
+    )
+    launch_cellprofiler_gui_process(command)

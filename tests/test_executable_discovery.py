@@ -7,7 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from bioimage_pipeline.cellprofiler_runner import find_cellprofiler_executable
+from bioimage_pipeline.cellprofiler_runner import (
+    find_cellprofiler_executable,
+    find_cellprofiler_gui_executable,
+)
 from bioimage_pipeline.fiji_runner import find_fiji_executable
 from bioimage_pipeline.gui import GuiWorkflowConfig
 from bioimage_pipeline.gui.run_settings import (
@@ -70,6 +73,18 @@ def test_find_cellprofiler_executable_from_common_windows_path(
     )
 
     assert find_cellprofiler_executable() == executable.resolve()
+
+
+def test_find_cellprofiler_gui_executable_honors_explicit_file_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    explicit = tmp_path / "custom" / "CellProfiler.exe"
+    explicit.parent.mkdir(parents=True)
+    explicit.write_text("gui", encoding="utf-8")
+    monkeypatch.delenv("CELLPROFILER_EXECUTABLE", raising=False)
+
+    assert find_cellprofiler_gui_executable(explicit) == explicit.resolve()
 
 
 def test_find_cellprofiler_executable_explicit_path(tmp_path: Path) -> None:

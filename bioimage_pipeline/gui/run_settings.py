@@ -10,7 +10,7 @@ from typing import Any
 
 from bioimage_pipeline.cellprofiler_runner import (
     cellprofiler_not_found_message,
-    find_cellprofiler_executable,
+    find_cellprofiler_gui_executable,
 )
 from bioimage_pipeline.fiji_runner import find_fiji_executable, fiji_not_found_message
 
@@ -124,7 +124,7 @@ def resolve_cellprofiler_executable(
             warnings=tuple(warnings),
         )
 
-    discovered = find_cellprofiler_executable()
+    discovered = find_cellprofiler_gui_executable()
     if discovered is not None:
         return ResolvedExecutable(
             display_value=str(discovered),

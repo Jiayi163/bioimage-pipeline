@@ -131,6 +131,54 @@ def _unix_cellprofiler_candidates() -> list[Path]:
     ]
 
 
+def _cellprofiler_install_candidates() -> list[Path]:
+    """Return common CellProfiler GUI install paths (no PATH lookup)."""
+    return (
+        _windows_cellprofiler_candidates()
+        if platform.system() == "Windows"
+        else _unix_cellprofiler_candidates()
+    )
+
+
+def find_cellprofiler_gui_executable(explicit: str | Path | None = None) -> Path | None:
+    """Resolve CellProfiler for opening the desktop GUI.
+
+    Unlike :func:`find_cellprofiler_executable`, this prefers a real installed
+    ``CellProfiler.exe`` (or macOS app binary) **before** PATH shims such as
+    conda/pip ``cellprofiler`` launchers. Those shims often spawn multiple
+    console windows and slow startup when used for GUI editing.
+    """
+    if explicit is not None:
+        value = str(explicit).strip()
+        if value:
+            path = Path(value)
+            if path.is_file():
+                return path.resolve()
+
+    env_value = os.environ.get("CELLPROFILER_EXECUTABLE")
+    if env_value:
+        path = Path(env_value)
+        if path.is_file():
+            return path.resolve()
+
+    for candidate in _cellprofiler_install_candidates():
+        if candidate.is_file():
+            return candidate.resolve()
+
+    if explicit is not None:
+        value = str(explicit).strip()
+        if value:
+            found = shutil.which(value)
+            if found:
+                return Path(found).resolve()
+
+    for which_name in ("cellprofiler", "CellProfiler", "CellProfiler.exe"):
+        found = shutil.which(which_name)
+        if found:
+            return Path(found).resolve()
+    return None
+
+
 def find_cellprofiler_executable(explicit: str | Path | None = None) -> Path | None:
     """Resolve a CellProfiler executable path.
 
@@ -161,15 +209,89 @@ def find_cellprofiler_executable(explicit: str | Path | None = None) -> Path | N
         if found:
             return Path(found).resolve()
 
-    candidates = (
-        _windows_cellprofiler_candidates()
-        if platform.system() == "Windows"
-        else _unix_cellprofiler_candidates()
-    )
-    for candidate in candidates:
+    for candidate in _cellprofiler_install_candidates():
         if candidate.is_file():
             return candidate.resolve()
     return None
+
+
+def build_cellprofiler_gui_command(
+    cppipe_path: str | Path,
+    *,
+    cellprofiler_executable: str | Path | None = None,
+) -> list[str]:
+    """Build a command line for opening a pipeline in the CellProfiler GUI."""
+    pipeline = Path(cppipe_path).resolve()
+    if not pipeline.is_file():
+        raise FileNotFoundError(f"Pipeline file not found: {pipeline}")
+
+    executable = find_cellprofiler_gui_executable(cellprofiler_executable)
+    if executable is None:
+        raise FileNotFoundError(cellprofiler_not_found_message())
+    return [str(executable), str(pipeline)]
+
+
+def launch_cellprofiler_gui_process(
+    command: Sequence[str],
+    *,
+    debounce_seconds: float = 2.0,
+) -> None:
+    """Launch the CellProfiler desktop GUI without flashing console windows.
+
+    On Windows, uses ``ShellExecuteW`` so a native ``.exe`` opens directly instead
+    of inheriting the bioimage-pipeline terminal. A short debounce prevents
+    duplicate launches when the user double-clicks **Open in CellProfiler**.
+    """
+    if len(command) < 2:
+        raise ValueError("CellProfiler GUI command requires executable and pipeline path.")
+
+    global _LAST_CELLPROFILER_GUI_LAUNCH, _LAST_CELLPROFILER_GUI_LAUNCH_MONOTONIC  # noqa: PLW0603
+
+    now = time.monotonic()
+    launch_key = (command[0], command[1])
+    if (
+        _LAST_CELLPROFILER_GUI_LAUNCH == launch_key
+        and now - _LAST_CELLPROFILER_GUI_LAUNCH_MONOTONIC < debounce_seconds
+    ):
+        logger.info(
+            "Skipping duplicate CellProfiler GUI launch within %.1fs debounce window.",
+            debounce_seconds,
+        )
+        return
+
+    executable = Path(command[0])
+    pipeline = Path(command[1])
+
+    if platform.system() == "Windows":
+        _windows_shell_open_executable(executable, pipeline)
+    else:
+        subprocess.Popen(list(command), start_new_session=True)  # noqa: S603
+
+    _LAST_CELLPROFILER_GUI_LAUNCH = launch_key
+    _LAST_CELLPROFILER_GUI_LAUNCH_MONOTONIC = now
+
+
+_LAST_CELLPROFILER_GUI_LAUNCH: tuple[str, str] | None = None
+_LAST_CELLPROFILER_GUI_LAUNCH_MONOTONIC = 0.0
+
+
+def _windows_shell_open_executable(executable: Path, pipeline: Path) -> None:
+    """Open a Windows executable with one argument via the shell (no console)."""
+    import ctypes
+
+    params = f'"{pipeline}"' if " " in str(pipeline) else str(pipeline)
+    result = ctypes.windll.shell32.ShellExecuteW(  # type: ignore[attr-defined]
+        None,
+        "open",
+        str(executable),
+        params,
+        None,
+        1,
+    )
+    if result <= 32:
+        raise OSError(
+            f"Failed to launch CellProfiler GUI ({executable}): ShellExecuteW returned {result}"
+        )
 
 
 def cellprofiler_not_found_message() -> str:
