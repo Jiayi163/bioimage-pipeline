@@ -125,16 +125,67 @@ def process_oir_file_python(
     z_axis: int = 0,
 ) -> Path:
     """Z-max project one ``.oir`` file and save a TIFF using macro naming rules."""
-    source = Path(oir_path)
+    output_path, _record = process_oir_file_python_timed(
+        oir_path,
+        output_dir,
+        z_axis=z_axis,
+    )
+    return output_path
+
+
+def process_oir_file_python_timed(
+    oir_path: str | Path,
+    output_dir: str | Path,
+    *,
+    z_axis: int = 0,
+) -> tuple[Path, "PrepareInputFileRecord"]:
+    """Z-max project one ``.oir`` file and return output path plus timing record."""
+    import time
+
+    from bioimage_pipeline.prepare_input_profile import (
+        PrepareInputFileRecord,
+        detect_file_type,
+    )
+
+    total_started = time.perf_counter()
+    source = Path(oir_path).resolve()
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    output_path = oir_output_path(source, out_dir)
+    input_bytes = source.stat().st_size if source.is_file() else 0
+    output_existed = output_path.is_file()
 
+    read_started = time.perf_counter()
     stack = load_oir_stack(source)
+    read_seconds = time.perf_counter() - read_started
+
+    conversion_started = time.perf_counter()
     if stack.ndim == 3:
         projected = zmax_intensity(stack, axis=z_axis)
     else:
         projected = stack
+    conversion_seconds = time.perf_counter() - conversion_started
 
-    output_path = oir_output_path(source, out_dir)
+    write_started = time.perf_counter()
     save_tiff(output_path, projected)
-    return output_path.resolve()
+    write_seconds = time.perf_counter() - write_started
+
+    resolved_output = output_path.resolve()
+    output_bytes = resolved_output.stat().st_size if resolved_output.is_file() else None
+    record = PrepareInputFileRecord(
+        input_path=str(source),
+        detected_type=detect_file_type(source),
+        output_path=str(resolved_output),
+        input_bytes=input_bytes,
+        output_bytes=output_bytes,
+        read_seconds=read_seconds,
+        conversion_seconds=conversion_seconds,
+        write_seconds=write_seconds,
+        total_seconds=time.perf_counter() - total_started,
+        output_existed_before_run=output_existed,
+    )
+    if output_existed:
+        record.notes.append(
+            "Projected output already existed before this run but was overwritten."
+        )
+    return resolved_output, record

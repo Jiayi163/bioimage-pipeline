@@ -144,6 +144,7 @@ def test_run_oir_zmax_batch_fiji_engine_uses_configured_executable(
             engine="fiji",
             fiji_executable=fiji_exe,
             logs_dir=tmp_path / "logs",
+            force_oir_reproject=True,
         )
 
     run_macro.assert_called_once()
@@ -189,6 +190,7 @@ def test_run_oir_zmax_batch_fiji_engine_honors_fiji_executable_env(
             output_dir,
             engine="fiji",
             logs_dir=tmp_path / "logs",
+            force_oir_reproject=True,
         )
 
     assert run_macro.call_args.kwargs["fiji_executable"] == fiji_exe.resolve()
@@ -267,6 +269,7 @@ def test_run_fiji_batch_writes_projection_logs(tmp_path: Path) -> None:
             engine="fiji",
             logs_dir=logs_dir,
             fiji_executable=fiji_exe,
+            force_oir_reproject=True,
         )
 
     assert result.generated_macro_path == generated
@@ -356,3 +359,153 @@ def test_cli_missing_input_returns_error() -> None:
     )
     assert result.returncode != 0
     assert "does not exist" in (result.stderr + result.stdout)
+
+
+def test_projection_cache_is_fresh_when_tif_is_newer(tmp_path: Path) -> None:
+    import time
+
+    from bioimage_pipeline.oir_zmax_batch import OirFilePair, projection_cache_is_fresh
+
+    oir_path = tmp_path / "sample.oir"
+    tif_path = tmp_path / "sample.tif"
+    oir_path.write_bytes(b"oir-data")
+    time.sleep(0.05)
+    tif_path.write_bytes(b"tiff-data")
+
+    pair = OirFilePair(input_oir=oir_path, output_tif=tif_path)
+    assert projection_cache_is_fresh(pair) is True
+
+
+def test_projection_cache_is_stale_when_oir_is_newer(tmp_path: Path) -> None:
+    import time
+
+    from bioimage_pipeline.oir_zmax_batch import OirFilePair, projection_cache_is_fresh
+
+    oir_path = tmp_path / "sample.oir"
+    tif_path = tmp_path / "sample.tif"
+    tif_path.write_bytes(b"tiff-data")
+    time.sleep(0.05)
+    oir_path.write_bytes(b"oir-data")
+    # Ensure input mtime is clearly beyond tolerance.
+    time.sleep(2.1)
+    oir_path.write_bytes(b"oir-data-updated")
+
+    pair = OirFilePair(input_oir=oir_path, output_tif=tif_path)
+    assert projection_cache_is_fresh(pair) is False
+
+
+def test_projection_cache_tolerates_small_input_mtime_lead(tmp_path: Path) -> None:
+    import os
+
+    from bioimage_pipeline.oir_zmax_batch import OirFilePair, projection_cache_is_fresh
+
+    oir_path = tmp_path / "sample.oir"
+    tif_path = tmp_path / "sample.tif"
+    oir_path.write_bytes(b"oir")
+    tif_path.write_bytes(b"tiff")
+    base = 1_700_000_000.0
+    os.utime(tif_path, (base, base))
+    os.utime(oir_path, (base, base + 1.0))
+
+    pair = OirFilePair(input_oir=oir_path, output_tif=tif_path)
+    assert projection_cache_is_fresh(pair) is True
+
+    os.utime(oir_path, (base, base + 3.0))
+    assert projection_cache_is_fresh(pair) is False
+
+
+def test_projection_cache_misses_on_zero_byte_tif(tmp_path: Path) -> None:
+    from bioimage_pipeline.oir_zmax_batch import OirFilePair, projection_cache_is_fresh
+
+    oir_path = tmp_path / "sample.oir"
+    tif_path = tmp_path / "sample.tif"
+    oir_path.write_bytes(b"oir")
+    tif_path.write_bytes(b"")
+
+    pair = OirFilePair(input_oir=oir_path, output_tif=tif_path)
+    assert projection_cache_is_fresh(pair) is False
+
+
+def test_run_oir_zmax_batch_python_skips_fresh_cache(tmp_path: Path) -> None:
+    from bioimage_pipeline.oir_zmax_batch import run_oir_zmax_batch
+
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    oir_path = input_dir / "sample.oir"
+    oir_path.write_bytes(b"oir")
+    projected = output_dir / "sample.tif"
+    projected.parent.mkdir(parents=True, exist_ok=True)
+    projected.write_bytes(b"projected")
+
+    with patch(
+        "bioimage_pipeline.oir_zmax_batch.process_oir_file_python_timed",
+    ) as process_timed:
+        result = run_oir_zmax_batch(input_dir, output_dir, engine="python")
+
+    process_timed.assert_not_called()
+    assert result.cache_hits == ["sample.tif"]
+    assert result.reprojected == []
+    assert result.processed == ["sample.tif"]
+    assert result.file_profiles[0].skipped is True
+    assert result.file_profiles[0].skip_reason == "projection_cache_hit"
+
+
+def test_run_oir_zmax_batch_python_force_reproject(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    oir_path = input_dir / "sample.oir"
+    oir_path.write_bytes(b"oir")
+    projected = output_dir / "sample.tif"
+    projected.parent.mkdir(parents=True, exist_ok=True)
+    projected.write_bytes(b"projected")
+
+    with patch(
+        "bioimage_pipeline.oir_zmax_batch.process_oir_file_python_timed",
+        return_value=(projected.resolve(), MagicMock()),
+    ) as process_timed:
+        result = run_oir_zmax_batch(
+            input_dir,
+            output_dir,
+            engine="python",
+            force_oir_reproject=True,
+        )
+
+    process_timed.assert_called_once()
+    assert result.cache_hits == []
+    assert result.reprojected == ["sample.tif"]
+
+
+def test_run_oir_zmax_batch_fiji_skips_macro_when_all_cached(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    logs_dir = tmp_path / "logs"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    oir_path = input_dir / "sample.oir"
+    oir_path.write_bytes(b"oir")
+    (output_dir / "sample.tif").write_bytes(b"projected")
+
+    fiji_exe = tmp_path / "ImageJ-win64.exe"
+    fiji_exe.write_text("stub", encoding="utf-8")
+
+    with patch("bioimage_pipeline.fiji_runner.run_fiji_macro") as run_macro:
+        result = run_oir_zmax_batch(
+            input_dir,
+            output_dir,
+            engine="fiji",
+            logs_dir=logs_dir,
+            fiji_executable=fiji_exe,
+        )
+
+    run_macro.assert_not_called()
+    assert result.cache_hits == ["sample.tif"]
+    assert result.reprojected == []
+    assert result.processed == ["sample.tif"]
+
+
+def test_build_oir_zmax_macro_includes_cache_skip(tmp_path: Path) -> None:
+    macro_text = build_oir_zmax_macro(tmp_path / "input", tmp_path / "output")
+    assert "cache hit, skipping" in macro_text
+    assert "lastModified()" in macro_text

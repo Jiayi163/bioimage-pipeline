@@ -6,6 +6,7 @@ import os
 import platform
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Sequence
@@ -37,6 +38,8 @@ class FijiRunResult:
     stderr: str
     macro_path: Path | None
     executable: Path
+    startup_seconds: float = 0.0
+    subprocess_seconds: float = 0.0
 
     @property
     def combined_output(self) -> str:
@@ -69,6 +72,9 @@ class FijiExportResult:
     label_exports: list[Path]
     export_engine: FijiExportEngine = "fiji"
     export_mode: FijiExportMode = "batch"
+    startup_seconds: float = 0.0
+    subprocess_seconds: float = 0.0
+    postprocess_seconds: float = 0.0
 
     @property
     def combined_output(self) -> str:
@@ -329,6 +335,7 @@ def run_fiji_macro(
     timeout: float | None = None,
 ) -> FijiRunResult:
     """Run a Fiji macro with positional arguments."""
+    startup_started = time.perf_counter()
     macro = Path(macro_path).resolve()
     if not macro.is_file():
         raise FileNotFoundError(f"Fiji macro not found: {macro}")
@@ -344,7 +351,11 @@ def run_fiji_macro(
     if use_headless:
         command.append("--headless")
     command.extend(["-macro", str(macro), *_format_macro_argument(macro_args)])
+    startup_seconds = time.perf_counter() - startup_started
+
+    subprocess_started = time.perf_counter()
     completed = subprocess.run(command, timeout=timeout, **_subprocess_kwargs())
+    subprocess_seconds = time.perf_counter() - subprocess_started
     return FijiRunResult(
         command=command,
         returncode=completed.returncode,
@@ -352,6 +363,8 @@ def run_fiji_macro(
         stderr=completed.stderr,
         macro_path=macro,
         executable=executable,
+        startup_seconds=startup_seconds,
+        subprocess_seconds=subprocess_seconds,
     )
 
 
@@ -373,6 +386,7 @@ def run_fiji_batch_export(
     ``masks`` and ``labels`` folders. It is expected to loop over the folder in
     Fiji, so this function performs exactly one Fiji subprocess invocation.
     """
+    startup_started = time.perf_counter()
     input_path = Path(input_dir)
     if not input_path.is_dir():
         raise FileNotFoundError(f"Fiji export input directory not found: {input_path}")
@@ -385,6 +399,7 @@ def run_fiji_batch_export(
     macro = Path(macro_path) if macro_path is not None else DEFAULT_FIJI_EXPORT_MACRO
     if not macro.is_file():
         raise FileNotFoundError(f"Fiji batch export macro not found: {macro}")
+    batch_prep_seconds = time.perf_counter() - startup_started
 
     run_result = run_fiji_macro(
         macro,
@@ -396,6 +411,9 @@ def run_fiji_batch_export(
         headless=headless,
         timeout=timeout,
     )
+    startup_seconds = batch_prep_seconds + run_result.startup_seconds
+
+    postprocess_started = time.perf_counter()
     log_files: dict[str, Path] = {}
     if log_dir is not None:
         log_files = _write_fiji_logs(
@@ -405,6 +423,10 @@ def run_fiji_batch_export(
             stderr=run_result.stderr,
             returncode=run_result.returncode,
         )
+
+    mask_exports = sorted(masks_path.glob("*.tif"))
+    label_exports = sorted(labels_path.glob("*.tif"))
+    postprocess_seconds = time.perf_counter() - postprocess_started
 
     return FijiExportResult(
         input_dir=input_path.resolve(),
@@ -417,6 +439,9 @@ def run_fiji_batch_export(
         stdout=run_result.stdout,
         stderr=run_result.stderr,
         log_files=log_files,
-        mask_exports=sorted(masks_path.glob("*.tif")),
-        label_exports=sorted(labels_path.glob("*.tif")),
+        mask_exports=mask_exports,
+        label_exports=label_exports,
+        startup_seconds=startup_seconds + run_result.startup_seconds,
+        subprocess_seconds=run_result.subprocess_seconds,
+        postprocess_seconds=postprocess_seconds,
     )

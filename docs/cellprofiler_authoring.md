@@ -53,6 +53,10 @@ python examples/run_oir_zmax_batch.py --input-dir ... --output-dir ...
 
 Then point the **Images** module input folder at the projected TIFF folder.
 
+When using the GUI/headless workflow (not the standalone batch CLI), projected
+TIFFs are cached under `{output}/oir_projection/` on re-runs — see
+[cellprofiler_workflow.md — OIR projection cache](cellprofiler_workflow.md#oir-projection-cache-output-folder).
+
 ## When to fork CellProfiler
 
 Fork only if you need **in-app** Bio-Formats preview and full ModuleView fidelity

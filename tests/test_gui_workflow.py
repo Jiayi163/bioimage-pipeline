@@ -342,6 +342,10 @@ def test_prepare_cellprofiler_input_dir_projects_oir(tmp_path: Path) -> None:
             fiji_returncode=0,
             generated_macro_path=logs_dir / "stacking_zmax_generated.ijm",
             fiji_log_files={},
+            file_profiles=[],
+            cache_hits=[],
+            reprojected=["sample.tif"],
+            force_oir_reproject=False,
         ),
     ) as oir_batch:
         resolved_input, summary_log = _prepare_cellprofiler_input_dir(
@@ -360,9 +364,11 @@ def test_prepare_cellprofiler_input_dir_projects_oir(tmp_path: Path) -> None:
         fiji_executable=fiji_exe,
         fiji_headless=None,
         fiji_timeout=None,
+        force_oir_reproject=False,
     )
     assert resolved_input == projection_dir.resolve()
     assert summary_log == logs_dir / "oir_projection_summary.json"
+    assert (logs_dir / "prepare_input_profile.txt").exists()
     summary = json.loads(summary_log.read_text(encoding="utf-8"))
     assert summary["engine"] == "fiji"
     assert summary["fiji_executable"] == str(fiji_exe.resolve())

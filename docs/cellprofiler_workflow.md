@@ -18,6 +18,33 @@ fallback.
 
 **Never** spawn CellProfiler once per image file from the workflow API.
 
+## OIR projection cache (output folder)
+
+When the input folder contains Olympus `.oir` stacks, the workflow runs a
+**prepare_input** step: Fiji (or Python) Z-max projection into
+`{output_dir}/oir_projection/` before CellProfiler sees TIFFs.
+
+Re-runs to the **same output folder** reuse existing projected TIFFs when:
+
+- the expected `{stem}.tif` exists under `oir_projection/`,
+- it is non-empty, and
+- its modification time is not older than the source `.oir` (with a small
+  **2-second tolerance** for Windows/FAT32 timestamp rounding).
+
+When all pairs hit the cache, Fiji is **not** launched for OIR projection
+(`action: oir_projection_cache_hit` in `logs/prepare_input_profile.txt`).
+
+Debug artifacts (per-pair paths, sizes, mtimes, cache decision):
+
+- `logs/oir_projection_cache_debug.txt`
+- `logs/oir_projection_cache_debug.json`
+
+To force reprojection (ignore cache): pass `force_oir_reproject=True` to
+`run_cellprofiler_workflow()` / `CellProfilerWorkflowConfig`.
+
+Standalone batch tool: `examples/run_oir_zmax_batch.py` (same cache logic in
+`bioimage_pipeline/oir_zmax_batch.py`).
+
 ## Full workflow (target architecture)
 
 ```text

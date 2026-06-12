@@ -1,4 +1,4 @@
-﻿"""Phase 15 import-only GUI workflow shell.
+"""Phase 15 import-only GUI workflow shell.
 
 Users author pipelines in native CellProfiler, import a ``.cppipe`` path, and run
 headless CellProfiler/Fiji orchestration via
@@ -47,6 +47,7 @@ from bioimage_pipeline.cppipe_io import (
     validate_cppipe,
 )
 from bioimage_pipeline.pipeline_catalog import ModuleDefinition, list_modules, search_modules
+from bioimage_pipeline.workflow_timing import format_timing_breakdown
 from bioimage_pipeline.gui.workflow_editor import (
     launch_cellprofiler_gui,
     list_module_output_lines_for_pipeline,
@@ -106,8 +107,8 @@ class GuiWorkflowSummary:
             mode = f" / {self.export_mode}" if self.export_mode else ""
             lines.append(f"Export: {self.export_engine}{mode}")
         if self.timing:
-            for key, seconds in sorted(self.timing.items()):
-                lines.append(f"{key}: {seconds:.2f}s")
+            lines.append("")
+            lines.extend(format_timing_breakdown(self.timing).splitlines())
         if self.warnings:
             lines.append("Warnings:")
             lines.extend(f"- {warning}" for warning in self.warnings)

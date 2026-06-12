@@ -41,6 +41,12 @@ from bioimage_pipeline.fiji_runner import (
     format_fiji_error_summary,
     run_fiji_batch_export,
 )
+from bioimage_pipeline.workflow_timing import (
+    elapsed_since,
+    finalize_workflow_timing,
+    init_workflow_timing,
+    log_timing_breakdown,
+)
 
 AnalysisEngine = Literal["python", "cellprofiler"]
 LabelingMethod = Literal["connected", "watershed"]
@@ -160,6 +166,7 @@ class CellProfilerWorkflowConfig:
     fiji_timeout: float | None = None
     fiji_fallback_to_python: bool = True
     oir_projection_engine: str | None = None
+    force_oir_reproject: bool = False
     adaptive_threshold: bool = False
     adaptive_min_object_size: int = 20
     adaptive_image_pattern: str = "*.tif"
@@ -424,18 +431,47 @@ def _prepare_cellprofiler_input_dir(
     fiji_executable: str | Path | None = None,
     fiji_headless: bool | None = None,
     fiji_timeout: float | None = None,
+    force_oir_reproject: bool = False,
 ) -> tuple[Path, Path | None]:
     """Project ``.oir`` stacks to TIFF when needed and return the CP input folder."""
+    import time
+
     from bioimage_pipeline.oir_zmax_batch import (
         OirZmaxEngine,
         run_oir_zmax_batch,
     )
-    from bioimage_pipeline.z_projection import iter_oir_files
+    from bioimage_pipeline.prepare_input_profile import (
+        PrepareInputFileRecord,
+        PrepareInputProfile,
+        build_investigation_notes,
+        detect_file_type,
+        scan_prepare_input_folder,
+        write_prepare_input_profile,
+    )
 
     source_dir = input_dir.resolve()
-    oir_files = list(iter_oir_files(source_dir))
-    if not oir_files:
-        return source_dir, None
+    scan = scan_prepare_input_folder(source_dir)
+
+    if not scan.oir_files:
+        profile = PrepareInputProfile(
+            input_dir=str(source_dir),
+            action="passthrough_tiff",
+            scan=scan,
+            projection_output_dir=None,
+            file_records=[
+                PrepareInputFileRecord(
+                    input_path=str(path),
+                    detected_type=detect_file_type(path),
+                    output_path=str(path),
+                    input_bytes=path.stat().st_size if path.is_file() else 0,
+                    notes=["Top-level TIFF passed through without prepare_input conversion."],
+                )
+                for path in scan.tiff_files
+            ],
+        )
+        profile.investigation_notes = build_investigation_notes(profile)
+        profile_path, _ = write_prepare_input_profile(logs_dir, profile)
+        return source_dir, profile_path
 
     projection_dir = results_dir / RESULTS_OIR_PROJECTION_DIR
     engine: OirZmaxEngine = (
@@ -443,6 +479,7 @@ def _prepare_cellprofiler_input_dir(
         if oir_projection_engine in {"python", "fiji", "auto"}
         else "auto"
     )
+    projection_started = time.perf_counter()
     result = run_oir_zmax_batch(
         source_dir,
         projection_dir,
@@ -451,7 +488,27 @@ def _prepare_cellprofiler_input_dir(
         fiji_executable=fiji_executable,
         fiji_headless=fiji_headless,
         fiji_timeout=fiji_timeout,
+        force_oir_reproject=force_oir_reproject,
     )
+    projection_seconds = time.perf_counter() - projection_started
+
+    if result.cache_hits and not result.reprojected:
+        action = "oir_projection_cache_hit"
+    else:
+        action = f"oir_projection_{result.engine}"
+
+    profile = PrepareInputProfile(
+        input_dir=str(source_dir),
+        action=action,
+        scan=scan,
+        engine=result.engine,
+        projection_output_dir=str(projection_dir.resolve()),
+        projection_seconds=projection_seconds,
+        file_records=list(result.file_profiles),
+    )
+    profile.investigation_notes = build_investigation_notes(profile)
+    profile_path, _ = write_prepare_input_profile(logs_dir, profile)
+
     summary_path = logs_dir / "oir_projection_summary.json"
     summary_payload: dict[str, Any] = {
         "input_dir": str(result.input_dir),
@@ -463,12 +520,39 @@ def _prepare_cellprofiler_input_dir(
         "failed": list(result.failed),
         "files_created_in_output_dir": list(result.files_created),
         "remapped_outputs": list(result.remapped_outputs),
+        "prepare_input_profile": str(profile_path),
+        "projection_seconds": projection_seconds,
+        "scan_seconds": scan.scan_seconds,
+        "directories_scanned": scan.directories_scanned,
+        "tiff_files_found": scan.tiff_count,
+        "cache_hits": list(result.cache_hits),
+        "reprojected": list(result.reprojected),
+        "force_oir_reproject": result.force_oir_reproject,
+        "oir_projection_cache_debug": str(
+            logs_dir / "oir_projection_cache_debug.txt"
+        ),
         "file_pairs": [
             {
                 "input_oir": str(pair.input_oir),
                 "output_tif": str(pair.output_tif),
             }
             for pair in result.file_pairs
+        ],
+        "file_profiles": [
+            {
+                "input_path": record.input_path,
+                "detected_type": record.detected_type,
+                "output_path": record.output_path,
+                "input_bytes": record.input_bytes,
+                "output_bytes": record.output_bytes,
+                "read_seconds": record.read_seconds,
+                "conversion_seconds": record.conversion_seconds,
+                "write_seconds": record.write_seconds,
+                "total_seconds": record.total_seconds,
+                "output_existed_before_run": record.output_existed_before_run,
+                "notes": list(record.notes),
+            }
+            for record in profile.file_records
         ],
     }
     if result.fiji_executable is not None:
@@ -528,6 +612,72 @@ def _write_workflow_summary(
     return summary_path
 
 
+def _validate_cellprofiler_workflow_config(config: CellProfilerWorkflowConfig) -> None:
+    """Validate workflow paths and external executables before running."""
+    from bioimage_pipeline.cellprofiler_runner import (
+        cellprofiler_not_found_message,
+        find_cellprofiler_executable,
+    )
+    from bioimage_pipeline.fiji_runner import find_fiji_executable
+
+    input_path = Path(config.input_dir)
+    if not input_path.is_dir():
+        raise FileNotFoundError(f"Input directory not found: {input_path}")
+
+    cppipe_path = Path(config.cppipe_path)
+    if not cppipe_path.is_file():
+        raise FileNotFoundError(f"CellProfiler pipeline file not found: {cppipe_path}")
+
+    if find_cellprofiler_executable(config.cellprofiler_executable) is None:
+        raise RuntimeError(
+            f"{cellprofiler_not_found_message()} "
+            f"Tried: {config.cellprofiler_executable!r}."
+        )
+
+    if config.fiji_executable and config.export_fiji_tiffs:
+        if find_fiji_executable(config.fiji_executable) is None:
+            raise FileNotFoundError(
+                f"Fiji executable not found: {config.fiji_executable}"
+            )
+
+    if config.fiji_macro_path and config.export_fiji_tiffs:
+        macro_path = Path(config.fiji_macro_path)
+        if not macro_path.is_file():
+            raise FileNotFoundError(f"Fiji macro not found: {macro_path}")
+
+
+def _materialize_pipeline_for_run(cppipe_path: str | Path) -> Path:
+    """Load and validate the CellProfiler pipeline before headless execution."""
+    path = Path(cppipe_path).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"CellProfiler pipeline file not found: {path}")
+
+    try:
+        from bioimage_pipeline.cppipe_io import (
+            load_and_validate_imported_pipeline,
+            prepare_pipeline_for_cellprofiler,
+        )
+
+        pipeline = load_and_validate_imported_pipeline(path)
+        prepare_pipeline_for_cellprofiler(pipeline)
+    except ValueError:
+        # Headless runs may use pipelines that were authored outside the GUI
+        # builder; CellProfiler validates module content at execution time.
+        pass
+    return path
+
+
+def _finalize_and_log_timing(
+    timing: dict[str, float],
+    total_started: float,
+    logs_dir: Path | None = None,
+) -> dict[str, float]:
+    """Finalize timing aggregates and print the breakdown."""
+    finalize_workflow_timing(timing, total_started)
+    log_timing_breakdown(timing, logs_dir=logs_dir)
+    return timing
+
+
 def run_cellprofiler_workflow(
     input_dir: str | Path,
     output_dir: str | Path,
@@ -545,6 +695,7 @@ def run_cellprofiler_workflow(
     fiji_timeout: float | None = None,
     fiji_fallback_to_python: bool = True,
     oir_projection_engine: str | None = None,
+    force_oir_reproject: bool = False,
     adaptive_threshold: bool = False,
     adaptive_min_object_size: int = 20,
     adaptive_image_pattern: str = "*.tif",
@@ -600,6 +751,7 @@ def run_cellprofiler_workflow(
         fiji_timeout=fiji_timeout,
         fiji_fallback_to_python=fiji_fallback_to_python,
         oir_projection_engine=oir_projection_engine,
+        force_oir_reproject=force_oir_reproject,
         adaptive_threshold=adaptive_threshold,
         adaptive_min_object_size=adaptive_min_object_size,
         adaptive_image_pattern=adaptive_image_pattern,
@@ -612,13 +764,24 @@ def run_cellprofiler_workflow_from_config(
 ) -> CellProfilerWorkflowResult:
     """Run :func:`run_cellprofiler_workflow` from a config object."""
     total_started = time.perf_counter()
-    timing: dict[str, float] = {
-        "cellprofiler_seconds": 0.0,
-        "fiji_export_seconds": 0.0,
-        "qc_seconds": 0.0,
-        "total_seconds": 0.0,
-    }
+    timing = init_workflow_timing()
+    directories: dict[str, Path] | None = None
+    oir_projection_log: Path | None = None
+    materialized_cppipe: Path | None = None
+
+    checkpoint = time.perf_counter()
+    _validate_cellprofiler_workflow_config(config)
+    timing["config_validation_seconds"] = elapsed_since(checkpoint)
+
+    checkpoint = time.perf_counter()
+    materialized_cppipe = _materialize_pipeline_for_run(config.cppipe_path)
+    timing["pipeline_materialization_seconds"] = elapsed_since(checkpoint)
+
+    checkpoint = time.perf_counter()
     directories = _prepare_workflow_directories(Path(config.output_dir))
+    timing["setup_directories_seconds"] = elapsed_since(checkpoint)
+
+    checkpoint = time.perf_counter()
     cellprofiler_input_dir, oir_projection_log = _prepare_cellprofiler_input_dir(
         Path(config.input_dir),
         results_dir=directories["results"],
@@ -627,7 +790,9 @@ def run_cellprofiler_workflow_from_config(
         fiji_executable=config.fiji_executable,
         fiji_headless=config.fiji_headless,
         fiji_timeout=config.fiji_timeout,
+        force_oir_reproject=config.force_oir_reproject,
     )
+    timing["prepare_input_seconds"] = elapsed_since(checkpoint)
 
     adaptive_summary: dict[str, Any] | None = None
     if config.adaptive_threshold:
@@ -635,6 +800,7 @@ def run_cellprofiler_workflow_from_config(
             run_self_adaptive_threshold_on_folder,
         )
 
+        checkpoint = time.perf_counter()
         staging_dir = directories["results"] / RESULTS_STAGING_DIR
         adaptive_summary = run_self_adaptive_threshold_on_folder(
             config.input_dir,
@@ -647,19 +813,20 @@ def run_cellprofiler_workflow_from_config(
             shutil.copy2(mask_path, directories["masks"] / mask_path.name)
         for label_path in (staging_dir / "labels").glob("*.tif"):
             shutil.copy2(label_path, directories["labels"] / label_path.name)
+        timing["adaptive_threshold_seconds"] = elapsed_since(checkpoint)
 
-    cellprofiler_started = time.perf_counter()
     run_result = run_cellprofiler_pipeline_logged(
-        cppipe_path=config.cppipe_path,
+        cppipe_path=materialized_cppipe,
         input_dir=cellprofiler_input_dir,
         output_dir=directories["raw"],
         extra_args=config.cellprofiler_extra_args,
         cellprofiler_executable=config.cellprofiler_executable,
         log_dir=directories["logs"],
     )
-    timing["cellprofiler_seconds"] = time.perf_counter() - cellprofiler_started
+    timing["cellprofiler_startup_seconds"] = run_result.startup_seconds
+    timing["cellprofiler_subprocess_seconds"] = run_result.subprocess_seconds
     if not run_result.succeeded:
-        timing["total_seconds"] = time.perf_counter() - total_started
+        _finalize_and_log_timing(timing, total_started, directories["logs"])
         _write_workflow_summary(
             directories["logs"],
             CellProfilerWorkflowResult(
@@ -694,18 +861,23 @@ def run_cellprofiler_workflow_from_config(
             )
         )
 
+    checkpoint = time.perf_counter()
     copy_cellprofiler_measurements(
         directories["raw"],
         directories["measurements"],
     )
+    timing["copy_measurements_seconds"] = elapsed_since(checkpoint)
+
+    checkpoint = time.perf_counter()
     log_errors = inspect_cellprofiler_logs(
         log_dir=directories["logs"],
         log_files=run_result.log_files,
         stdout=run_result.stdout,
         stderr=run_result.stderr,
     )
+    timing["inspect_cp_logs_seconds"] = elapsed_since(checkpoint)
     if log_errors:
-        timing["total_seconds"] = time.perf_counter() - total_started
+        _finalize_and_log_timing(timing, total_started, directories["logs"])
         _write_workflow_summary(
             directories["logs"],
             CellProfilerWorkflowResult(
@@ -740,12 +912,16 @@ def run_cellprofiler_workflow_from_config(
             )
         )
 
+    checkpoint = time.perf_counter()
     load_result = load_cellprofiler_measurements_lenient(
         directories["measurements"],
     )
     tables = load_result.tables
     import_warnings = list(load_result.warnings)
+    timing["load_measurements_seconds"] = elapsed_since(checkpoint)
+
     measurements = None
+    checkpoint = time.perf_counter()
     if config.merge_measurements:
         measurements, merge_warnings = merge_cellprofiler_tables(
             tables,
@@ -757,6 +933,7 @@ def run_cellprofiler_workflow_from_config(
             directories["measurements"] / "merged_measurements.csv",
             measurements,
         )
+    timing["csv_merge_export_seconds"] = elapsed_since(checkpoint)
 
     processed_images = extract_processed_image_names(tables)
 
@@ -774,7 +951,6 @@ def run_cellprofiler_workflow_from_config(
             export_engine = "python_adaptive_staging"
             export_mode = "staged"
         else:
-            fiji_started = time.perf_counter()
             try:
                 fiji_export_result = run_fiji_batch_export(
                     directories["raw"],
@@ -791,8 +967,10 @@ def run_cellprofiler_workflow_from_config(
                 export_warnings.append(
                     f"Fiji batch export unavailable; using Python TIFF fallback. {exc}"
                 )
-            finally:
-                timing["fiji_export_seconds"] = time.perf_counter() - fiji_started
+            else:
+                timing["fiji_startup_seconds"] = fiji_export_result.startup_seconds
+                timing["fiji_subprocess_seconds"] = fiji_export_result.subprocess_seconds
+                timing["fiji_postprocess_seconds"] = fiji_export_result.postprocess_seconds
 
             if fiji_export_result is not None and fiji_export_result.succeeded:
                 mask_exports = fiji_export_result.mask_exports
@@ -800,6 +978,7 @@ def run_cellprofiler_workflow_from_config(
                 export_engine = "fiji"
                 export_mode = "batch"
                 if not mask_exports and not label_exports:
+                    checkpoint = time.perf_counter()
                     organized = organize_cellprofiler_tiffs_for_fiji(
                         directories["raw"],
                         directories["masks"],
@@ -808,6 +987,7 @@ def run_cellprofiler_workflow_from_config(
                     )
                     mask_exports = organized.masks
                     label_exports = organized.labels
+                    timing["fiji_postprocess_seconds"] += elapsed_since(checkpoint)
                     if mask_exports or label_exports:
                         export_warnings.append(
                             "Fiji batch export found no mask/label TIFFs by filename; "
@@ -825,6 +1005,7 @@ def run_cellprofiler_workflow_from_config(
                     raise RuntimeError(
                         "Fiji batch export failed and Python fallback is disabled."
                     )
+                checkpoint = time.perf_counter()
                 organized = organize_cellprofiler_tiffs_for_fiji(
                     directories["raw"],
                     directories["masks"],
@@ -833,6 +1014,7 @@ def run_cellprofiler_workflow_from_config(
                 )
                 mask_exports = organized.masks
                 label_exports = organized.labels
+                timing["fiji_postprocess_seconds"] += elapsed_since(checkpoint)
                 export_engine = "python_fallback"
                 export_mode = "in_process"
 
@@ -848,7 +1030,7 @@ def run_cellprofiler_workflow_from_config(
     if config.adaptive_threshold and adaptive_summary is not None:
         qc_image_names = adaptive_summary.get("processed", processed_images)
     if config.generate_qc and qc_image_names:
-        qc_started = time.perf_counter()
+        checkpoint = time.perf_counter()
         qc_artifacts = generate_qc_for_cellprofiler_results(
             cellprofiler_input_dir,
             directories["masks"],
@@ -856,9 +1038,9 @@ def run_cellprofiler_workflow_from_config(
             directories["qc"],
             qc_image_names,
         )
-        timing["qc_seconds"] = time.perf_counter() - qc_started
-    timing["total_seconds"] = time.perf_counter() - total_started
+        timing["qc_seconds"] = elapsed_since(checkpoint)
 
+    checkpoint = time.perf_counter()
     log_files = dict(run_result.log_files)
     if oir_projection_log is not None:
         log_files["oir_projection"] = oir_projection_log
@@ -896,6 +1078,9 @@ def run_cellprofiler_workflow_from_config(
     )
     summary_path = _write_workflow_summary(directories["logs"], result)
     result.log_files["workflow_summary"] = summary_path
+    timing["final_cleanup_seconds"] = elapsed_since(checkpoint)
+    _finalize_and_log_timing(timing, total_started, directories["logs"])
+    result.timing = timing
     return result
 
 

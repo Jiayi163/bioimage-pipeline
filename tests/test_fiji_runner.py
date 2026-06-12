@@ -127,6 +127,7 @@ def test_run_fiji_batch_export_missing_executable_raises(tmp_path: Path) -> None
         raise AssertionError("Expected missing Fiji executable to raise FileNotFoundError")
 
 
+@patch("bioimage_pipeline.cellprofiler_runner.find_cellprofiler_executable")
 @patch("bioimage_pipeline.analysis.organize_cellprofiler_tiffs_for_fiji")
 @patch("bioimage_pipeline.analysis.run_fiji_batch_export")
 @patch("bioimage_pipeline.analysis.generate_qc_for_cellprofiler_results")
@@ -142,8 +143,12 @@ def test_workflow_uses_batch_fiji_export_when_available(
     mock_generate_qc: MagicMock,
     mock_run_fiji: MagicMock,
     mock_organize: MagicMock,
+    mock_find_cp: MagicMock,
     tmp_path: Path,
 ) -> None:
+    cp_exe = tmp_path / "CellProfiler.exe"
+    cp_exe.write_bytes(b"")
+    mock_find_cp.return_value = cp_exe.resolve()
     input_dir = tmp_path / "input"
     results_dir = tmp_path / "results"
     cppipe = tmp_path / "pipeline.cppipe"
@@ -166,12 +171,14 @@ def test_workflow_uses_batch_fiji_export_when_available(
     )
     mock_merge.return_value = (pd.DataFrame({"Image_Number": [1]}), [])
     mock_generate_qc.return_value = {}
+    fiji_exe = tmp_path / "ImageJ-win64.exe"
+    fiji_exe.write_bytes(b"")
     mock_run_fiji.return_value = FijiExportResult(
         input_dir=raw_dir.resolve(),
         masks_dir=masks_dir.resolve(),
         labels_dir=labels_dir.resolve(),
         macro_path=DEFAULT_FIJI_EXPORT_MACRO.resolve(),
-        executable=(tmp_path / "ImageJ-win64.exe").resolve(),
+        executable=fiji_exe.resolve(),
         command=["ImageJ-win64.exe", "--headless", "-macro", "export_folder.ijm"],
         returncode=0,
         stdout="done",
@@ -185,7 +192,7 @@ def test_workflow_uses_batch_fiji_export_when_available(
         input_dir,
         results_dir,
         cppipe,
-        fiji_executable=tmp_path / "ImageJ-win64.exe",
+        fiji_executable=fiji_exe,
     )
 
     mock_run_fiji.assert_called_once()
@@ -195,15 +202,18 @@ def test_workflow_uses_batch_fiji_export_when_available(
     assert result.mask_exports == [mask_export]
     assert result.label_exports == [label_export]
     assert result.timing is not None
-    assert set(result.timing) == {
-        "cellprofiler_seconds",
-        "fiji_export_seconds",
-        "qc_seconds",
-        "total_seconds",
-    }
+    assert result.timing["cellprofiler_seconds"] >= 0.0
+    assert result.timing["fiji_export_seconds"] >= 0.0
+    assert result.timing["qc_seconds"] >= 0.0
+    assert result.timing["total_seconds"] >= 0.0
+    assert "unaccounted_seconds" in result.timing
+    assert "cellprofiler_startup_seconds" in result.timing
+    assert "cellprofiler_subprocess_seconds" in result.timing
     assert (logs_dir / "workflow_summary.json").exists()
+    assert (logs_dir / "timing_breakdown.txt").exists()
 
 
+@patch("bioimage_pipeline.cellprofiler_runner.find_cellprofiler_executable")
 @patch("bioimage_pipeline.analysis.organize_cellprofiler_tiffs_for_fiji")
 @patch("bioimage_pipeline.analysis.run_fiji_batch_export")
 @patch("bioimage_pipeline.analysis.generate_qc_for_cellprofiler_results")
@@ -219,8 +229,14 @@ def test_workflow_classifies_tiffs_when_fiji_finds_no_exports(
     mock_generate_qc: MagicMock,
     mock_run_fiji: MagicMock,
     mock_organize: MagicMock,
+    mock_find_cp: MagicMock,
     tmp_path: Path,
 ) -> None:
+    cp_exe = tmp_path / "CellProfiler.exe"
+    cp_exe.write_bytes(b"")
+    mock_find_cp.return_value = cp_exe.resolve()
+    fiji_exe = tmp_path / "ImageJ-win64.exe"
+    fiji_exe.write_bytes(b"")
     input_dir = tmp_path / "input"
     results_dir = tmp_path / "results"
     cppipe = tmp_path / "pipeline.cppipe"
@@ -247,7 +263,7 @@ def test_workflow_classifies_tiffs_when_fiji_finds_no_exports(
         masks_dir=masks_dir.resolve(),
         labels_dir=labels_dir.resolve(),
         macro_path=DEFAULT_FIJI_EXPORT_MACRO.resolve(),
-        executable=(tmp_path / "ImageJ-win64.exe").resolve(),
+        executable=fiji_exe.resolve(),
         command=["ImageJ-win64.exe", "--headless", "-macro", "export_folder.ijm"],
         returncode=0,
         stdout="done",
@@ -266,7 +282,7 @@ def test_workflow_classifies_tiffs_when_fiji_finds_no_exports(
         input_dir,
         results_dir,
         cppipe,
-        fiji_executable=tmp_path / "ImageJ-win64.exe",
+        fiji_executable=fiji_exe,
     )
 
     mock_organize.assert_called_once()

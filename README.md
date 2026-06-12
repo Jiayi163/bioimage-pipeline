@@ -36,6 +36,10 @@ designed for **batch invocation**, not one launch per image:
    Fiji is unavailable.
 6. **Stage timings** logged in `workflow_summary.json` (Phase 14): CellProfiler,
    Fiji export, and QC generation runtime.
+7. **OIR projection cache** (output-folder only): re-runs to the same results
+   folder reuse `{output}/oir_projection/*.tif` when projected TIFFs are at least
+   as new as the source `.oir` files (see
+   [CellProfiler workflow — OIR projection cache](docs/cellprofiler_workflow.md#oir-projection-cache-output-folder)).
 
 ## Architecture
 

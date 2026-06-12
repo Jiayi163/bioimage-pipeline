@@ -8,6 +8,7 @@ import platform
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Sequence
@@ -63,6 +64,8 @@ class CellProfilerRunResult:
     stdout: str
     stderr: str
     log_files: dict[str, Path]
+    startup_seconds: float = 0.0
+    subprocess_seconds: float = 0.0
 
     @property
     def succeeded(self) -> bool:
@@ -425,6 +428,7 @@ def run_cellprofiler_pipeline_logged(
     log_dir: str | Path | None = None,
 ) -> CellProfilerRunResult:
     """Run CellProfiler headlessly and return captured stdout/stderr."""
+    startup_started = time.perf_counter()
     pipeline_path = _resolve_existing_path(cppipe_path, "Pipeline file")
     input_path = _resolve_existing_path(input_dir, "Input directory")
     if not input_path.is_dir():
@@ -442,7 +446,9 @@ def run_cellprofiler_pipeline_logged(
         output_path,
         extra_args=extra_args,
     )
+    startup_seconds = time.perf_counter() - startup_started
 
+    subprocess_started = time.perf_counter()
     try:
         completed = subprocess.run(
             command,
@@ -454,6 +460,7 @@ def run_cellprofiler_pipeline_logged(
         raise RuntimeError(
             f"Failed to launch CellProfiler: {exc}"
         ) from exc
+    subprocess_seconds = time.perf_counter() - subprocess_started
 
     stdout = completed.stdout or ""
     stderr = completed.stderr or ""
@@ -474,6 +481,8 @@ def run_cellprofiler_pipeline_logged(
         stdout=stdout,
         stderr=stderr,
         log_files=log_files,
+        startup_seconds=startup_seconds,
+        subprocess_seconds=subprocess_seconds,
     )
 
 
