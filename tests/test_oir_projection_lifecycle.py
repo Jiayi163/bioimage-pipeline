@@ -222,6 +222,8 @@ def test_prepare_input_workflow_records_lifecycle_stages(tmp_path: Path) -> None
                 "cache_hits": [],
                 "reprojected": ["sample.tif"],
                 "force_oir_reproject": False,
+                "projection_method": "max",
+                "engine_selection_seconds": 0.0,
             },
         )()
         _prepare_cellprofiler_input_dir(

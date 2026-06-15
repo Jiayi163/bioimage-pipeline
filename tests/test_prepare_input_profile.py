@@ -8,6 +8,7 @@ from bioimage_pipeline.prepare_input_profile import (
     PrepareInputFileRecord,
     PrepareInputProfile,
     PrepareInputScanResult,
+    PrepareInputSubTiming,
     build_investigation_notes,
     format_prepare_input_report,
     parse_fiji_oir_file_records,
@@ -114,6 +115,38 @@ def test_build_investigation_notes_for_cache_hit() -> None:
     assert any("reused from oir_projection/" in note for note in notes)
     assert any("All projected TIFFs were reused" in note for note in notes)
     assert not any("processed again" in note for note in notes)
+
+
+def test_format_prepare_input_report_lists_sub_timing() -> None:
+    profile = PrepareInputProfile(
+        input_dir="/input",
+        action="oir_projection_fiji",
+        scan=PrepareInputScanResult(
+            input_dir="/input",
+            directories_scanned=1,
+            oir_files=[Path("/input/a.oir")],
+            tiff_files=[],
+            scan_seconds=0.12,
+        ),
+        engine="fiji",
+        projection_method="max",
+        fiji_projection_argument="Max Intensity",
+        sub_timing=PrepareInputSubTiming(
+            discover_input_files_seconds=0.12,
+            engine_selection_seconds=0.01,
+            per_file_oir_import_seconds=10.0,
+            per_file_z_projection_seconds=1.0,
+            per_file_tiff_save_seconds=0.5,
+            dtype_range_validation_seconds=0.03,
+        ),
+        file_records=[],
+    )
+
+    text = format_prepare_input_report(profile)
+
+    assert "Prepare input sub-timing:" in text
+    assert "discover_input_files: 0.12s" in text
+    assert "fiji_projection_argument: Max Intensity" in text
 
 
 def test_format_prepare_input_report_lists_per_file_fields() -> None:

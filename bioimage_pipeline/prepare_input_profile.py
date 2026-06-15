@@ -53,6 +53,46 @@ class PrepareInputScanResult:
 
 
 @dataclass
+class PrepareInputSubTiming:
+    """Stage-level timing inside the prepare_input workflow step."""
+
+    discover_input_files_seconds: float = 0.0
+    engine_selection_seconds: float = 0.0
+    per_file_oir_import_seconds: float = 0.0
+    per_file_z_projection_seconds: float = 0.0
+    per_file_tiff_save_seconds: float = 0.0
+    dtype_range_validation_seconds: float = 0.0
+    copy_to_cellprofiler_input_seconds: float = 0.0
+
+    @classmethod
+    def from_file_records(
+        cls,
+        records: list[PrepareInputFileRecord],
+        *,
+        discover_input_files_seconds: float = 0.0,
+        engine_selection_seconds: float = 0.0,
+        dtype_range_validation_seconds: float = 0.0,
+        copy_to_cellprofiler_input_seconds: float = 0.0,
+    ) -> PrepareInputSubTiming:
+        """Aggregate per-file read/convert/write timings into stage totals."""
+        return cls(
+            discover_input_files_seconds=discover_input_files_seconds,
+            engine_selection_seconds=engine_selection_seconds,
+            per_file_oir_import_seconds=sum(
+                record.read_seconds for record in records if not record.skipped
+            ),
+            per_file_z_projection_seconds=sum(
+                record.conversion_seconds for record in records if not record.skipped
+            ),
+            per_file_tiff_save_seconds=sum(
+                record.write_seconds for record in records if not record.skipped
+            ),
+            dtype_range_validation_seconds=dtype_range_validation_seconds,
+            copy_to_cellprofiler_input_seconds=copy_to_cellprofiler_input_seconds,
+        )
+
+
+@dataclass
 class PrepareInputProfile:
     """Full prepare_input profiling report."""
 
@@ -62,6 +102,9 @@ class PrepareInputProfile:
     engine: str | None = None
     projection_output_dir: str | None = None
     projection_seconds: float = 0.0
+    projection_method: str | None = None
+    fiji_projection_argument: str | None = None
+    sub_timing: PrepareInputSubTiming = field(default_factory=PrepareInputSubTiming)
     file_records: list[PrepareInputFileRecord] = field(default_factory=list)
     investigation_notes: list[str] = field(default_factory=list)
 
@@ -251,7 +294,25 @@ def format_prepare_input_report(profile: PrepareInputProfile) -> str:
         lines.append(f"  engine: {profile.engine}")
     if profile.projection_output_dir:
         lines.append(f"  projection_output_dir: {profile.projection_output_dir}")
+    if profile.projection_method:
+        lines.append(f"  projection_method: {profile.projection_method}")
+    if profile.fiji_projection_argument:
+        lines.append(f"  fiji_projection_argument: {profile.fiji_projection_argument}")
     lines.append(f"  projection_seconds: {profile.projection_seconds:.2f}s")
+    sub = profile.sub_timing
+    lines.extend(
+        [
+            "",
+            "Prepare input sub-timing:",
+            f"  discover_input_files: {sub.discover_input_files_seconds:.2f}s",
+            f"  engine_selection: {sub.engine_selection_seconds:.2f}s",
+            f"  per_file_oir_import: {sub.per_file_oir_import_seconds:.2f}s",
+            f"  per_file_z_projection: {sub.per_file_z_projection_seconds:.2f}s",
+            f"  per_file_tiff_save: {sub.per_file_tiff_save_seconds:.2f}s",
+            f"  dtype_range_validation: {sub.dtype_range_validation_seconds:.2f}s",
+            f"  copy_to_cellprofiler_input: {sub.copy_to_cellprofiler_input_seconds:.2f}s",
+        ]
+    )
     lines.append("")
     lines.append("Per-file timings:")
     if not profile.file_records:

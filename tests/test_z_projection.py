@@ -7,10 +7,13 @@ import pytest
 import tifffile
 
 from bioimage_pipeline.z_projection import (
+    Z_PROJECTION_METHODS,
     format_oir_read_dependency_error,
     iter_oir_files,
+    normalize_projection_method,
     oir_output_filename,
     oir_output_path,
+    project_stack,
     zmax_intensity,
 )
 
@@ -37,6 +40,50 @@ def test_zmax_intensity_collapses_z_axis() -> None:
 def test_zmax_intensity_passthrough_2d() -> None:
     image = np.arange(6, dtype=np.uint8).reshape(2, 3)
     np.testing.assert_array_equal(zmax_intensity(image), image)
+
+
+@pytest.mark.parametrize("method", Z_PROJECTION_METHODS)
+def test_project_stack_supports_all_fiji_methods(method: str) -> None:
+    stack = np.array(
+        [
+            [[0, 1], [2, 3]],
+            [[3, 4], [5, 6]],
+            [[9, 8], [7, 0]],
+        ],
+        dtype=np.float64,
+    )
+    reducers = {
+        "average": np.mean,
+        "max": np.max,
+        "min": np.min,
+        "sum": np.sum,
+        "standard": np.std,
+        "median": np.median,
+    }
+    projected = project_stack(stack, method, axis=0)
+    expected = reducers[method](stack, axis=0)
+    np.testing.assert_allclose(projected, expected)
+
+
+def test_normalize_projection_method_accepts_aliases() -> None:
+    assert normalize_projection_method("Max Intensity") == "max"
+    assert normalize_projection_method("standard_deviation") == "standard"
+
+
+def test_normalize_projection_method_rejects_unknown() -> None:
+    with pytest.raises(ValueError, match="Unsupported Z projection method"):
+        normalize_projection_method("mode")
+
+
+def test_all_gui_methods_are_supported() -> None:
+    assert set(Z_PROJECTION_METHODS) == {
+        "average",
+        "max",
+        "min",
+        "sum",
+        "standard",
+        "median",
+    }
 
 
 def test_iter_oir_files_finds_nested_files(tmp_path: Path) -> None:

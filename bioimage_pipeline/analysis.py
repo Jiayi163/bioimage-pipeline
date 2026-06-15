@@ -6,7 +6,7 @@ import json
 import shutil
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal, Sequence
 
@@ -180,6 +180,7 @@ class CellProfilerWorkflowConfig:
     fiji_timeout: float | None = None
     fiji_fallback_to_python: bool = True
     oir_projection_engine: str | None = None
+    oir_projection_method: str = "max"
     force_oir_reproject: bool = False
     adaptive_threshold: bool = False
     adaptive_min_object_size: int = 20
@@ -453,6 +454,7 @@ def _prepare_cellprofiler_input_dir(
     results_dir: Path,
     logs_dir: Path,
     oir_projection_engine: str | None = None,
+    oir_projection_method: str = "max",
     fiji_executable: str | Path | None = None,
     fiji_headless: bool | None = None,
     fiji_timeout: float | None = None,
@@ -469,11 +471,13 @@ def _prepare_cellprofiler_input_dir(
     from bioimage_pipeline.prepare_input_profile import (
         PrepareInputFileRecord,
         PrepareInputProfile,
+        PrepareInputSubTiming,
         build_investigation_notes,
         detect_file_type,
         scan_prepare_input_folder,
         write_prepare_input_profile,
     )
+    from bioimage_pipeline.z_projection import fiji_projection_label
 
     source_dir = input_dir.resolve()
     scan = scan_prepare_input_folder(source_dir)
@@ -484,6 +488,9 @@ def _prepare_cellprofiler_input_dir(
             action="passthrough_tiff",
             scan=scan,
             projection_output_dir=None,
+            sub_timing=PrepareInputSubTiming(
+                discover_input_files_seconds=scan.scan_seconds,
+            ),
             file_records=[
                 PrepareInputFileRecord(
                     input_path=str(path),
@@ -517,14 +524,47 @@ def _prepare_cellprofiler_input_dir(
         fiji_headless=fiji_headless,
         fiji_timeout=fiji_timeout,
         force_oir_reproject=force_oir_reproject,
+        projection_method=oir_projection_method,
         lifecycle=lifecycle,
     )
     projection_seconds = time.perf_counter() - projection_started
+
+    from bioimage_pipeline.projection_postprocess import (
+        PROJECTION_POSTPROCESS_JSON,
+        validate_projected_tiffs_for_cellprofiler,
+    )
+
+    projected_tif_paths = [
+        str(pair.output_tif.resolve())
+        for pair in result.file_pairs
+        if pair.output_tif.name in result.processed and pair.output_tif.is_file()
+    ]
+    validation_started = time.perf_counter()
+    postprocess_records = validate_projected_tiffs_for_cellprofiler(
+        projected_tif_paths,
+        engine=result.engine,
+        projection_method=result.projection_method,
+        logs_dir=logs_dir,
+    )
+    validation_seconds = time.perf_counter() - validation_started
+
+    copy_started = time.perf_counter()
+    cellprofiler_input_dir = projection_dir.resolve()
+    copy_seconds = time.perf_counter() - copy_started
 
     if result.cache_hits and not result.reprojected:
         action = "oir_projection_cache_hit"
     else:
         action = f"oir_projection_{result.engine}"
+
+    fiji_projection_arg = fiji_projection_label(result.projection_method)
+    sub_timing = PrepareInputSubTiming.from_file_records(
+        list(result.file_profiles),
+        discover_input_files_seconds=scan.scan_seconds,
+        engine_selection_seconds=getattr(result, "engine_selection_seconds", 0.0),
+        dtype_range_validation_seconds=validation_seconds,
+        copy_to_cellprofiler_input_seconds=copy_seconds,
+    )
 
     profile = PrepareInputProfile(
         input_dir=str(source_dir),
@@ -533,6 +573,9 @@ def _prepare_cellprofiler_input_dir(
         engine=result.engine,
         projection_output_dir=str(projection_dir.resolve()),
         projection_seconds=projection_seconds,
+        projection_method=result.projection_method,
+        fiji_projection_argument=fiji_projection_arg,
+        sub_timing=sub_timing,
         file_records=list(result.file_profiles),
     )
     profile.investigation_notes = build_investigation_notes(profile)
@@ -543,6 +586,9 @@ def _prepare_cellprofiler_input_dir(
         "input_dir": str(result.input_dir),
         "output_dir": str(result.output_dir),
         "engine": result.engine,
+        "projection_method": result.projection_method,
+        "fiji_projection_argument": fiji_projection_arg,
+        "prepare_input_sub_timing": asdict(sub_timing),
         "input_oir_files": [str(pair.input_oir) for pair in result.file_pairs],
         "output_tif_paths": [str(pair.output_tif) for pair in result.file_pairs],
         "processed": list(result.processed),
@@ -557,6 +603,23 @@ def _prepare_cellprofiler_input_dir(
         "cache_hits": list(result.cache_hits),
         "reprojected": list(result.reprojected),
         "force_oir_reproject": result.force_oir_reproject,
+        "projection_postprocess": str(logs_dir / PROJECTION_POSTPROCESS_JSON),
+        "projection_postprocess_records": [
+            {
+                "path": record.path,
+                "engine": record.engine,
+                "projection_method": record.projection_method,
+                "dtype_before": record.dtype_before,
+                "min_before": record.min_before,
+                "max_before": record.max_before,
+                "dtype_after": record.dtype_after,
+                "min_after": record.min_after,
+                "max_after": record.max_after,
+                "action": record.action,
+                "rewritten": record.rewritten,
+            }
+            for record in postprocess_records
+        ],
         "oir_projection_cache_debug": str(
             logs_dir / "oir_projection_cache_debug.txt"
         ),
@@ -607,11 +670,11 @@ def _prepare_cellprofiler_input_dir(
         )
     if not result.processed:
         raise RuntimeError(
-            "Input folder contains .oir files but OIR Z-max produced no projected "
-            "TIFF files. Install aicsimageio/bfio or switch OIR projection engine "
-            "to Fiji."
+            "Input folder contains .oir files but OIR projection produced no projected "
+            "TIFF files. Configure a Fiji executable for OIR projection, or install "
+            "aicsimageio/bfio and choose OIR projection engine Python."
         )
-    return projection_dir.resolve(), summary_path
+    return cellprofiler_input_dir, summary_path
 
 
 def _prepare_workflow_directories(results_dir: Path) -> dict[str, Path]:
@@ -725,6 +788,7 @@ def run_cellprofiler_workflow(
     fiji_timeout: float | None = None,
     fiji_fallback_to_python: bool = True,
     oir_projection_engine: str | None = None,
+    oir_projection_method: str = "max",
     force_oir_reproject: bool = False,
     adaptive_threshold: bool = False,
     adaptive_min_object_size: int = 20,
@@ -781,6 +845,7 @@ def run_cellprofiler_workflow(
         fiji_timeout=fiji_timeout,
         fiji_fallback_to_python=fiji_fallback_to_python,
         oir_projection_engine=oir_projection_engine,
+        oir_projection_method=oir_projection_method,
         force_oir_reproject=force_oir_reproject,
         adaptive_threshold=adaptive_threshold,
         adaptive_min_object_size=adaptive_min_object_size,
@@ -825,6 +890,7 @@ def run_cellprofiler_workflow_from_config(
         results_dir=directories["results"],
         logs_dir=directories["logs"],
         oir_projection_engine=config.oir_projection_engine,
+        oir_projection_method=config.oir_projection_method,
         fiji_executable=config.fiji_executable,
         fiji_headless=config.fiji_headless,
         fiji_timeout=config.fiji_timeout,

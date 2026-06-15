@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -19,10 +20,14 @@ from bioimage_pipeline.oir_projection_lifecycle import (
     log_oir_projection_audit,
 )
 from bioimage_pipeline.z_projection import (
+    DEFAULT_Z_PROJECTION_METHOD,
     OirPythonReadError,
     PYTHON_OIR_MISSING_DEPS_MESSAGE,
+    ZProjectionMethod,
+    fiji_projection_label,
     format_oir_read_dependency_error,
     iter_oir_files,
+    normalize_projection_method,
     oir_output_path,
     process_oir_file_python,
     process_oir_file_python_timed,
@@ -40,6 +45,7 @@ FIJI_OIR_STDOUT_LOG = "fiji_oir_projection_stdout.log"
 FIJI_OIR_STDERR_LOG = "fiji_oir_projection_stderr.log"
 FIJI_OIR_COMMAND_LOG = "fiji_oir_projection_command.txt"
 OIR_PROJECTION_CACHE_DEBUG_LOG = "oir_projection_cache_debug.txt"
+PROJECTION_METHOD_METADATA = ".projection_method"
 # Windows/FAT32 and float rounding can make projected TIFFs look slightly older
 # than source .oir files even when nothing changed.
 CACHE_MTIME_TOLERANCE_SECONDS = 2.0
@@ -88,6 +94,35 @@ class OirZmaxBatchResult:
     cache_hits: list[str] = field(default_factory=list)
     reprojected: list[str] = field(default_factory=list)
     force_oir_reproject: bool = False
+    projection_method: str = DEFAULT_Z_PROJECTION_METHOD
+    engine_selection_seconds: float = 0.0
+
+
+def read_stored_projection_method(projection_output_dir: str | Path) -> str | None:
+    """Return the projection method recorded for *projection_output_dir*, if any."""
+    metadata_path = Path(projection_output_dir) / PROJECTION_METHOD_METADATA
+    if not metadata_path.is_file():
+        return None
+    text = metadata_path.read_text(encoding="utf-8").strip()
+    if not text:
+        return None
+    try:
+        return normalize_projection_method(text)
+    except ValueError:
+        return None
+
+
+def write_stored_projection_method(
+    projection_output_dir: str | Path,
+    method: str | ZProjectionMethod,
+) -> Path:
+    """Persist the projection method used for cached TIFFs under *projection_output_dir*."""
+    output_path = Path(projection_output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    metadata_path = output_path / PROJECTION_METHOD_METADATA
+    slug = normalize_projection_method(method)
+    metadata_path.write_text(f"{slug}\n", encoding="utf-8")
+    return metadata_path.resolve()
 
 
 def _normalize_input_dir(input_dir: str | Path) -> Path:
@@ -208,8 +243,11 @@ def evaluate_projection_cache(
     pair: OirFilePair,
     *,
     force_reproject: bool = False,
+    projection_method: str | ZProjectionMethod = DEFAULT_Z_PROJECTION_METHOD,
+    projection_output_dir: Path | None = None,
 ) -> ProjectionCacheDecision:
     """Evaluate cache freshness and return a debug-friendly decision record."""
+    requested_method = normalize_projection_method(projection_method)
     input_oir = pair.input_oir.resolve()
     output_tif = pair.output_tif.resolve()
     base = {
@@ -243,6 +281,17 @@ def evaluate_projection_cache(
             **base,
             cache_is_fresh=False,
             cache_reason="expected projected TIFF is missing",
+        )
+
+    metadata_dir = projection_output_dir or output_tif.parent
+    stored_method = read_stored_projection_method(metadata_dir)
+    if stored_method is not None and stored_method != requested_method:
+        return ProjectionCacheDecision(
+            **base,
+            cache_is_fresh=False,
+            cache_reason=(
+                f"projection method changed ({stored_method} -> {requested_method})"
+            ),
         )
 
     try:
@@ -304,11 +353,15 @@ def projection_cache_is_fresh(
     pair: OirFilePair,
     *,
     force_reproject: bool = False,
+    projection_method: str | ZProjectionMethod = DEFAULT_Z_PROJECTION_METHOD,
+    projection_output_dir: Path | None = None,
 ) -> bool:
     """Return whether a projected TIFF in the output folder is up to date."""
     return evaluate_projection_cache(
         pair,
         force_reproject=force_reproject,
+        projection_method=projection_method,
+        projection_output_dir=projection_output_dir,
     ).cache_is_fresh
 
 
@@ -319,6 +372,7 @@ def format_projection_cache_debug_report(
     cached_count: int,
     to_project_count: int,
     skip_fiji: bool,
+    projection_method: str = DEFAULT_Z_PROJECTION_METHOD,
     pre_cache_snapshot: dict[str, Any] | None = None,
 ) -> str:
     """Format cache decisions for logs and on-disk debugging."""
@@ -330,6 +384,7 @@ def format_projection_cache_debug_report(
         [
             "OIR projection cache debug:",
             f"  engine: {engine}",
+            f"  projection_method: {normalize_projection_method(projection_method)}",
             f"  force_oir_reproject: {decisions[0].force_oir_reproject if decisions else False}",
             f"  cache_hits: {cached_count}",
             f"  to_project: {to_project_count}",
@@ -366,12 +421,23 @@ def log_projection_cache_decisions(
     cached_pairs: list[OirFilePair],
     to_project: list[OirFilePair],
     skip_fiji: bool,
+    projection_method: str | ZProjectionMethod = DEFAULT_Z_PROJECTION_METHOD,
     logs_dir: Path | None = None,
     pre_cache_snapshot: dict[str, Any] | None = None,
+    projection_output_dir: Path | None = None,
 ) -> list[ProjectionCacheDecision]:
     """Log per-pair cache decisions and optionally persist them under logs_dir."""
+    requested_method = normalize_projection_method(projection_method)
+    metadata_dir = projection_output_dir
+    if metadata_dir is None and file_pairs:
+        metadata_dir = file_pairs[0].output_tif.parent
     decisions = [
-        evaluate_projection_cache(pair, force_reproject=force_reproject)
+        evaluate_projection_cache(
+            pair,
+            force_reproject=force_reproject,
+            projection_method=requested_method,
+            projection_output_dir=metadata_dir,
+        )
         for pair in file_pairs
     ]
     report = format_projection_cache_debug_report(
@@ -380,6 +446,7 @@ def log_projection_cache_decisions(
         cached_count=len(cached_pairs),
         to_project_count=len(to_project),
         skip_fiji=skip_fiji,
+        projection_method=requested_method,
         pre_cache_snapshot=pre_cache_snapshot,
     )
     logger.info("\n%s", report.rstrip())
@@ -390,6 +457,7 @@ def log_projection_cache_decisions(
         summary_path = logs_dir / "oir_projection_cache_debug.json"
         payload: dict[str, Any] = {
             "engine": engine,
+            "projection_method": requested_method,
             "force_oir_reproject": force_reproject,
             "cache_hits": len(cached_pairs),
             "to_project": len(to_project),
@@ -409,14 +477,24 @@ def partition_projection_pairs(
     file_pairs: list[OirFilePair],
     *,
     force_reproject: bool = False,
+    projection_method: str | ZProjectionMethod = DEFAULT_Z_PROJECTION_METHOD,
+    projection_output_dir: Path | None = None,
 ) -> tuple[list[OirFilePair], list[OirFilePair]]:
     """Split pairs into ``(cached, to_project)`` using output-folder mtime cache."""
     if force_reproject:
         return [], list(file_pairs)
+    metadata_dir = projection_output_dir
+    if metadata_dir is None and file_pairs:
+        metadata_dir = file_pairs[0].output_tif.parent
     cached: list[OirFilePair] = []
     to_project: list[OirFilePair] = []
     for pair in file_pairs:
-        if projection_cache_is_fresh(pair, force_reproject=force_reproject):
+        if projection_cache_is_fresh(
+            pair,
+            force_reproject=force_reproject,
+            projection_method=projection_method,
+            projection_output_dir=metadata_dir,
+        ):
             cached.append(pair)
         else:
             to_project.append(pair)
@@ -428,7 +506,11 @@ def resolve_oir_projection_engine(
     *,
     fiji_executable: str | Path | None = None,
 ) -> str:
-    """Resolve ``auto``/``None`` to ``python`` or ``fiji`` with clear failures."""
+    """Resolve ``auto``/``None`` to ``fiji`` or ``python`` with clear failures.
+
+    Fiji is the authoritative OIR projection path when available. Python is used
+    only as an explicit choice or when Fiji cannot be resolved.
+    """
     from bioimage_pipeline.fiji_runner import find_fiji_executable
 
     if engine == "python":
@@ -436,20 +518,25 @@ def resolve_oir_projection_engine(
     if engine == "fiji":
         return "fiji"
 
-    if python_oir_dependencies_available():
-        return "python"
     if find_fiji_executable(fiji_executable) is not None:
         return "fiji"
+    if python_oir_dependencies_available():
+        return "python"
 
     raise RuntimeError(
         "No OIR projection engine is available on this machine. "
-        f"{PYTHON_OIR_MISSING_DEPS_MESSAGE} "
-        "Alternatively, configure a Fiji executable in the Run workflow panel "
-        "or set FIJI_EXECUTABLE and choose OIR projection engine Fiji."
+        "Configure a Fiji executable in the Run workflow panel or set "
+        "FIJI_EXECUTABLE. "
+        f"{PYTHON_OIR_MISSING_DEPS_MESSAGE}"
     )
 
 
-def build_oir_zmax_macro(input_dir: Path, output_dir: Path) -> str:
+def build_oir_zmax_macro(
+    input_dir: Path,
+    output_dir: Path,
+    *,
+    projection_method: str | ZProjectionMethod = DEFAULT_Z_PROJECTION_METHOD,
+) -> str:
     """Build the OIR Z-max macro with embedded paths and diagnostic logging.
 
     Paths are embedded directly in the macro (same approach as the working
@@ -458,9 +545,10 @@ def build_oir_zmax_macro(input_dir: Path, output_dir: Path) -> str:
     """
     input_text = _ijm_path(input_dir)
     output_text = _ijm_path(output_dir)
+    fiji_projection = fiji_projection_label(projection_method)
     return f"""// Auto-generated OIR Z-max macro (Stacking+Drectly.ijm parity).
 // Embedded input/output paths — do not rely on getArgument() for paths.
-// Bio-Formats Windowless Importer → Z Project Max Intensity → saveAs TIFF.
+// Bio-Formats Windowless Importer → Z Project ({fiji_projection}) → saveAs TIFF.
 
 input = ensureTrailingSeparator("{input_text}");
 output = ensureTrailingSeparator("{output_text}");
@@ -540,7 +628,8 @@ function processFile(inputFolder, outputFolder, file) {{
         print("[OIR] stack slices: n/a (not a hyperstack)");
     }}
     tConvStart = getTime();
-    run("Z Project...", "projection=[Max Intensity]");
+    print("[OIR] Z Project projection: [{fiji_projection}]");
+    run("Z Project...", "projection=[{fiji_projection}]");
     tConvEnd = getTime();
     print("[OIR] timing conversion_seconds: " + ((tConvEnd - tConvStart) / 1000.0));
     print("[OIR] Z Project completed");
@@ -563,31 +652,55 @@ setBatchMode(false);
 """
 
 
-def build_manual_oir_zmax_macro(input_dir: Path, output_dir: Path) -> str:
+def build_manual_oir_zmax_macro(
+    input_dir: Path,
+    output_dir: Path,
+    *,
+    projection_method: str | ZProjectionMethod = DEFAULT_Z_PROJECTION_METHOD,
+) -> str:
     """Build a Fiji macro that users run manually from the Fiji GUI."""
-    return build_oir_zmax_macro(input_dir, output_dir)
+    return build_oir_zmax_macro(
+        input_dir,
+        output_dir,
+        projection_method=projection_method,
+    )
 
 
 def write_oir_zmax_generated_macro(
     logs_dir: Path,
     input_dir: Path,
     output_dir: Path,
+    *,
+    projection_method: str | ZProjectionMethod = DEFAULT_Z_PROJECTION_METHOD,
 ) -> Path:
     """Write the generated OIR Z-max macro into the workflow logs folder."""
     logs_dir.mkdir(parents=True, exist_ok=True)
     macro_path = logs_dir / GENERATED_MACRO_NAME
     macro_path.write_text(
-        build_oir_zmax_macro(input_dir, output_dir),
+        build_oir_zmax_macro(
+            input_dir,
+            output_dir,
+            projection_method=projection_method,
+        ),
         encoding="utf-8",
     )
     return macro_path.resolve()
 
 
-def write_manual_oir_zmax_macro(input_dir: Path, output_dir: Path) -> Path:
+def write_manual_oir_zmax_macro(
+    input_dir: Path,
+    output_dir: Path,
+    *,
+    projection_method: str | ZProjectionMethod = DEFAULT_Z_PROJECTION_METHOD,
+) -> Path:
     """Write the manual-run Fiji macro into the output directory."""
     macro_path = output_dir / "run_oir_zmax_manual.ijm"
     macro_path.write_text(
-        build_manual_oir_zmax_macro(input_dir, output_dir),
+        build_manual_oir_zmax_macro(
+            input_dir,
+            output_dir,
+            projection_method=projection_method,
+        ),
         encoding="utf-8",
     )
     return macro_path.resolve()
@@ -623,6 +736,7 @@ def _build_cache_only_result(
     file_pairs: list[OirFilePair],
     cached_pairs: list[OirFilePair],
     force_oir_reproject: bool,
+    projection_method: str | ZProjectionMethod = DEFAULT_Z_PROJECTION_METHOD,
 ) -> OirZmaxBatchResult:
     cache_hits = [pair.output_tif.name for pair in cached_pairs]
     file_profiles = [_cache_hit_record(pair, engine=engine) for pair in cached_pairs]
@@ -637,6 +751,7 @@ def _build_cache_only_result(
         cache_hits=cache_hits,
         reprojected=[],
         force_oir_reproject=force_oir_reproject,
+        projection_method=normalize_projection_method(projection_method),
     )
 
 
@@ -864,6 +979,7 @@ def _run_fiji_oir_zmax_batch(
     fiji_headless: bool | None = None,
     fiji_timeout: float | None = None,
     force_oir_reproject: bool = False,
+    projection_method: str | ZProjectionMethod = DEFAULT_Z_PROJECTION_METHOD,
     pre_cache_snapshot: dict[str, Any] | None = None,
     lifecycle: OirProjectionLifecycleRecorder | None = None,
 ) -> OirZmaxBatchResult:
@@ -877,9 +993,12 @@ def _run_fiji_oir_zmax_batch(
     if pre_cache_snapshot is None:
         pre_cache_snapshot = build_pre_cache_snapshot(output_path, file_pairs)
 
+    requested_method = normalize_projection_method(projection_method)
     cached_pairs, to_project = partition_projection_pairs(
         file_pairs,
         force_reproject=force_oir_reproject,
+        projection_method=requested_method,
+        projection_output_dir=output_path,
     )
     cache_hits = [pair.output_tif.name for pair in cached_pairs]
     file_profiles = [_cache_hit_record(pair, engine="fiji") for pair in cached_pairs]
@@ -892,8 +1011,10 @@ def _run_fiji_oir_zmax_batch(
         cached_pairs=cached_pairs,
         to_project=to_project,
         skip_fiji=skip_fiji,
+        projection_method=requested_method,
         logs_dir=logs_dir,
         pre_cache_snapshot=pre_cache_snapshot,
+        projection_output_dir=output_path,
     )
 
     if skip_fiji:
@@ -908,6 +1029,7 @@ def _run_fiji_oir_zmax_batch(
             file_pairs=file_pairs,
             cached_pairs=cached_pairs,
             force_oir_reproject=force_oir_reproject,
+            projection_method=requested_method,
         )
         _record_after_projection(lifecycle)
         return result
@@ -926,6 +1048,16 @@ def _run_fiji_oir_zmax_batch(
         logs_dir,
         input_path,
         output_path,
+        projection_method=requested_method,
+    )
+    logger.info(
+        "OIR Fiji projection launch: method=%s fiji_projection_argument=%s "
+        "macro=%s files_to_project=%d skip_fiji=%s",
+        requested_method,
+        fiji_projection_label(requested_method),
+        generated_macro_path,
+        len(to_project),
+        skip_fiji,
     )
 
     run_result = run_fiji_macro(
@@ -975,13 +1107,24 @@ def _run_fiji_oir_zmax_batch(
         if pair.output_tif.is_file() and record.output_bytes is None:
             record.output_bytes = pair.output_tif.stat().st_size
 
+    from bioimage_pipeline.projection_postprocess import log_projection_output_diagnostics
+
+    for pair in to_project:
+        if pair.output_tif.is_file():
+            log_projection_output_diagnostics(
+                engine="fiji",
+                projection_method=requested_method,
+                input_path=pair.input_oir,
+                output_path=pair.output_tif,
+            )
+
     file_profiles.extend(projected_profiles)
     all_processed = cache_hits + reprojected
-    fiji_error = (
-        format_fiji_error_summary(run_result)
-        if not run_result.succeeded or failed
-        else None
-    )
+    if not run_result.succeeded or failed:
+        fiji_error = format_fiji_error_summary(run_result)
+    else:
+        write_stored_projection_method(output_path, requested_method)
+        fiji_error = None
     if fiji_error:
         for entry in failed:
             if entry.get("error") == "Expected output file was not created.":
@@ -1010,6 +1153,7 @@ def _run_fiji_oir_zmax_batch(
         cache_hits=cache_hits,
         reprojected=reprojected,
         force_oir_reproject=force_oir_reproject,
+        projection_method=requested_method,
     )
 
 
@@ -1023,23 +1167,40 @@ def run_oir_zmax_batch(
     fiji_headless: bool | None = None,
     fiji_timeout: float | None = None,
     force_oir_reproject: bool = False,
+    projection_method: str | ZProjectionMethod = DEFAULT_Z_PROJECTION_METHOD,
     lifecycle: OirProjectionLifecycleRecorder | None = None,
 ) -> OirZmaxBatchResult:
     """Z-max project every ``.oir`` file under *input_dir* into *output_dir*.
 
     When *engine* is ``fiji``, writes a generated macro with embedded paths to
-    ``logs_dir/stacking_zmax_generated.ijm`` and runs it via Fiji/ImageJ.
+    ``logs_dir/stacking_zmax_generated.ijm`` and runs it via Fiji/ImageJ
+    (Bio-Formats Windowless Importer → Z Project → saveAs TIFF). NumPy
+    projection is never used for ``engine='fiji'``.
     When *engine* is ``python``, reads ``.oir`` files with aicsimageio/bfio.
-    ``auto`` prefers Python when aicsimageio is available, otherwise Fiji.
+    ``auto`` prefers Fiji when a Fiji executable is available, otherwise Python.
     """
     input_path = _normalize_input_dir(input_dir)
     output_path = Path(output_dir)
     logs_path = Path(logs_dir) if logs_dir is not None else None
+    requested_method = normalize_projection_method(projection_method)
     _ensure_projection_output_dir(output_path, logs_dir=logs_path)
 
+    engine_started = time.perf_counter()
     resolved_engine = resolve_oir_projection_engine(
         engine,
         fiji_executable=fiji_executable,
+    )
+    engine_selection_seconds = time.perf_counter() - engine_started
+    fiji_projection_arg = fiji_projection_label(requested_method)
+    logger.info(
+        "OIR projection engine selected: requested=%s resolved=%s "
+        "method=%s fiji_projection_argument=%s input_dir=%s output_dir=%s",
+        engine,
+        resolved_engine,
+        requested_method,
+        fiji_projection_arg,
+        input_path,
+        output_path,
     )
     oir_files = list(iter_oir_files(input_path))
     file_pairs = _build_file_pairs(oir_files, output_path)
@@ -1051,7 +1212,7 @@ def run_oir_zmax_batch(
         )
 
     if resolved_engine == "fiji":
-        return _run_fiji_oir_zmax_batch(
+        result = _run_fiji_oir_zmax_batch(
             input_path,
             output_path,
             file_pairs,
@@ -1060,13 +1221,18 @@ def run_oir_zmax_batch(
             fiji_headless=fiji_headless,
             fiji_timeout=fiji_timeout,
             force_oir_reproject=force_oir_reproject,
+            projection_method=requested_method,
             pre_cache_snapshot=pre_cache_snapshot,
             lifecycle=lifecycle,
         )
+        result.engine_selection_seconds = engine_selection_seconds
+        return result
 
     cached_pairs, to_project = partition_projection_pairs(
         file_pairs,
         force_reproject=force_oir_reproject,
+        projection_method=requested_method,
+        projection_output_dir=output_path,
     )
 
     log_projection_cache_decisions(
@@ -1076,8 +1242,10 @@ def run_oir_zmax_batch(
         cached_pairs=cached_pairs,
         to_project=to_project,
         skip_fiji=False,
+        projection_method=requested_method,
         logs_dir=logs_path,
         pre_cache_snapshot=pre_cache_snapshot,
+        projection_output_dir=output_path,
     )
 
     cache_hits = [pair.output_tif.name for pair in cached_pairs]
@@ -1091,7 +1259,9 @@ def run_oir_zmax_batch(
             file_pairs=file_pairs,
             cached_pairs=cached_pairs,
             force_oir_reproject=force_oir_reproject,
+            projection_method=requested_method,
         )
+        result.engine_selection_seconds = engine_selection_seconds
         _record_after_projection(lifecycle)
         return result
 
@@ -1107,6 +1277,7 @@ def run_oir_zmax_batch(
                 pair.input_oir,
                 output_path,
                 audit_logs_dir=logs_path,
+                projection_method=requested_method,
             )
             file_profiles.append(record)
             if pair.output_tif.is_file():
@@ -1142,6 +1313,9 @@ def run_oir_zmax_batch(
                 )
             )
 
+    if reprojected and not failed:
+        write_stored_projection_method(output_path, requested_method)
+
     _record_after_projection(lifecycle)
     return OirZmaxBatchResult(
         input_dir=input_path,
@@ -1158,6 +1332,8 @@ def run_oir_zmax_batch(
         cache_hits=cache_hits,
         reprojected=reprojected,
         force_oir_reproject=force_oir_reproject,
+        projection_method=requested_method,
+        engine_selection_seconds=engine_selection_seconds,
     )
 
 

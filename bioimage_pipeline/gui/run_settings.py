@@ -19,6 +19,7 @@ DEFAULT_SETTINGS_FILE = DEFAULT_SETTINGS_DIR / "gui_run_settings.json"
 
 CELLPROFILER_SETTINGS_KEY = "cellprofiler_executable"
 FIJI_SETTINGS_KEY = "fiji_executable"
+OIR_PROJECTION_METHOD_KEY = "oir_projection_method"
 
 
 @dataclass(frozen=True)
@@ -217,6 +218,7 @@ def collect_run_settings_from_values(
     *,
     cellprofiler_executable: str,
     fiji_executable: str,
+    oir_projection_method: str | None = None,
 ) -> dict[str, str]:
     """Build the persisted settings payload from current GUI field values."""
     payload: dict[str, str] = {}
@@ -226,4 +228,6 @@ def collect_run_settings_from_values(
         payload[CELLPROFILER_SETTINGS_KEY] = cp_value
     if fiji_value:
         payload[FIJI_SETTINGS_KEY] = fiji_value
+    if oir_projection_method:
+        payload[OIR_PROJECTION_METHOD_KEY] = oir_projection_method.strip()
     return payload

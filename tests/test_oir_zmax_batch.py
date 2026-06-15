@@ -19,6 +19,7 @@ from bioimage_pipeline.oir_zmax_batch import (
     GENERATED_MACRO_NAME,
     build_manual_oir_zmax_macro,
     build_oir_zmax_macro,
+    resolve_oir_projection_engine,
     run_oir_zmax_batch,
     write_manual_oir_zmax_macro,
     write_oir_zmax_generated_macro,
@@ -27,6 +28,29 @@ from bioimage_pipeline.oir_zmax_batch import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CLI_SCRIPT = REPO_ROOT / "examples" / "run_oir_zmax_batch.py"
 FOLDER_MACRO_FILE = REPO_ROOT / "examples" / "fiji_macros" / "stacking_zmax.ijm"
+
+
+def test_resolve_oir_projection_engine_auto_prefers_fiji(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fiji_exe = tmp_path / "ImageJ-win64.exe"
+    fiji_exe.write_text("stub", encoding="utf-8")
+    monkeypatch.setattr(
+        "bioimage_pipeline.oir_zmax_batch.python_oir_dependencies_available",
+        lambda: True,
+    )
+
+    assert resolve_oir_projection_engine("auto", fiji_executable=fiji_exe) == "fiji"
+    assert resolve_oir_projection_engine("fiji", fiji_executable=fiji_exe) == "fiji"
+    assert resolve_oir_projection_engine("python", fiji_executable=fiji_exe) == "python"
+
+
+def test_build_oir_zmax_macro_uses_bioformats_windowless_importer(tmp_path: Path) -> None:
+    macro_text = build_oir_zmax_macro(tmp_path / "input", tmp_path / "output")
+    assert 'run("Bio-Formats Windowless Importer"' in macro_text
+    assert 'run("Z Project..."' in macro_text
+    assert 'saveAs("Tiff"' in macro_text
 
 
 def test_default_macro_exists() -> None:
@@ -85,6 +109,96 @@ def test_run_oir_zmax_batch_default_engine_uses_fiji_when_python_unavailable(
         )
 
     fiji_batch.assert_called_once()
+    assert result.engine == "fiji"
+
+
+def test_run_oir_zmax_batch_auto_prefers_fiji_when_python_available(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    (input_dir / "sample.oir").write_bytes(b"")
+
+    monkeypatch.setattr(
+        "bioimage_pipeline.oir_zmax_batch.python_oir_dependencies_available",
+        lambda: True,
+    )
+    fiji_exe = tmp_path / "ImageJ-win64.exe"
+    fiji_exe.write_text("stub", encoding="utf-8")
+
+    with patch(
+        "bioimage_pipeline.oir_zmax_batch._run_fiji_oir_zmax_batch",
+        return_value=MagicMock(
+            input_dir=input_dir.resolve(),
+            output_dir=output_dir.resolve(),
+            engine="fiji",
+            processed=["sample.tif"],
+            failed=[],
+            file_pairs=[],
+            fiji_executable=fiji_exe.resolve(),
+        ),
+    ) as fiji_batch:
+        result = run_oir_zmax_batch(
+            input_dir,
+            output_dir,
+            engine="auto",
+            fiji_executable=fiji_exe,
+        )
+
+    fiji_batch.assert_called_once()
+    assert result.engine == "fiji"
+
+
+def test_run_oir_zmax_batch_fiji_engine_never_uses_python_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    (input_dir / "sample.oir").write_bytes(b"")
+
+    monkeypatch.setattr(
+        "bioimage_pipeline.oir_zmax_batch.python_oir_dependencies_available",
+        lambda: True,
+    )
+    fiji_exe = tmp_path / "ImageJ-win64.exe"
+    fiji_exe.write_text("stub", encoding="utf-8")
+
+    with patch(
+        "bioimage_pipeline.oir_zmax_batch.process_oir_file_python_timed",
+    ) as process_timed, patch(
+        "bioimage_pipeline.fiji_runner.run_fiji_macro",
+    ) as run_macro:
+        from bioimage_pipeline.fiji_runner import FijiRunResult
+
+        (output_dir / "sample.tif").write_bytes(b"tiff")
+        run_macro.return_value = FijiRunResult(
+            command=[str(fiji_exe), "-macro"],
+            returncode=0,
+            stdout="",
+            stderr="",
+            macro_path=DEFAULT_MACRO_PATH,
+            executable=fiji_exe.resolve(),
+        )
+
+        result = run_oir_zmax_batch(
+            input_dir,
+            output_dir,
+            engine="fiji",
+            fiji_executable=fiji_exe,
+            logs_dir=tmp_path / "logs",
+            force_oir_reproject=True,
+            projection_method="median",
+        )
+
+    process_timed.assert_not_called()
+    assert run_macro.call_args.args[0].name == GENERATED_MACRO_NAME
+    macro_text = run_macro.call_args.args[0].read_text(encoding="utf-8")
+    assert 'projection=[Median]' in macro_text
     assert result.engine == "fiji"
 
 
@@ -211,6 +325,66 @@ def test_build_oir_zmax_macro_embeds_paths_for_special_filenames(tmp_path: Path)
     assert 'open=[" + inputPath + "]' in macro_text
     assert "[OIR] input path:" in macro_text
     assert "[OIR] saveAs called" in macro_text
+
+
+@pytest.mark.parametrize(
+    ("method", "fiji_label"),
+    [
+        ("max", "Max Intensity"),
+        ("min", "Min Intensity"),
+        ("average", "Average Intensity"),
+        ("sum", "Sum Slices"),
+        ("standard", "Standard Deviation"),
+        ("median", "Median"),
+    ],
+)
+def test_build_oir_zmax_macro_uses_selected_projection_method(
+    tmp_path: Path,
+    method: str,
+    fiji_label: str,
+) -> None:
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+
+    macro_text = build_oir_zmax_macro(
+        input_dir,
+        output_dir,
+        projection_method=method,
+    )
+
+    assert f"projection=[{fiji_label}]" in macro_text
+    assert f"Z Project ({fiji_label})" in macro_text
+
+
+def test_projection_cache_is_stale_when_method_changes(tmp_path: Path) -> None:
+    import time
+
+    from bioimage_pipeline.oir_zmax_batch import (
+        OirFilePair,
+        projection_cache_is_fresh,
+        write_stored_projection_method,
+    )
+
+    oir_path = tmp_path / "sample.oir"
+    tif_path = tmp_path / "sample.tif"
+    oir_path.write_bytes(b"oir-data")
+    time.sleep(0.05)
+    tif_path.write_bytes(b"tiff-data")
+    write_stored_projection_method(tmp_path, "max")
+
+    pair = OirFilePair(input_oir=oir_path, output_tif=tif_path)
+    assert projection_cache_is_fresh(
+        pair,
+        projection_method="max",
+        projection_output_dir=tmp_path,
+    ) is True
+    assert projection_cache_is_fresh(
+        pair,
+        projection_method="average",
+        projection_output_dir=tmp_path,
+    ) is False
 
 
 def test_reconcile_fiji_outputs_renames_mismatched_tif(tmp_path: Path) -> None:

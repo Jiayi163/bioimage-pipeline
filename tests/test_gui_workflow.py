@@ -6,8 +6,10 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pandas as pd
 import pytest
+import tifffile
 
 from bioimage_pipeline.analysis import CellProfilerWorkflowResult
 from bioimage_pipeline.cellprofiler_runner import CellProfilerRunResult
@@ -270,6 +272,21 @@ def test_default_oir_projection_engine_choice_prefers_fiji_without_python_deps(
     assert default_oir_projection_engine_choice(fiji_executable=fiji_exe) == "fiji"
 
 
+def test_default_oir_projection_engine_choice_prefers_fiji_when_both_available(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fiji_exe = tmp_path / "ImageJ-win64.exe"
+    fiji_exe.write_text("stub", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "bioimage_pipeline.gui.workflow_shell.python_oir_dependencies_available",
+        lambda: True,
+    )
+
+    assert default_oir_projection_engine_choice(fiji_executable=fiji_exe) == "fiji"
+
+
 def test_run_gui_workflow_reports_failed_subprocess_without_crashing(tmp_path: Path) -> None:
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "results"
@@ -290,6 +307,34 @@ def test_run_gui_workflow_reports_failed_subprocess_without_crashing(tmp_path: P
             ),
             runner=failing_runner,
         )
+
+
+def test_run_gui_workflow_forwards_oir_projection_method(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "results"
+    cppipe = tmp_path / "pipeline.cppipe"
+    input_dir.mkdir()
+    (input_dir / "sample.tif").write_bytes(b"image")
+    cppipe.write_text("pipeline", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    def runner(*args, **kwargs):
+        captured.update(kwargs)
+        return _workflow_result(output_dir)
+
+    summary = run_gui_workflow(
+        GuiWorkflowConfig(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            cppipe_path=cppipe,
+            oir_projection_method="average",
+        ),
+        runner=runner,
+    )
+
+    assert captured["oir_projection_method"] == "average"
+    assert summary.processed_count == 1
 
 
 def test_build_workflow_summary_lists_outputs(tmp_path: Path) -> None:
@@ -313,6 +358,7 @@ def test_read_log_tail_returns_last_lines(tmp_path: Path) -> None:
 
 def test_prepare_cellprofiler_input_dir_projects_oir(tmp_path: Path) -> None:
     from bioimage_pipeline.analysis import _prepare_cellprofiler_input_dir
+    from bioimage_pipeline.oir_zmax_batch import OirFilePair
 
     input_dir = tmp_path / "input"
     nested = input_dir / "plate"
@@ -324,6 +370,10 @@ def test_prepare_cellprofiler_input_dir_projects_oir(tmp_path: Path) -> None:
     oir_path.write_bytes(b"oir")
 
     projection_dir = results_dir / "oir_projection"
+    projection_dir.mkdir(parents=True, exist_ok=True)
+    output_tif = projection_dir / "sample.tif"
+    tifffile.imwrite(output_tif, np.zeros((4, 4), dtype=np.uint16))
+
     fiji_exe = tmp_path / "ImageJ-win64.exe"
     fiji_exe.write_text("stub", encoding="utf-8")
     with patch(
@@ -334,9 +384,11 @@ def test_prepare_cellprofiler_input_dir_projects_oir(tmp_path: Path) -> None:
             engine="fiji",
             processed=["sample.tif"],
             failed=[],
-            files_created=[str(projection_dir / "sample.tif")],
+            files_created=[str(output_tif)],
             remapped_outputs=[],
-            file_pairs=[MagicMock(input_oir=oir_path, output_tif=projection_dir / "sample.tif")],
+            file_pairs=[
+                OirFilePair(input_oir=oir_path.resolve(), output_tif=output_tif.resolve())
+            ],
             fiji_executable=fiji_exe.resolve(),
             fiji_headless=False,
             fiji_returncode=0,
@@ -346,6 +398,8 @@ def test_prepare_cellprofiler_input_dir_projects_oir(tmp_path: Path) -> None:
             cache_hits=[],
             reprojected=["sample.tif"],
             force_oir_reproject=False,
+            projection_method="max",
+            engine_selection_seconds=0.01,
         ),
     ) as oir_batch:
         resolved_input, summary_log = _prepare_cellprofiler_input_dir(
@@ -365,6 +419,7 @@ def test_prepare_cellprofiler_input_dir_projects_oir(tmp_path: Path) -> None:
         fiji_headless=None,
         fiji_timeout=None,
         force_oir_reproject=False,
+        projection_method="max",
         lifecycle=None,
     )
     assert resolved_input == projection_dir.resolve()

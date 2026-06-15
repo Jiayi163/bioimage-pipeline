@@ -21,8 +21,10 @@ from bioimage_pipeline.analysis import CellProfilerWorkflowResult, resolve_workf
 from bioimage_pipeline.cellprofiler_runner import find_cellprofiler_executable
 from bioimage_pipeline.fiji_runner import find_fiji_executable, fiji_not_found_message
 from bioimage_pipeline.gui.run_settings import (
+    OIR_PROJECTION_METHOD_KEY,
     build_cached_run_executables,
     collect_run_settings_from_values,
+    load_gui_run_settings,
     save_gui_run_settings,
     sync_discovered_executables_to_settings,
 )
@@ -69,7 +71,8 @@ class GuiWorkflowConfig:
     fiji_macro_path: str | Path | None = None
     export_fiji_tiffs: bool = True
     generate_qc: bool = True
-    oir_projection_engine: str = "python"
+    oir_projection_engine: str = "fiji"
+    oir_projection_method: str = "max"
 
 
 @dataclass
@@ -352,11 +355,11 @@ def default_oir_projection_engine_choice(
     fiji_executable: str | Path | None = None,
 ) -> str:
     """Return the GUI default OIR projection engine for this machine."""
-    if python_oir_dependencies_available():
-        return "python"
     if find_fiji_executable(fiji_executable) is not None:
         return "fiji"
-    return "python"
+    if python_oir_dependencies_available():
+        return "python"
+    return "fiji"
 
 
 def validate_workflow_config(config: GuiWorkflowConfig) -> list[str]:
@@ -399,7 +402,7 @@ def validate_workflow_config(config: GuiWorkflowConfig) -> list[str]:
         errors.append(f"Fiji macro does not exist: {config.fiji_macro_path}")
 
     if input_dir is not None and list(iter_oir_files(input_dir)):
-        engine = (config.oir_projection_engine or "python").strip().lower()
+        engine = (config.oir_projection_engine or "fiji").strip().lower()
         if engine not in {"python", "fiji"}:
             errors.append(
                 "OIR projection engine must be 'python' or 'fiji'."
@@ -530,6 +533,7 @@ def run_gui_workflow(
         export_fiji_tiffs=config.export_fiji_tiffs,
         generate_qc=config.generate_qc,
         oir_projection_engine=config.oir_projection_engine,
+        oir_projection_method=config.oir_projection_method,
     )
     return build_workflow_summary(result)
 
@@ -744,7 +748,7 @@ def launch_workflow_shell() -> None:
     ttk.Combobox(
         run_panel,
         textvariable=oir_projection_engine,
-        values=("python", "fiji"),
+        values=("fiji", "python"),
         state="readonly",
         width=12,
     ).grid(row=5, column=1, sticky="w", padx=(8, 8), pady=2)
@@ -805,7 +809,8 @@ def launch_workflow_shell() -> None:
             fiji_macro_path=optional_value("fiji_macro_path"),
             export_fiji_tiffs=export_fiji.get(),
             generate_qc=generate_qc.get(),
-            oir_projection_engine=oir_projection_engine.get().strip() or "python",
+            oir_projection_engine=oir_projection_engine.get().strip() or "fiji",
+            oir_projection_method="max",
         )
 
     def run_async() -> None:
@@ -847,6 +852,7 @@ def launch_workflow_shell() -> None:
             export_fiji_tiffs=config.export_fiji_tiffs,
             generate_qc=config.generate_qc,
             oir_projection_engine=config.oir_projection_engine,
+            oir_projection_method=config.oir_projection_method,
         )
         errors = validate_workflow_config(config)
         if errors:
@@ -858,6 +864,23 @@ def launch_workflow_shell() -> None:
         except ValueError as exc:
             messagebox.showerror("Invalid workflow settings", str(exc))
             return
+
+        oir_projection_method = config.oir_projection_method
+        if list(iter_oir_files(input_path)):
+            from bioimage_pipeline.gui.oir_projection_dialog import ask_oir_projection_method
+
+            saved_settings = load_gui_run_settings()
+            dialog_default = saved_settings.get(
+                OIR_PROJECTION_METHOD_KEY,
+                oir_projection_method,
+            )
+            selected_method = ask_oir_projection_method(
+                root,
+                default=dialog_default,
+            )
+            if selected_method is None:
+                return
+            oir_projection_method = selected_method
 
         run_entries["output_dir"].delete(0, "end")
         run_entries["output_dir"].insert(0, str(resolved_output_dir))
@@ -871,14 +894,18 @@ def launch_workflow_shell() -> None:
             export_fiji_tiffs=config.export_fiji_tiffs,
             generate_qc=config.generate_qc,
             oir_projection_engine=config.oir_projection_engine,
+            oir_projection_method=oir_projection_method,
         )
 
-        save_gui_run_settings(
+        persisted_settings = load_gui_run_settings()
+        persisted_settings.update(
             collect_run_settings_from_values(
                 cellprofiler_executable=config.cellprofiler_executable,
                 fiji_executable=str(config.fiji_executable or ""),
+                oir_projection_method=oir_projection_method,
             )
         )
+        save_gui_run_settings(persisted_settings)
 
         run_button.configure(state="disabled")
         status.set("Running headless CellProfiler/Fiji workflow...")
