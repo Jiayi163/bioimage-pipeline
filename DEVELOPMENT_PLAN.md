@@ -17,6 +17,161 @@ CellProfiler     →  headless .cppipe run             →  measurements, export
 Fiji/ImageJ      →  headless macro export            →  final TIFFs + metadata
 ```
 
+---
+
+## Architecture direction change: thresholding becomes the primary focus
+
+After reviewing the current state of the project, the development priority
+changes.
+
+Most major pipeline components are already completed:
+
+- Fiji integration
+- CellProfiler integration
+- Pipeline orchestration
+- Image loading and preprocessing
+- Measurement extraction
+- Export workflows
+- GUI/workflow management
+
+Because of that, the next major development focus is **thresholding and
+segmentation intelligence**, not adding more general image-processing modules.
+
+### Goal (what “thresholding” means here)
+
+The goal is **not** simply to port Fiji Auto Local Threshold or replicate
+CellProfiler settings. The goal is:
+
+```text
+Input image
+↓
+Automatic image analysis
+↓
+Auto-threshold recommender (global + local candidates)
+↓
+Automatic parameter tuning + scoring (biological heuristics)
+↓
+Best result + alternatives (user override)
+```
+
+The user should not need to manually tune:
+
+- threshold correction factor
+- threshold smoothing scale
+- lower threshold bound
+- upper threshold bound
+- adaptive window size
+- local radius
+- threshold method selection
+
+The system should recommend these automatically and transparently (with a score
+breakdown and confidence), while still allowing user override.
+
+### New development direction (assistive recommender, not “perfect AI”)
+
+Move toward an **assistive auto-threshold recommender**:
+
+1. Analyze the image.
+2. Generate and run both **global** and **adaptive/local** threshold candidates.
+3. Automatically tune candidate parameters (correction factor, smoothing scale,
+   window size, bounds).
+4. Score each candidate mask using **biological quality heuristics**.
+5. Present the **best result plus ranked alternatives**, with clear confidence and
+   reasoning, and allow user override.
+
+### Thresholding framework (global + adaptive/local)
+
+Both categories must be supported and remain visible in the final workflow. The
+system must not assume adaptive is always better.
+
+**Global thresholding** examples:
+
+- Otsu
+- Li
+- Triangle
+- Huang
+- Yen
+- Robust Background
+
+**Adaptive / local thresholding** examples:
+
+- CellProfiler Adaptive Otsu
+- Fiji Local Otsu
+- Sauvola
+- Phansalkar
+- Niblack
+- Bernsen
+
+### AI-assisted threshold selection (intelligence layer above methods)
+
+```text
+Image
+↓
+Image profiler
+```
+
+Extract metrics such as:
+
+- signal-to-noise ratio
+- illumination gradient
+- background variation
+- local contrast
+- dynamic range
+- object density
+- estimated object size
+- histogram shape
+- foreground/background separation quality
+
+Then:
+
+```text
+Threshold recommender
+```
+
+Decides:
+
+- global vs adaptive
+- threshold method
+- correction factor
+- smoothing scale
+- adaptive window size
+- local radius
+- lower/upper threshold constraints
+
+### Biological objective (assistive target)
+
+The objective is not “best mathematical threshold,” and it is also not a claim
+of “perfect biological truth.” The objective is:
+
+```text
+most biologically useful segmentation (recommended)
+```
+
+Meaning (heuristics we optimize for):
+
+- complete nuclei/cell detection
+- minimal merged objects
+- minimal fragmented objects
+- minimal background noise
+- realistic object counts
+- realistic object morphology
+
+The AI should assist parameter selection and provide ranked options; biological
+validation remains the user’s responsibility.
+
+### Requested deliverable (before implementing anything)
+
+Before implementing anything, provide:
+
+1. Updated architecture proposal.
+2. Revised roadmap focused on thresholding.
+3. Threshold intelligence design.
+4. Image-feature extraction plan.
+5. Automatic parameter recommendation plan.
+6. Validation strategy.
+7. Biological-quality scoring strategy.
+8. How CellProfiler and Fiji thresholding methods fit into the new architecture.
+
 | Layer | Role |
 |-------|------|
 | **Python pipeline** | Standalone analysis — stack/batch processing, segmentation, measurement, export |
@@ -75,45 +230,24 @@ invocation is the default.
 - Building GUI controls that duplicate CellProfiler module logic in Python — the
   GUI configures `.cppipe` pipelines and invokes CellProfiler instead.
 
-## Self-adaptive thresholding (Phase 17 — deferred, core differentiator)
+## Thresholding & segmentation intelligence (Phase 17 — primary focus, next milestone)
 
-**Status: `DEFERRED` — early prototype in repo, not enabled on default workflows.**
+**Status: `PLANNED` — redesign roadmap around this milestone before implementing.**
 
-This is the project's **special value**: automatic per-image import-time thresholding
-that CellProfiler cannot provide alone. Deferring Phase 17 is reasonable while
-Phases 14–16 land, but it must **not disappear behind CellProfiler** in the roadmap
-or product narrative. CellProfiler remains the analysis engine; Phase 17 is the
-hybrid import layer that makes the workflow uniquely capable on difficult fluorescence
-data.
+Phase 17 becomes the primary focus: an **assistive auto-threshold recommender**
+that sits above Fiji / CellProfiler / Python thresholding methods, evaluates both
+global and adaptive/local candidates, tunes parameters automatically, scores
+candidates using biological heuristics, and returns the **best result plus
+alternatives** with user override.
 
-CellProfiler alone cannot provide fully automatic per-image adaptive thresholding
-at import (varying illumination, SNR, contrast) without either configuring
-`.cppipe` methods or preprocessing in Python. The intended production path is:
+This replaces the earlier framing of “self-adaptive thresholding (deferred)” as a
+side prototype. Existing code in `bioimage_pipeline/adaptive_import.py` remains
+useful as a sandbox, but Phase 17’s deliverable is a coherent *architecture and
+validation strategy* for intelligent threshold selection.
 
-```text
-Python self-adaptive threshold (import) → staging/masks → CellProfiler (measurement)
-```
-
-An **experimental prototype** exists in `bioimage_pipeline/adaptive_import.py`
-(rolling-ball, auto method selection, Sauvola/local/Otsu fallbacks, watershed,
-confidence scoring). It is **not production-ready** and will likely need:
-
-- Tuning on real fluorescence nuclei datasets beyond current synthetic fixtures
-- SNR / vignette / density decision rules adjusted per assay
-- Validation against manual or CellProfiler reference masks (IoU/Dice targets)
-- GUI live-preview integration (Phase 15.1)
-- Clear opt-in API — **not** the default Python or CellProfiler workflow until validated
-
-**Current wiring (opt-in only):**
-
-| Entry point | Default | Opt-in |
-|-------------|---------|--------|
-| `build_default_pipeline()` | Blur → Otsu (Phase 3–4) | N/A |
-| `run_cellprofiler_workflow(..., adaptive_threshold=True)` | `False` | `--adaptive-threshold` CLI |
-| `run_self_adaptive_threshold()` / `run_adaptive_threshold.py` | — | Direct API for experiments |
-
-Do **not** treat Phase 17 as complete until real-data validation and product
-sign-off. See full phase spec below (Phase 17 section).
+**Design intent:** keep both global and adaptive/local thresholding available and
+visible in workflows; do not assume adaptive is always better; do not claim
+perfect biological segmentation.
 
 ## GUI direction (Phase 15 — 15.1 → 15.2)
 
@@ -198,8 +332,8 @@ For every phase:
 | 14 | Fiji/ImageJ headless export integration | `PHASE COMPLETE` ✔ |
 | 15.1 | GUI workflow shell (run, logs, preview, export) | `PHASE COMPLETE` ✔ |
 | 15.2 | GUI pipeline builder & CP module exposure | `PHASE COMPLETE` ✔ |
-| 16 | Optional Python analysis enhancements | `PHASE NOT COMPLETE` |
-| 17 | Self-adaptive threshold at import (hybrid CP workflow) — **core differentiator** | `DEFERRED` — prototype only |
+| 16 | Optional Python analysis enhancements (deprioritized vs Phase 17) | `PHASE NOT COMPLETE` |
+| 17 | **Thresholding & segmentation intelligence (AI-assisted selection + recommendation)** | `PLANNED` |
 | **S.0** | **Stack track prep — fix failing test, update docs** | `PHASE COMPLETE` ✔ |
 | **S.1** | **Stack I/O — AxisInfo, StackFrame, iter_stack_frames** | `PHASE COMPLETE` ✔ |
 | **S.2** | Stack data model — ImageStack, load from folder or file | `PHASE COMPLETE` ✔ |
@@ -566,18 +700,17 @@ Existing modules:
 - **Fiji headless export (Phase 14):** `fiji_runner.py`
 - **GUI (Phase 15):** workflow shell (15.1) → pipeline builder (15.2)
   — see [docs/gui_direction.md](docs/gui_direction.md)
-- **Self-adaptive import (Phase 17, deferred):** `adaptive_import.py` — prototype
-  only, opt-in; not production default
+- **Adaptive thresholding sandbox (supports Phase 17 design):** `adaptive_import.py`
+  — prototype only, opt-in; not production default
 
 **Ordering rule:** Complete **Phase 10.1 → 10.5** before **Phase 11**.
 Complete **Phase 12 (Python TIFF fallback)** before **Phase 13 (CellProfiler
 workflow integration)**. Complete **Phase 13** before **Phase 14 (Fiji/ImageJ
 headless export)**. Complete **Phase 14** before **Phase 15** (sub-phases
 **15.1 → 15.2**). Phase **16** extends the optional Python engine only.
-Phase **17** (self-adaptive import — **core differentiator**) is **deferred** —
-resume after Phases 14–16 unless real-data needs force earlier validation. Keep
-Phase 17 visible in the roadmap; it complements CellProfiler, it does not compete
-with it.
+Phase **17** (thresholding & segmentation intelligence — **next milestone**) is
+the primary focus after the completed integration phases. Keep Phase 17 visible
+in the roadmap; it complements CellProfiler, it does not compete with it.
 
 All workflow phases must follow **batch-first execution** (see above): one
 CellProfiler run per folder, one Fiji run per folder when possible, per-image
@@ -592,8 +725,8 @@ external launches only as a documented fallback.
 | 14 | Fiji/ImageJ headless export integration | `PHASE COMPLETE` ✔ |
 | 15.1 | GUI workflow shell | `PHASE COMPLETE` ✔ |
 | 15.2 | GUI pipeline builder & CP module exposure | `PHASE COMPLETE` ✔ |
-| 16 | Optional Python analysis enhancements | `PHASE NOT COMPLETE` |
-| 17 | Self-adaptive threshold at import (hybrid CP) — **core differentiator** | `DEFERRED` — prototype |
+| 16 | Optional Python analysis enhancements (fallback engine only) | `PHASE NOT COMPLETE` |
+| 17 | **Thresholding & segmentation intelligence (AI-assisted)** | `PLANNED` |
 
 ## Phase 10.1: CellProfiler Integration Validation
 
@@ -1428,9 +1561,9 @@ Tasks:
 - Additional morphology cleanup options.
 - Compare Python vs CellProfiler results on sample images (optional).
 
-Note: **Full self-adaptive import pipeline** (auto method per image, staging → CP)
-is **Phase 17 (deferred)** — see prototype in `adaptive_import.py`, not the
-default product path.
+Note: **Full intelligent threshold selection** (auto method per image, staging →
+CP when appropriate) is part of **Phase 17 (planned)**. The existing prototype in
+`adaptive_import.py` is a sandbox reference, not the default product path.
 
 Files (proposed):
 
@@ -1446,72 +1579,140 @@ Acceptance:
 
 Status: `PHASE NOT COMPLETE`
 
-## Phase 17: Self-Adaptive Threshold at Import (Hybrid CP Workflow)
+## Phase 17: Thresholding & Segmentation Intelligence (AI-assisted)
 
-Goal: automatic per-image thresholding for fluorescence nuclei at import — robust
-to vignetting, low SNR, and uneven illumination — then feed masks into
-CellProfiler for measurement. **CellProfiler cannot do this alone**; Python
-handles import-time adaptivity; CP remains the analysis engine downstream.
+Goal: build an **assistive auto-threshold recommender** that is robust across
+diverse microscopy images by adding an intelligence layer above thresholding
+methods (Python / CellProfiler / Fiji). The recommender helps users choose
+parameters and candidates; it does **not** claim perfect biological segmentation.
 
-This phase is the project's **core differentiator** — the capability that makes
-the hybrid workflow uniquely valuable. It is **deferred** until Phases 14–16 are
-stable, but it must remain a first-class roadmap item and must not be subsumed by
-"just use CellProfiler" as the product story.
+This is **not** a “port Fiji” phase. This phase turns Fiji/CellProfiler methods
+into **tools** the system can choose from, rather than exposing a large parameter
+surface to end users.
 
-**Status: `DEFERRED` — prototype implemented, logic incomplete for production.**
-
-A first-pass prototype landed early for experimentation. It is **not enabled**
-on default workflows and **will require future tuning or redesign** before
-product use.
-
-### Prototype (in repo, subject to change)
-
-| File | Purpose |
-|------|---------|
-| `bioimage_pipeline/adaptive_import.py` | `run_self_adaptive_threshold`, folder staging |
-| `bioimage_pipeline/preprocess.py` | `rolling_ball_subtract` (used by prototype) |
-| `bioimage_pipeline/threshold.py` | `sauvola_threshold` (used by prototype) |
-| `tests/test_adaptive_import.py` | Synthetic fixture tests only |
-| `examples/run_adaptive_threshold.py` | Experimental batch runner |
-
-Prototype steps: inspect image → optional rolling-ball → normalize → auto
-method (Otsu / local / Sauvola) → morphology → optional watershed → confidence
-log → write `staging/masks/` and `staging/labels/`.
-
-Opt-in CellProfiler hook: `run_cellprofiler_workflow(..., adaptive_threshold=True)`.
-
-### Why deferred
-
-- Real-world performance on diverse assays is **unproven** (only synthetic
-  vignetted nuclei fixtures validated so far).
-- Method selection heuristics may need assay-specific presets or user overrides.
-- May need Sauvola/Niblack tuning, better block-size estimation, or ML-assisted
-  QC — scope TBD after real-data review.
-- Must not replace or duplicate CellProfiler module logic beyond the threshold
-  slice agreed for the hybrid workflow.
-
-### Future work before marking complete
-
-1. Validate on real microscopy datasets; define minimum IoU/Dice acceptance.
-2. Per-image decision log review; add “low confidence → review in GUI” path.
-3. Document recommended `.cppipe` templates that consume staging masks.
-4. Integrate with Phase 15.1 GUI preview (import overlay before CP run).
-5. Re-evaluate whether default workflows should opt in after sign-off.
-
-Acceptance (when resumed):
-
-- Opt-in staging → CP batch workflow produces acceptable masks on agreed fixtures.
-- Default Python and CP workflows remain unchanged unless user enables Phase 17.
-- Decision logs and confidence flags support GUI review.
-
-Self-check (prototype only):
-
-```bash
-python examples/run_adaptive_threshold.py --input-dir path/to/images --output-dir path/to/staging
-pytest tests/test_adaptive_import.py -v
+```text
+Input image
+↓
+Automatic image analysis (image profiler)
+↓
+Run global + adaptive/local candidates (bounded search)
+↓
+Automatic parameter tuning + biological heuristics scoring
+↓
+Best result + ranked alternatives (user override)
+Biologically meaningful segmentation
 ```
 
-Status: `DEFERRED` (prototype in repo — do not use as production default)
+### Scope: global + adaptive/local thresholding remain available
+
+Both categories must remain available and visible in the final workflow. The
+system must not assume adaptive is always better.
+
+Global examples: Otsu, Li, Triangle, Huang, Yen, Robust Background
+
+Adaptive/local examples: CellProfiler Adaptive Otsu, Fiji Local Otsu, Sauvola,
+Phansalkar, Niblack, Bernsen
+
+### Architecture proposal (Phase 17)
+
+```text
+Thresholding method library (global + local)
+              ↑
+              |
+Image profiler → CandidateGenerator → CandidateScorer → RankedRecommendations → ApplyChoice → Segmentation/QC/Measure
+```
+
+- **Image profiler**: extracts quantitative image descriptors (below).
+- **Candidate generator**: proposes a bounded set of global + local candidates and parameter ranges.
+- **Candidate scorer**: scores candidate segmentations for usability, not only histogram math.
+- **Ranked recommendations**: returns best + alternatives with score breakdown and confidence.
+
+### Image-feature extraction plan (image profiler)
+
+Extract metrics such as:
+
+- signal-to-noise ratio
+- illumination gradient / shading severity
+- background variation
+- local contrast statistics
+- dynamic range / saturation
+- object density estimate
+- estimated object size scale
+- histogram shape (skew, peaks, separation)
+- foreground/background separation quality proxies
+
+### Automatic parameter recommendation plan (assistive)
+
+For each candidate method, the recommender tunes (at minimum):
+
+- global vs adaptive
+- threshold method
+- correction factor
+- smoothing scale
+- adaptive window size
+- local radius
+- lower/upper threshold constraints
+
+It should also support **user override** modes:
+
+- lock method, tune parameters (Approach A mode)
+- accept recommended best candidate
+- pick an alternative from the ranked list
+
+### Biological-quality scoring strategy
+
+Optimize for “most biologically useful segmentation”, e.g.:
+
+- complete nuclei/cell detection
+- minimal merged objects
+- minimal fragmented objects
+- minimal background noise
+- realistic object counts
+- realistic object morphology
+
+Scoring should support:
+
+- ranking and presenting top alternatives (not only picking one winner)
+- surfacing “low confidence” cases for GUI review
+- comparison vs reference masks when available (for validation only, when available)
+
+### Validation strategy
+
+Validation should combine:
+
+- synthetic fixtures (controlled ground truth)
+- real microscopy datasets (assay diversity)
+- comparisons against manual masks and/or trusted CellProfiler pipelines
+
+Define acceptance targets appropriate for biology (e.g. Dice/IoU + count/morphology
+sanity), not only histogram-based metrics.
+
+Important: the recommender should assist and provide evidence; it does not replace
+biological validation by the user.
+
+### How CellProfiler and Fiji fit
+
+- **CellProfiler**: remains the primary downstream engine for measurement and
+  standardized pipelines; Phase 17 can output masks/labels to feed CP, or select
+  CP threshold modules/configuration when appropriate.
+- **Fiji/ImageJ**: remains export/QC tooling and a source of threshold method
+  implementations; Phase 17 uses Fiji-style methods as options within the method
+  library, not as the primary UX surface.
+
+### Requested deliverable before implementing
+
+Before implementing Phase 17, provide:
+
+1. Updated architecture proposal.
+2. Revised roadmap focused on thresholding.
+3. Threshold intelligence design.
+4. Image-feature extraction plan.
+5. Automatic parameter recommendation plan.
+6. Validation strategy.
+7. Biological-quality scoring strategy.
+8. How CellProfiler and Fiji thresholding methods fit into the architecture.
+
+Status: `PLANNED` (do not start coding until this design/roadmap is finalized)
 
 ## Optional future work (not scheduled)
 
