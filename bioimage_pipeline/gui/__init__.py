@@ -9,6 +9,16 @@ from bioimage_pipeline.gui.workflow_editor import (
     set_images_input_folder,
     window_title,
 )
+from bioimage_pipeline.gui.workflow_controller import (
+    WorkflowFormValues,
+    build_gui_workflow_config,
+    format_measurements_preview_text,
+    format_workflow_log_tail,
+    output_shortcut_targets,
+    prepare_workflow_run,
+    workflow_form_values_from_settings,
+    workflow_log_paths,
+)
 from bioimage_pipeline.gui.workflow_shell import (
     GuiWorkflowConfig,
     GuiWorkflowSummary,
@@ -40,8 +50,12 @@ __all__ = [
     "PipelineBuilderState",
     "add_catalog_module_to_pipeline",
     "add_named_module_to_pipeline",
+    "WorkflowFormValues",
+    "build_gui_workflow_config",
     "build_workflow_summary",
     "create_default_pipeline_builder_state",
+    "format_measurements_preview_text",
+    "format_workflow_log_tail",
     "get_images_input_folder",
     "launch_cellprofiler_gui",
     "launch_workflow_shell",
@@ -49,6 +63,8 @@ __all__ = [
     "load_imported_pipeline",
     "load_pipeline_builder_state",
     "move_pipeline_module",
+    "output_shortcut_targets",
+    "prepare_workflow_run",
     "read_log_tail",
     "remove_pipeline_module",
     "resolve_imported_pipeline_path",
@@ -60,4 +76,6 @@ __all__ = [
     "update_pipeline_module_setting",
     "validate_workflow_config",
     "window_title",
+    "workflow_form_values_from_settings",
+    "workflow_log_paths",
 ]

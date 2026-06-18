@@ -54,6 +54,22 @@ GUI
 
 ## Phase 15 sub-phases
 
+### Thin-wrapper GUI phases (GUI-1 .. GUI-4)
+
+The live Tk shell is organized as a **thin UI layer** over library orchestration.
+Scientific logic stays in `analysis.py`, `threshold_recommender.py`, and related
+modules; the GUI only collects paths, calls library functions, and displays
+results.
+
+| Phase | Module(s) | Responsibility |
+|-------|-----------|----------------|
+| **GUI-1** | `gui/panels/main_workflow_panel.py`, `gui/workflow_shell.py` | Select `.cppipe`, input/output folders, executables; import pipeline; run workflow; open results |
+| **GUI-2** | `gui/threshold_recommender_window.py`, `gui/threshold_recommender_helpers.py` | Optimistic-first subset trial, ranking CSV, QC preview, explicit confirmed full apply |
+| **GUI-3** | `gui/panels/preprocessing_panel.py` | Fiji/OIR preprocessing controls (`engine`, Z projection, force reproject) forwarded to `run_cellprofiler_workflow` |
+| **GUI-4** | `gui/panels/results_polish_panel.py`, `gui/workflow_controller.py`, `gui/run_settings.py` | Progress bar, live log tail, measurements preview, output shortcuts, persisted settings |
+
+Launch: `python examples/run_gui.py`
+
 ### Phase 15.1 — GUI workflow shell
 
 Proper workflow shell for running saved pipelines and reviewing results without

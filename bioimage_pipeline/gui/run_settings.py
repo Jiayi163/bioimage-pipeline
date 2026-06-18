@@ -20,6 +20,14 @@ DEFAULT_SETTINGS_FILE = DEFAULT_SETTINGS_DIR / "gui_run_settings.json"
 CELLPROFILER_SETTINGS_KEY = "cellprofiler_executable"
 FIJI_SETTINGS_KEY = "fiji_executable"
 OIR_PROJECTION_METHOD_KEY = "oir_projection_method"
+CPPIPE_PATH_KEY = "cppipe_path"
+INPUT_DIR_KEY = "input_dir"
+OUTPUT_DIR_KEY = "output_dir"
+FIJI_MACRO_PATH_KEY = "fiji_macro_path"
+OIR_PROJECTION_ENGINE_KEY = "oir_projection_engine"
+EXPORT_FIJI_TIFFS_KEY = "export_fiji_tiffs"
+GENERATE_QC_KEY = "generate_qc"
+FORCE_OIR_REPROJECT_KEY = "force_oir_reproject"
 
 
 @dataclass(frozen=True)
@@ -219,6 +227,14 @@ def collect_run_settings_from_values(
     cellprofiler_executable: str,
     fiji_executable: str,
     oir_projection_method: str | None = None,
+    cppipe_path: str | None = None,
+    input_dir: str | None = None,
+    output_dir: str | None = None,
+    fiji_macro_path: str | None = None,
+    oir_projection_engine: str | None = None,
+    export_fiji_tiffs: bool | None = None,
+    generate_qc: bool | None = None,
+    force_oir_reproject: bool | None = None,
 ) -> dict[str, str]:
     """Build the persisted settings payload from current GUI field values."""
     payload: dict[str, str] = {}
@@ -230,4 +246,32 @@ def collect_run_settings_from_values(
         payload[FIJI_SETTINGS_KEY] = fiji_value
     if oir_projection_method:
         payload[OIR_PROJECTION_METHOD_KEY] = oir_projection_method.strip()
+    if cppipe_path and cppipe_path.strip():
+        payload[CPPIPE_PATH_KEY] = cppipe_path.strip()
+    if input_dir and input_dir.strip():
+        payload[INPUT_DIR_KEY] = input_dir.strip()
+    if output_dir and output_dir.strip():
+        payload[OUTPUT_DIR_KEY] = output_dir.strip()
+    if fiji_macro_path and fiji_macro_path.strip():
+        payload[FIJI_MACRO_PATH_KEY] = fiji_macro_path.strip()
+    if oir_projection_engine and oir_projection_engine.strip():
+        payload[OIR_PROJECTION_ENGINE_KEY] = oir_projection_engine.strip()
+    if export_fiji_tiffs is not None:
+        payload[EXPORT_FIJI_TIFFS_KEY] = "true" if export_fiji_tiffs else "false"
+    if generate_qc is not None:
+        payload[GENERATE_QC_KEY] = "true" if generate_qc else "false"
+    if force_oir_reproject is not None:
+        payload[FORCE_OIR_REPROJECT_KEY] = "true" if force_oir_reproject else "false"
     return payload
+
+
+def parse_bool_setting(value: str | None, *, default: bool) -> bool:
+    """Parse persisted boolean GUI settings."""
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default

@@ -73,6 +73,7 @@ class GuiWorkflowConfig:
     generate_qc: bool = True
     oir_projection_engine: str = "fiji"
     oir_projection_method: str = "max"
+    force_oir_reproject: bool = False
 
 
 @dataclass
@@ -403,9 +404,9 @@ def validate_workflow_config(config: GuiWorkflowConfig) -> list[str]:
 
     if input_dir is not None and list(iter_oir_files(input_dir)):
         engine = (config.oir_projection_engine or "fiji").strip().lower()
-        if engine not in {"python", "fiji"}:
+        if engine not in {"python", "fiji", "auto"}:
             errors.append(
-                "OIR projection engine must be 'python' or 'fiji'."
+                "OIR projection engine must be 'python', 'fiji', or 'auto'."
             )
         elif engine == "python" and not python_oir_dependencies_available():
             errors.append(PYTHON_OIR_MISSING_DEPS_MESSAGE)
@@ -534,6 +535,7 @@ def run_gui_workflow(
         generate_qc=config.generate_qc,
         oir_projection_engine=config.oir_projection_engine,
         oir_projection_method=config.oir_projection_method,
+        force_oir_reproject=config.force_oir_reproject,
     )
     return build_workflow_summary(result)
 
@@ -557,22 +559,45 @@ def _browse_file(entry: Any, filetypes: list[tuple[str, str]] | None = None) -> 
 
 
 def launch_workflow_shell() -> None:
-    """Launch the import-only CellProfiler workflow shell."""
+    """Launch the import-only CellProfiler workflow shell (GUI-1..4)."""
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
 
+    from bioimage_pipeline.gui.panels.main_workflow_panel import build_main_workflow_panel
+    from bioimage_pipeline.gui.panels.preprocessing_panel import build_preprocessing_panel
+    from bioimage_pipeline.gui.panels.results_polish_panel import (
+        build_results_polish_panel,
+        schedule_log_polling,
+    )
+    from bioimage_pipeline.gui.run_settings import (
+        CPPIPE_PATH_KEY,
+        collect_run_settings_from_values,
+        load_gui_run_settings,
+        save_gui_run_settings,
+        sync_discovered_executables_to_settings,
+    )
+    from bioimage_pipeline.gui.threshold_recommender_window import (
+        ThresholdRecommenderLaunchContext,
+        launch_threshold_recommender_window,
+    )
+    from bioimage_pipeline.gui.workflow_controller import (
+        WorkflowFormValues,
+        prepare_workflow_run,
+    )
+
     root = tk.Tk()
-    root.geometry("960x560")
-    root.minsize(760, 480)
+    root.geometry("1040x640")
+    root.minsize(820, 520)
 
     imported_state: dict[str, ImportedPipelineState | None] = {"state": None}
     pipeline_path_var = tk.StringVar()
-    run_entries: dict[str, tk.Entry] = {}
-    executable_cache = build_cached_run_executables()
-    sync_discovered_executables_to_settings(executable_cache)
+    run_state: dict[str, bool] = {"running": False}
+    saved_settings = load_gui_run_settings()
+    sync_discovered_executables_to_settings(build_cached_run_executables(saved_settings))
+    saved_settings = load_gui_run_settings()
     startup_warnings = [
-        *executable_cache.cellprofiler.warnings,
-        *executable_cache.fiji.warnings,
+        *build_cached_run_executables(saved_settings).cellprofiler.warnings,
+        *build_cached_run_executables(saved_settings).fiji.warnings,
     ]
 
     def refresh_title() -> None:
@@ -612,22 +637,14 @@ def launch_workflow_shell() -> None:
             return
         refresh_module_list(module_list)
         status.set(f"Imported {selected}")
+        persist_settings()
 
     def browse_pipeline(module_list: tk.Listbox) -> None:
-        selected = filedialog.askopenfilename(
-            filetypes=[("CellProfiler pipeline", "*.cppipe"), ("All files", "*.*")],
-        )
-        if not selected:
-            return
-        try:
-            set_imported_pipeline(selected)
-        except Exception as exc:
-            messagebox.showerror("Import pipeline", str(exc))
-            return
-        refresh_module_list(module_list)
-        status.set(f"Imported {selected}")
+        file_open(module_list)
 
-    def tools_open_in_cellprofiler() -> None:
+    def tools_open_in_cellprofiler(
+        cellprofiler_executable_entry: ttk.Entry,
+    ) -> None:
         path = pipeline_path_var.get().strip()
         if not path:
             messagebox.showerror("CellProfiler", "Import a pipeline file first.")
@@ -635,7 +652,7 @@ def launch_workflow_shell() -> None:
         try:
             launch_cellprofiler_gui(
                 resolve_imported_pipeline_path(path),
-                cellprofiler_executable=run_entries["cellprofiler_executable"].get().strip()
+                cellprofiler_executable=cellprofiler_executable_entry.get().strip()
                 or "cellprofiler",
             )
         except Exception as exc:
@@ -657,7 +674,6 @@ def launch_workflow_shell() -> None:
     file_menu.add_command(label="Open Pipeline...", accelerator="Ctrl+O")
     file_menu.add_separator()
     file_menu.add_command(label="Exit", command=root.destroy)
-    tools_menu.add_command(label="Open in CellProfiler...", command=tools_open_in_cellprofiler)
     help_menu.add_command(label="About Bioimage Pipeline", command=help_about)
     menubar.add_cascade(label="File", menu=file_menu)
     menubar.add_cascade(label="Tools", menu=tools_menu)
@@ -679,21 +695,20 @@ def launch_workflow_shell() -> None:
     left.columnconfigure(0, weight=1)
     left.rowconfigure(2, weight=1)
     right.columnconfigure(0, weight=1)
-    right.rowconfigure(0, weight=1)
+    right.rowconfigure(1, weight=1)
 
     pipeline_frame = ttk.LabelFrame(left, text="CellProfiler pipeline", padding=4)
     pipeline_frame.grid(row=0, column=0, sticky="ew")
     pipeline_frame.columnconfigure(0, weight=1)
-    ttk.Entry(pipeline_frame, textvariable=pipeline_path_var).grid(row=0, column=0, sticky="ew")
+    ttk.Entry(pipeline_frame, textvariable=pipeline_path_var).grid(
+        row=0, column=0, sticky="ew",
+    )
     pipeline_tools = ttk.Frame(pipeline_frame)
     pipeline_tools.grid(row=1, column=0, sticky="ew", pady=(4, 0))
     browse_pipeline_button = ttk.Button(pipeline_tools, text="Browse...")
     browse_pipeline_button.pack(side="left")
-    ttk.Button(
-        pipeline_tools,
-        text="Open in CellProfiler",
-        command=tools_open_in_cellprofiler,
-    ).pack(side="left", padx=(8, 0))
+    open_in_cp_button = ttk.Button(pipeline_tools, text="Open in CellProfiler")
+    open_in_cp_button.pack(side="left", padx=(8, 0))
 
     modules_frame = ttk.LabelFrame(left, text="Modules (read-only)", padding=4)
     modules_frame.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
@@ -712,71 +727,43 @@ def launch_workflow_shell() -> None:
         justify="left",
     ).grid(row=3, column=0, sticky="w", pady=(8, 0))
 
-    run_panel = ttk.LabelFrame(right, text="Workflow", padding=4)
-    run_panel.grid(row=0, column=0, sticky="nsew")
-    run_panel.columnconfigure(1, weight=1)
+    workflow_frame = ttk.LabelFrame(right, text="Workflow", padding=4)
+    workflow_frame.grid(row=0, column=0, sticky="ew")
+    workflow_frame.columnconfigure(1, weight=1)
 
-    def add_run_row(row: int, label: str, key: str, *, browse: str = "file") -> None:
-        ttk.Label(run_panel, text=label).grid(row=row, column=0, sticky="w", pady=2)
-        entry = ttk.Entry(run_panel)
-        entry.grid(row=row, column=1, sticky="ew", padx=(8, 8), pady=2)
-        run_entries[key] = entry
-        if browse == "folder":
-            cmd = lambda e=entry: _browse_folder(e)
-        else:
-            cmd = lambda e=entry: _browse_file(e)
-        ttk.Button(run_panel, text="Browse", command=cmd).grid(row=row, column=2, pady=2)
-
-    add_run_row(0, "Default Input Folder", "input_dir", browse="folder")
-    add_run_row(1, "Default Output Folder", "output_dir", browse="folder")
-    add_run_row(2, "CellProfiler executable", "cellprofiler_executable")
-    run_entries["cellprofiler_executable"].insert(
-        0,
-        executable_cache.cellprofiler.display_value,
-    )
-    add_run_row(3, "Fiji executable", "fiji_executable")
-    if executable_cache.fiji.display_value:
-        run_entries["fiji_executable"].insert(0, executable_cache.fiji.display_value)
-    add_run_row(4, "Fiji macro", "fiji_macro_path")
-
-    ttk.Label(run_panel, text="OIR projection engine").grid(row=5, column=0, sticky="w", pady=2)
-    oir_projection_engine = tk.StringVar(
-        value=default_oir_projection_engine_choice(
-            fiji_executable=run_entries["fiji_executable"].get().strip() or None,
-        ),
-    )
-    ttk.Combobox(
-        run_panel,
-        textvariable=oir_projection_engine,
-        values=("fiji", "python"),
-        state="readonly",
-        width=12,
-    ).grid(row=5, column=1, sticky="w", padx=(8, 8), pady=2)
-
-    export_fiji = tk.BooleanVar(value=True)
-    generate_qc = tk.BooleanVar(value=True)
-    opts = ttk.Frame(run_panel)
-    opts.grid(row=6, column=0, columnspan=3, sticky="w", pady=(4, 0))
-    ttk.Checkbutton(opts, text="Run Fiji headless export", variable=export_fiji).pack(side="left")
-    ttk.Checkbutton(opts, text="Generate QC overlays", variable=generate_qc).pack(
-        side="left", padx=(12, 0),
+    workflow_panel = build_main_workflow_panel(
+        workflow_frame,
+        saved_settings=saved_settings,
+        browse_folder=_browse_folder,
+        browse_file=_browse_file,
     )
 
-    output_text = tk.Text(run_panel, height=10, wrap="word")
-    output_text.grid(row=7, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
-    run_panel.rowconfigure(7, weight=1)
+    preprocessing_frame = ttk.LabelFrame(
+        right,
+        text="Fiji / OIR preprocessing",
+        padding=4,
+    )
+    preprocessing_frame.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+    preprocessing_frame.columnconfigure(1, weight=1)
+    preprocessing_panel = build_preprocessing_panel(
+        preprocessing_frame,
+        saved_settings=saved_settings,
+        fiji_executable=workflow_panel.fiji_executable_entry.get().strip(),
+    )
 
-    results_preview = ttk.Label(run_panel, anchor="w", justify="left")
-    results_preview.grid(row=8, column=0, columnspan=3, sticky="w", pady=(6, 0))
-    run_buttons = ttk.Frame(run_panel)
-    run_buttons.grid(row=9, column=0, columnspan=3, sticky="w", pady=(6, 0))
+    results_frame = ttk.LabelFrame(right, text="Results", padding=4)
+    results_frame.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
+    results_frame.columnconfigure(0, weight=1)
+    results_frame.rowconfigure(0, weight=1)
+    right.rowconfigure(2, weight=1)
+    polish_panel = build_results_polish_panel(results_frame)
 
     status = tk.StringVar(
         value=(
             startup_warnings[0]
             if len(startup_warnings) == 1
             else (
-                f"{len(startup_warnings)} startup warning(s). See output after run."
+                f"{len(startup_warnings)} startup warning(s). See Summary tab after run."
                 if startup_warnings
                 else "Import a CellProfiler pipeline and press Analyze Images."
             )
@@ -786,44 +773,65 @@ def launch_workflow_shell() -> None:
         row=1, column=0, sticky="ew", pady=(4, 0),
     )
 
-    def write_output(text: str) -> None:
-        output_text.delete("1.0", "end")
-        output_text.insert("end", text)
-
     browse_pipeline_button.configure(command=lambda: browse_pipeline(module_list))
     file_menu.entryconfigure("Open Pipeline...", command=lambda: file_open(module_list))
     root.bind("<Control-o>", lambda _e: file_open(module_list))
+    open_in_cp_button.configure(
+        command=lambda: tools_open_in_cellprofiler(
+            workflow_panel.cellprofiler_executable_entry,
+        ),
+    )
+    tools_menu.add_command(
+        label="Open in CellProfiler...",
+        command=lambda: tools_open_in_cellprofiler(
+            workflow_panel.cellprofiler_executable_entry,
+        ),
+    )
+    help_menu.add_command(label="About Bioimage Pipeline", command=help_about)
 
-    def current_config(cppipe_path: Path) -> GuiWorkflowConfig:
-        def optional_value(key: str) -> str | None:
-            value = run_entries[key].get().strip()
-            return value or None
-
-        return GuiWorkflowConfig(
-            input_dir=run_entries["input_dir"].get().strip(),
-            output_dir=run_entries["output_dir"].get().strip(),
-            cppipe_path=str(cppipe_path),
-            cellprofiler_executable=run_entries["cellprofiler_executable"].get().strip()
-            or "cellprofiler",
-            fiji_executable=optional_value("fiji_executable"),
-            fiji_macro_path=optional_value("fiji_macro_path"),
-            export_fiji_tiffs=export_fiji.get(),
-            generate_qc=generate_qc.get(),
-            oir_projection_engine=oir_projection_engine.get().strip() or "fiji",
-            oir_projection_method="max",
+    def current_form_values(*, cppipe_path: str | None = None) -> WorkflowFormValues:
+        return WorkflowFormValues(
+            input_dir=workflow_panel.input_dir_entry.get().strip(),
+            output_dir=workflow_panel.output_dir_entry.get().strip(),
+            cppipe_path=cppipe_path or pipeline_path_var.get().strip(),
+            cellprofiler_executable=workflow_panel.cellprofiler_executable_entry.get().strip(),
+            fiji_executable=workflow_panel.fiji_executable_entry.get().strip(),
+            fiji_macro_path=workflow_panel.fiji_macro_entry.get().strip(),
+            export_fiji_tiffs=workflow_panel.export_fiji_var.get(),
+            generate_qc=workflow_panel.generate_qc_var.get(),
+            oir_projection_engine=preprocessing_panel.oir_projection_engine_var.get().strip(),
+            oir_projection_method=preprocessing_panel.oir_projection_method_var.get().strip(),
+            force_oir_reproject=preprocessing_panel.force_oir_reproject_var.get(),
         )
+
+    def persist_settings(*, oir_projection_method: str | None = None) -> None:
+        values = current_form_values()
+        payload = load_gui_run_settings()
+        payload.update(
+            collect_run_settings_from_values(
+                cellprofiler_executable=values.cellprofiler_executable,
+                fiji_executable=values.fiji_executable,
+                oir_projection_method=oir_projection_method or values.oir_projection_method,
+                cppipe_path=values.cppipe_path,
+                input_dir=values.input_dir,
+                output_dir=values.output_dir,
+                fiji_macro_path=values.fiji_macro_path,
+                oir_projection_engine=values.oir_projection_engine,
+                export_fiji_tiffs=values.export_fiji_tiffs,
+                generate_qc=values.generate_qc,
+                force_oir_reproject=values.force_oir_reproject,
+            )
+        )
+        save_gui_run_settings(payload)
 
     def run_async() -> None:
         path_text = pipeline_path_var.get().strip()
         if not path_text:
             messagebox.showerror("Run pipeline", "Import a CellProfiler pipeline first.")
             return
+
         try:
-            cppipe_path = resolve_imported_pipeline_path(path_text)
-            input_path = resolve_workflow_input_dir_from_string(
-                run_entries["input_dir"].get(),
-            )
-            imported = load_imported_pipeline(cppipe_path)
+            preparation = prepare_workflow_run(current_form_values())
         except ValueError as exc:
             messagebox.showerror("Invalid workflow settings", str(exc))
             return
@@ -831,9 +839,8 @@ def launch_workflow_shell() -> None:
             messagebox.showerror("Invalid pipeline", str(exc))
             return
 
-        advisories = advise_pipeline_for_run(imported.pipeline)
-        if advisories:
-            message = "\n".join(f"- {line}" for line in advisories)
+        if preparation.advisories:
+            message = "\n".join(f"- {line}" for line in preparation.advisories)
             proceed = messagebox.askyesno(
                 "Pipeline advisories",
                 message + "\n\nContinue with this run?",
@@ -841,75 +848,47 @@ def launch_workflow_shell() -> None:
             if not proceed:
                 return
 
-        config = current_config(cppipe_path)
-        config = GuiWorkflowConfig(
-            input_dir=str(input_path),
-            output_dir=config.output_dir,
-            cppipe_path=str(cppipe_path),
-            cellprofiler_executable=config.cellprofiler_executable,
-            fiji_executable=config.fiji_executable,
-            fiji_macro_path=config.fiji_macro_path,
-            export_fiji_tiffs=config.export_fiji_tiffs,
-            generate_qc=config.generate_qc,
-            oir_projection_engine=config.oir_projection_engine,
-            oir_projection_method=config.oir_projection_method,
-        )
-        errors = validate_workflow_config(config)
-        if errors:
-            messagebox.showerror("Invalid workflow settings", "\n".join(errors))
-            return
-
-        try:
-            resolved_output_dir = resolve_workflow_output_dir(config.output_dir)
-        except ValueError as exc:
-            messagebox.showerror("Invalid workflow settings", str(exc))
-            return
-
+        config = preparation.config
         oir_projection_method = config.oir_projection_method
-        if list(iter_oir_files(input_path)):
+        if preparation.requires_oir_method_dialog:
             from bioimage_pipeline.gui.oir_projection_dialog import ask_oir_projection_method
 
-            saved_settings = load_gui_run_settings()
-            dialog_default = saved_settings.get(
-                OIR_PROJECTION_METHOD_KEY,
+            saved_method = load_gui_run_settings().get(
+                "oir_projection_method",
                 oir_projection_method,
             )
-            selected_method = ask_oir_projection_method(
-                root,
-                default=dialog_default,
-            )
+            selected_method = ask_oir_projection_method(root, default=saved_method)
             if selected_method is None:
                 return
             oir_projection_method = selected_method
-
-        run_entries["output_dir"].delete(0, "end")
-        run_entries["output_dir"].insert(0, str(resolved_output_dir))
-        config = GuiWorkflowConfig(
-            input_dir=str(input_path),
-            output_dir=str(resolved_output_dir),
-            cppipe_path=str(cppipe_path),
-            cellprofiler_executable=config.cellprofiler_executable,
-            fiji_executable=config.fiji_executable,
-            fiji_macro_path=config.fiji_macro_path,
-            export_fiji_tiffs=config.export_fiji_tiffs,
-            generate_qc=config.generate_qc,
-            oir_projection_engine=config.oir_projection_engine,
-            oir_projection_method=oir_projection_method,
-        )
-
-        persisted_settings = load_gui_run_settings()
-        persisted_settings.update(
-            collect_run_settings_from_values(
+            config = GuiWorkflowConfig(
+                input_dir=config.input_dir,
+                output_dir=config.output_dir,
+                cppipe_path=config.cppipe_path,
                 cellprofiler_executable=config.cellprofiler_executable,
-                fiji_executable=str(config.fiji_executable or ""),
+                fiji_executable=config.fiji_executable,
+                fiji_macro_path=config.fiji_macro_path,
+                export_fiji_tiffs=config.export_fiji_tiffs,
+                generate_qc=config.generate_qc,
+                oir_projection_engine=config.oir_projection_engine,
                 oir_projection_method=oir_projection_method,
+                force_oir_reproject=config.force_oir_reproject,
             )
-        )
-        save_gui_run_settings(persisted_settings)
 
-        run_button.configure(state="disabled")
+        workflow_panel.output_dir_entry.delete(0, "end")
+        workflow_panel.output_dir_entry.insert(0, str(config.output_dir))
+        persist_settings(oir_projection_method=oir_projection_method)
+
+        run_state["running"] = True
+        workflow_panel.run_button.configure(state="disabled")
         status.set("Running headless CellProfiler/Fiji workflow...")
-        write_output("Workflow started.\n")
+        polish_panel.set_running(output_dir=str(config.output_dir))
+        schedule_log_polling(
+            root,
+            polish_panel,
+            output_dir=str(config.output_dir),
+            cancel_event=lambda: not run_state["running"],
+        )
 
         def worker() -> None:
             try:
@@ -921,64 +900,84 @@ def launch_workflow_shell() -> None:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _show_results_preview(summary: GuiWorkflowSummary) -> None:
-        from PIL import ImageTk
-
-        candidates = [
-            *summary.qc_preview_files,
-            *summary.mask_files,
-            *summary.label_files,
-        ]
-        if not candidates:
-            results_preview.configure(image="", text="")
-            results_preview.image = None  # type: ignore[attr-defined]
-            return
-        target = candidates[0]
-        try:
-            photo = ImageTk.PhotoImage(load_preview_image(target))
-        except Exception as exc:  # noqa: BLE001
-            results_preview.configure(image="", text=f"Output preview unavailable: {exc}")
-            results_preview.image = None  # type: ignore[attr-defined]
-            return
-        results_preview.configure(
-            image=photo, text=f"Output preview: {target.name}", compound="top",
-        )
-        results_preview.image = photo  # type: ignore[attr-defined]
-
     def _finish_success(summary: GuiWorkflowSummary) -> None:
+        run_state["running"] = False
+        polish_panel.set_idle()
+        polish_panel.show_success(summary)
         status.set("Workflow complete.")
-        write_output("\n".join(summary.to_display_lines()))
-        run_button.configure(state="normal")
-        _show_results_preview(summary)
+        workflow_panel.run_button.configure(state="normal")
 
     def _finish_error(exc: Exception) -> None:
         import traceback
 
+        run_state["running"] = False
+        polish_panel.set_idle()
+        polish_panel.show_error("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
         status.set("Workflow failed.")
-        write_output("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
-        run_button.configure(state="normal")
+        workflow_panel.run_button.configure(state="normal")
 
     def open_results() -> None:
-        output_dir = run_entries["output_dir"].get().strip()
+        output_dir = workflow_panel.output_dir_entry.get().strip()
         if output_dir:
             open_path(output_dir)
 
-    run_button = ttk.Button(run_buttons, text="Analyze Images", command=run_async)
-    run_button.pack(side="left")
-    ttk.Button(run_buttons, text="Open Results Folder", command=open_results).pack(
-        side="left", padx=(8, 0),
-    )
+    def open_threshold_recommender() -> None:
+        path_text = pipeline_path_var.get().strip()
+        input_dir = workflow_panel.input_dir_entry.get().strip()
+        output_dir = workflow_panel.output_dir_entry.get().strip()
+        if not path_text:
+            messagebox.showerror(
+                "Threshold Recommender",
+                "Import a CellProfiler pipeline first.",
+            )
+            return
+        if not input_dir:
+            messagebox.showerror(
+                "Threshold Recommender",
+                "Select a default input folder first.",
+            )
+            return
+        if not output_dir:
+            messagebox.showerror(
+                "Threshold Recommender",
+                "Select a default output folder first.",
+            )
+            return
+        try:
+            cppipe_path = str(resolve_imported_pipeline_path(path_text))
+            resolved_output_dir = str(resolve_workflow_output_dir(output_dir))
+        except ValueError as exc:
+            messagebox.showerror("Threshold Recommender", str(exc))
+            return
+
+        launch_threshold_recommender_window(
+            root,
+            ThresholdRecommenderLaunchContext(
+                cppipe_path=cppipe_path,
+                input_dir=input_dir,
+                output_dir=resolved_output_dir,
+                cellprofiler_executable=workflow_panel.cellprofiler_executable_entry.get().strip()
+                or "cellprofiler",
+            ),
+        )
+
+    workflow_panel.run_button.configure(command=run_async)
+    workflow_panel.open_results_button.configure(command=open_results)
+    workflow_panel.threshold_recommender_button.configure(command=open_threshold_recommender)
 
     if startup_warnings:
-        write_output("\n".join(startup_warnings))
+        polish_panel.summary_text.insert("end", "\n".join(startup_warnings))
+
+    saved_cppipe = saved_settings.get(CPPIPE_PATH_KEY, "").strip()
+    if saved_cppipe:
+        try:
+            set_imported_pipeline(saved_cppipe)
+            refresh_module_list(module_list)
+        except Exception:
+            pipeline_path_var.set(saved_cppipe)
 
     def on_close() -> None:
-        save_gui_run_settings(
-            collect_run_settings_from_values(
-                cellprofiler_executable=run_entries["cellprofiler_executable"].get(),
-                fiji_executable=run_entries["fiji_executable"].get(),
-            )
-        )
+        persist_settings()
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_close)

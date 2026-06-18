@@ -34,109 +34,100 @@ Most major pipeline components are already completed:
 - Export workflows
 - GUI/workflow management
 
-Because of that, the next major development focus is **thresholding and
-segmentation intelligence**, not adding more general image-processing modules.
+Because of that, the next major development focus is **automatic threshold and
+spot-detection intelligence for EV fluorescence images**, not adding more
+general image-processing modules.
 
 ### Goal (what “thresholding” means here)
 
-The goal is **not** simply to port Fiji Auto Local Threshold or replicate
-CellProfiler settings. The goal is:
+The goal is **not** to reimplement CellProfiler thresholding algorithms in Python.
+The architecture stays **CellProfiler-based**: our code orchestrates pipeline
+variants and compares CellProfiler outputs; CellProfiler performs all thresholding
+and spot detection.
 
 ```text
-Input image
+User imports one CellProfiler pipeline
 ↓
-Automatic image analysis
+Our code identifies threshold-related settings
 ↓
-Auto-threshold recommender (global + local candidates)
+Our code creates candidate pipeline variants
 ↓
-Automatic parameter tuning + scoring (biological heuristics)
+CellProfiler runs each variant
 ↓
-Best result + alternatives (user override)
+Our code compares outputs
+↓
+Best result is selected and shown (user override)
 ```
 
 The user should not need to manually tune:
 
+- threshold method
 - threshold correction factor
 - threshold smoothing scale
 - lower threshold bound
 - upper threshold bound
 - adaptive window size
 - local radius
-- threshold method selection
+- minimum object size
+- maximum object size
+- noise rejection settings
 
 The system should recommend these automatically and transparently (with a score
 breakdown and confidence), while still allowing user override.
 
 ### New development direction (assistive recommender, not “perfect AI”)
 
-Move toward an **assistive auto-threshold recommender**:
+Move toward an **assistive EV spot-detection recommender** built on CellProfiler:
 
-1. Analyze the image.
-2. Generate and run both **global** and **adaptive/local** threshold candidates.
-3. Automatically tune candidate parameters (correction factor, smoothing scale,
-   window size, bounds).
-4. Score each candidate mask using **biological quality heuristics**.
-5. Present the **best result plus ranked alternatives**, with clear confidence and
+1. User imports a single `.cppipe` pipeline (their assay workflow).
+2. Our code parses the pipeline and identifies threshold-related settings
+   (e.g. `IdentifyPrimaryObjects`, `IdentifySecondaryObjects`, `ApplyThreshold`).
+3. Our code generates a bounded set of **candidate pipeline variants** by varying
+   those settings (global vs adaptive, correction factor, smoothing scale, object
+   size limits, noise rejection, etc.).
+4. **CellProfiler runs each variant** headlessly (one run per variant, batch over
+   images within each run).
+5. Our code compares CellProfiler outputs (spot counts, centers, colocalization)
+   using **biologically relevant EV spot heuristics**.
+6. Present the **best result plus ranked alternatives**, with clear confidence and
    reasoning, and allow user override.
 
-### Thresholding framework (global + adaptive/local)
+**Do not** reimplement CellProfiler thresholding logic in `threshold.py` or
+similar modules for Phase 17. Python handles pipeline parsing, variant generation,
+output comparison, and presentation only.
 
-Both categories must be supported and remain visible in the final workflow. The
-system must not assume adaptive is always better.
+### Thresholding framework (global + adaptive/local via CellProfiler)
 
-**Global thresholding** examples:
+Both categories must be supported and remain **visible in the final comparison
+stage** as separate pipeline variants. The system must not assume adaptive is
+always better.
 
-- Otsu
-- Li
-- Triangle
-- Huang
-- Yen
-- Robust Background
+Global and adaptive strategies are configured through CellProfiler module
+settings (e.g. `Threshold strategy: Global` vs `Adaptive` in
+`IdentifyPrimaryObjects`). Phase 17 varies these across `.cppipe` variants; it
+does not implement parallel threshold algorithms in Python.
 
-**Adaptive / local thresholding** examples:
-
-- CellProfiler Adaptive Otsu
-- Fiji Local Otsu
-- Sauvola
-- Phansalkar
-- Niblack
-- Bernsen
-
-### AI-assisted threshold selection (intelligence layer above methods)
+### AI-assisted threshold selection (orchestration layer above CellProfiler)
 
 ```text
-Image
+Imported .cppipe
 ↓
-Image profiler
+Threshold-setting extractor (parse modules + settings)
+↓
+Variant generator (bounded candidate pipelines)
+↓
+CellProfiler batch runs (one per variant)
+↓
+Output comparator + spot-quality scorer
+↓
+Ranked recommendations (best + alternatives)
 ```
 
-Extract metrics such as:
+Our code decides **which pipeline variants to try** and **which output is best**.
+CellProfiler decides **how each variant thresholds and detects spots**.
 
-- signal-to-noise ratio
-- illumination gradient
-- background variation
-- local contrast
-- dynamic range
-- object density
-- estimated object size
-- histogram shape
-- foreground/background separation quality
-
-Then:
-
-```text
-Threshold recommender
-```
-
-Decides:
-
-- global vs adaptive
-- threshold method
-- correction factor
-- smoothing scale
-- adaptive window size
-- local radius
-- lower/upper threshold constraints
+Variant generation may consider image context (SNR, spot scale, channel layout) but
+threshold execution always happens inside CellProfiler, not in a Python reimplementation.
 
 ### Biological objective (assistive target)
 
@@ -144,17 +135,18 @@ The objective is not “best mathematical threshold,” and it is also not a cla
 of “perfect biological truth.” The objective is:
 
 ```text
-most biologically useful segmentation (recommended)
+most biologically useful EV spot detection / colocalization result (recommended)
 ```
 
 Meaning (heuristics we optimize for):
 
-- complete nuclei/cell detection
-- minimal merged objects
-- minimal fragmented objects
-- minimal background noise
-- realistic object counts
-- realistic object morphology
+- reliable spot counts per channel
+- correct spot centers for overlap / colocalization analysis
+- minimal merged bright spots
+- minimal fragmented spot detections
+- minimal background false positives
+- biologically reasonable spot size distribution
+- stable dual-positive / colocalized particle counts
 
 The AI should assist parameter selection and provide ranked options; biological
 validation remains the user’s responsibility.
@@ -229,25 +221,35 @@ invocation is the default.
   `cellprofiler_raw/` instead.
 - Building GUI controls that duplicate CellProfiler module logic in Python — the
   GUI configures `.cppipe` pipelines and invokes CellProfiler instead.
+- Reimplementing CellProfiler thresholding algorithms in Python for Phase 17 —
+  use pipeline variants and CellProfiler runs instead.
 
-## Thresholding & segmentation intelligence (Phase 17 — primary focus, next milestone)
+**Phase 17 exception to single-run batch-first:** threshold optimization may
+run CellProfiler **once per candidate pipeline variant** (not once per image).
+Keep variants bounded; each variant still processes the full input folder in one
+CP subprocess.
+
+## Thresholding & spot-detection intelligence (Phase 17 — primary focus, next milestone)
 
 **Status: `PLANNED` — redesign roadmap around this milestone before implementing.**
 
-Phase 17 becomes the primary focus: an **assistive auto-threshold recommender**
-that sits above Fiji / CellProfiler / Python thresholding methods, evaluates both
-global and adaptive/local candidates, tunes parameters automatically, scores
-candidates using biological heuristics, and returns the **best result plus
-alternatives** with user override.
+Phase 17 becomes the primary focus: a **CellProfiler-based assistive EV
+spot-detection recommender**. The user imports one pipeline; our code identifies
+threshold settings, generates candidate `.cppipe` variants, runs CellProfiler for
+each variant, compares outputs, and returns the **best result plus alternatives**
+with user override.
+
+**Architecture rule:** do **not** reimplement CellProfiler thresholding algorithms
+in our codebase. All thresholding and spot detection runs inside CellProfiler.
 
 This replaces the earlier framing of “self-adaptive thresholding (deferred)” as a
 side prototype. Existing code in `bioimage_pipeline/adaptive_import.py` remains
-useful as a sandbox, but Phase 17’s deliverable is a coherent *architecture and
-validation strategy* for intelligent threshold selection.
+a nuclei-era sandbox only; Phase 17 does not extend it as the production path.
 
-**Design intent:** keep both global and adaptive/local thresholding available and
-visible in workflows; do not assume adaptive is always better; do not claim
-perfect biological segmentation.
+**Design intent:** keep both global and adaptive/local thresholding visible via
+CellProfiler pipeline variants; do not assume adaptive is always better; do not
+claim perfect biological segmentation; optimize for EV spot detection and
+colocalization outputs instead of large-object morphology.
 
 ## GUI direction (Phase 15 — 15.1 → 15.2)
 
@@ -332,8 +334,8 @@ For every phase:
 | 14 | Fiji/ImageJ headless export integration | `PHASE COMPLETE` ✔ |
 | 15.1 | GUI workflow shell (run, logs, preview, export) | `PHASE COMPLETE` ✔ |
 | 15.2 | GUI pipeline builder & CP module exposure | `PHASE COMPLETE` ✔ |
-| 16 | Optional Python analysis enhancements (deprioritized vs Phase 17) | `PHASE NOT COMPLETE` |
-| 17 | **Thresholding & segmentation intelligence (AI-assisted selection + recommendation)** | `PLANNED` |
+| 16 | Optional Python analysis enhancements (deprioritized vs EV Phase 17 work) | `PHASE NOT COMPLETE` |
+| 17 | **EV spot detection: CP pipeline variant recommender** | `PLANNED` |
 | **S.0** | **Stack track prep — fix failing test, update docs** | `PHASE COMPLETE` ✔ |
 | **S.1** | **Stack I/O — AxisInfo, StackFrame, iter_stack_frames** | `PHASE COMPLETE` ✔ |
 | **S.2** | Stack data model — ImageStack, load from folder or file | `PHASE COMPLETE` ✔ |
@@ -700,17 +702,17 @@ Existing modules:
 - **Fiji headless export (Phase 14):** `fiji_runner.py`
 - **GUI (Phase 15):** workflow shell (15.1) → pipeline builder (15.2)
   — see [docs/gui_direction.md](docs/gui_direction.md)
-- **Adaptive thresholding sandbox (supports Phase 17 design):** `adaptive_import.py`
-  — prototype only, opt-in; not production default
+- **Adaptive thresholding sandbox (nuclei-era, supports limited Phase 17 experiments):**
+  `adaptive_import.py` — prototype only, opt-in; not the EV production architecture
 
 **Ordering rule:** Complete **Phase 10.1 → 10.5** before **Phase 11**.
 Complete **Phase 12 (Python TIFF fallback)** before **Phase 13 (CellProfiler
 workflow integration)**. Complete **Phase 13** before **Phase 14 (Fiji/ImageJ
 headless export)**. Complete **Phase 14** before **Phase 15** (sub-phases
 **15.1 → 15.2**). Phase **16** extends the optional Python engine only.
-Phase **17** (thresholding & segmentation intelligence — **next milestone**) is
-the primary focus after the completed integration phases. Keep Phase 17 visible
-in the roadmap; it complements CellProfiler, it does not compete with it.
+Phase **17** (EV spot detection & threshold intelligence — **next milestone**)
+is the primary focus after the completed integration phases. Keep Phase 17
+visible in the roadmap; it complements CellProfiler, it does not compete with it.
 
 All workflow phases must follow **batch-first execution** (see above): one
 CellProfiler run per folder, one Fiji run per folder when possible, per-image
@@ -726,7 +728,7 @@ external launches only as a documented fallback.
 | 15.1 | GUI workflow shell | `PHASE COMPLETE` ✔ |
 | 15.2 | GUI pipeline builder & CP module exposure | `PHASE COMPLETE` ✔ |
 | 16 | Optional Python analysis enhancements (fallback engine only) | `PHASE NOT COMPLETE` |
-| 17 | **Thresholding & segmentation intelligence (AI-assisted)** | `PLANNED` |
+| 17 | **EV spot detection: CP pipeline variant recommender** | `PLANNED` |
 
 ## Phase 10.1: CellProfiler Integration Validation
 
@@ -1561,9 +1563,9 @@ Tasks:
 - Additional morphology cleanup options.
 - Compare Python vs CellProfiler results on sample images (optional).
 
-Note: **Full intelligent threshold selection** (auto method per image, staging →
-CP when appropriate) is part of **Phase 17 (planned)**. The existing prototype in
-`adaptive_import.py` is a sandbox reference, not the default product path.
+Note: **EV spot threshold recommendation via CellProfiler pipeline variants** is
+part of **Phase 17 (planned)**. The existing prototype in `adaptive_import.py`
+is a nuclei-oriented Python sandbox and is **not** the Phase 17 production path.
 
 Files (proposed):
 
@@ -1579,138 +1581,264 @@ Acceptance:
 
 Status: `PHASE NOT COMPLETE`
 
-## Phase 17: Thresholding & Segmentation Intelligence (AI-assisted)
+## Phase 17: EV Spot Detection & Threshold Intelligence (CellProfiler-based)
 
-Goal: build an **assistive auto-threshold recommender** that is robust across
-diverse microscopy images by adding an intelligence layer above thresholding
-methods (Python / CellProfiler / Fiji). The recommender helps users choose
-parameters and candidates; it does **not** claim perfect biological segmentation.
-
-This is **not** a “port Fiji” phase. This phase turns Fiji/CellProfiler methods
-into **tools** the system can choose from, rather than exposing a large parameter
-surface to end users.
+Goal: build an **assistive auto-threshold / spot-detection recommender** for
+confocal fluorescence EV-style images with sparse bright spots on a dark
+background. The user imports one CellProfiler pipeline; our code identifies
+threshold-related settings, generates candidate pipeline variants, runs
+CellProfiler for each variant, compares outputs, and selects the best result.
+It does **not** claim perfect biological segmentation and does **not**
+reimplement CellProfiler thresholding in Python.
 
 ```text
-Input image
+User imports one CellProfiler pipeline
 ↓
-Automatic image analysis (image profiler)
+Our code identifies threshold-related settings
 ↓
-Run global + adaptive/local candidates (bounded search)
+Our code creates candidate pipeline variants
 ↓
-Automatic parameter tuning + biological heuristics scoring
+CellProfiler runs each variant
 ↓
-Best result + ranked alternatives (user override)
-Biologically meaningful segmentation
+Our code compares outputs
+↓
+Best result is selected and shown (user override)
 ```
 
-### Scope: global + adaptive/local thresholding remain available
+### Biological context
 
-Both categories must remain available and visible in the final workflow. The
-system must not assume adaptive is always better.
+Target images are expected to look more like **confocal fluorescence spot
+images** than whole-cell or nuclei images:
 
-Global examples: Otsu, Li, Triangle, Huang, Yen, Robust Background
+- sparse red/green fluorescent spots on black background
+- each spot corresponds to an EV or fluorescent particle
+- downstream biology depends on object counts and channel overlap more than
+  precise object boundaries
 
-Adaptive/local examples: CellProfiler Adaptive Otsu, Fiji Local Otsu, Sauvola,
-Phansalkar, Niblack, Bernsen
+The key biological outputs are expected to include:
+
+- EV-positive particle counts
+- miRNA-positive particle counts
+- protein-positive particle counts
+- dual-positive / colocalized particle counts
+
+Therefore Phase 17 should prioritize **spot detection and colocalization**
+quality, not large-cell morphology or perfect cell-boundary segmentation.
+
+### Scope: global + adaptive/local thresholding via CellProfiler variants
+
+Both **Global** and **Adaptive** threshold strategies must appear among the
+candidate pipeline variants and remain visible in the final comparison stage.
+The system must not assume adaptive is always better.
+
+Threshold methods and parameters are whatever CellProfiler exposes in the
+imported pipeline (e.g. `IdentifyPrimaryObjects` settings in
+`pipeline_catalog.py`). We vary those settings across variants; we do not
+reimplement Otsu, Sauvola, or other algorithms in Python.
 
 ### Architecture proposal (Phase 17)
 
 ```text
-Thresholding method library (global + local)
-              ↑
-              |
-Image profiler → CandidateGenerator → CandidateScorer → RankedRecommendations → ApplyChoice → Segmentation/QC/Measure
+Imported .cppipe (user assay pipeline)
+        ↓
+Threshold-setting extractor (cppipe_io: parse modules + settings)
+        ↓
+Variant generator (bounded .cppipe variants: global, adaptive, param grids)
+        ↓
+CellProfiler runner (one headless run per variant, batch over folder)
+        ↓
+Output collector (CSVs, masks, labels per variant)
+        ↓
+Spot-quality scorer (compare CP outputs)
+        ↓
+Ranked recommendations (best + alternatives)
+        ↓
+GUI comparison panel + apply winning variant
 ```
 
-- **Image profiler**: extracts quantitative image descriptors (below).
-- **Candidate generator**: proposes a bounded set of global + local candidates and parameter ranges.
-- **Candidate scorer**: scores candidate segmentations for usability, not only histogram math.
-- **Ranked recommendations**: returns best + alternatives with score breakdown and confidence.
+- **Threshold-setting extractor**: finds threshold-related modules and settings
+  in the imported pipeline (`IdentifyPrimaryObjects`, `ApplyThreshold`, etc.).
+- **Variant generator**: clones the pipeline and writes candidate setting values
+  via `cppipe_io.update_module_setting()`.
+- **CellProfiler runner**: executes each variant; thresholding happens entirely
+  inside CellProfiler.
+- **Output comparator**: scores variant outputs using EV spot heuristics (counts,
+  size distribution, colocalization consistency).
+- **Ranked recommendations**: returns best + alternatives with score breakdown
+  and confidence.
 
-### Image-feature extraction plan (image profiler)
+### Threshold settings to vary (via pipeline variants)
 
-Extract metrics such as:
+For each relevant CellProfiler module, variants may adjust (at minimum):
 
-- signal-to-noise ratio
-- illumination gradient / shading severity
-- background variation
-- local contrast statistics
-- dynamic range / saturation
-- object density estimate
-- estimated object size scale
-- histogram shape (skew, peaks, separation)
-- foreground/background separation quality proxies
+- `Threshold strategy` (Global / Adaptive)
+- `Thresholding method`
+- `Threshold correction factor`
+- `Threshold smoothing scale`
+- `Lower and upper bounds on threshold`
+- `Typical diameter of objects, in pixel units (Min,Max)`
+- border-discard and declumping / local-maxima settings where applicable
+
+Variant generation should be **bounded** (coarse grids, shortlists) to limit
+the number of CellProfiler runs.
 
 ### Automatic parameter recommendation plan (assistive)
 
-For each candidate method, the recommender tunes (at minimum):
-
-- global vs adaptive
-- threshold method
-- correction factor
-- smoothing scale
-- adaptive window size
-- local radius
-- lower/upper threshold constraints
-
 It should also support **user override** modes:
 
-- lock method, tune parameters (Approach A mode)
-- accept recommended best candidate
+- lock specific settings, vary others only
+- accept recommended best variant
 - pick an alternative from the ranked list
+- re-run comparison on a subset of images before full batch
 
-### Biological-quality scoring strategy
+### Spot-quality scoring strategy
 
-Optimize for “most biologically useful segmentation”, e.g.:
+Optimize for “most biologically useful EV spot detection”, e.g.:
 
-- complete nuclei/cell detection
-- minimal merged objects
-- minimal fragmented objects
-- minimal background noise
-- realistic object counts
-- realistic object morphology
+- reliable number of detected spots
+- biologically reasonable spot size distribution
+- low background false positives
+- low merged-spot rate
+- low split-spot / tiny-noise rate
+- reasonable spot circularity / compactness when useful
+- stable channel colocalization consistency
 
 Scoring should support:
 
 - ranking and presenting top alternatives (not only picking one winner)
 - surfacing “low confidence” cases for GUI review
-- comparison vs reference masks when available (for validation only, when available)
+- comparison vs reference masks when available (for validation only)
+
+#### EV spot scoring metrics
+
+| Metric | EV relevance |
+|--------|--------------|
+| Spot count plausibility | Penalize near-zero or implausibly high counts relative to image area |
+| Spot size distribution | Penalize oversized blobs (merged EVs) and 1–2 px noise |
+| Circularity / compactness | Optional shape prior for compact fluorescent spots |
+| Background false positives | Penalize salt-and-pepper detections on dark background |
+| Merge rate | Penalize few objects with area much larger than median spot area |
+| Split rate | Penalize excessive tiny detections below expected spot size |
+| Channel colocalization consistency | Prefer stable dual-positive counts and center-distance overlap consistency |
+| Global vs adaptive agreement | Large divergence should reduce confidence and trigger review |
+
+**Default assay profile:** `ev_fluorescence_spots`
+
+Assay priors should emphasize:
+
+- small object diameter range
+- low foreground fraction
+- sparse bright particles on dark background
+- multi-channel count and colocalization outputs
+
+### Codebase integration map
+
+The current codebase already exposes several of the integration points Phase 17
+will need. Phase 17 extends orchestration; it does **not** add Python threshold
+algorithm reimplementations.
+
+**CellProfiler pipeline load / generation**
+
+- `bioimage_pipeline/cppipe_io.py` loads, validates, builds, edits, and saves
+  `.cppipe` pipelines — **primary hook for variant generation**.
+- `bioimage_pipeline/cppipe_io.py:update_module_setting()` writes threshold
+  settings into cloned pipeline variants.
+- `bioimage_pipeline/cppipe_io.py:load_and_validate_imported_pipeline()` is the
+  entry point when the user imports their assay pipeline.
+- `bioimage_pipeline/gui/workflow_shell.py` already edits pipeline settings.
+- `bioimage_pipeline/analysis.py` / `cellprofiler_runner.py` already run
+  headless CellProfiler workflows — **extend for multi-variant runs**.
+
+**IdentifyPrimaryObjects settings already exposed**
+
+`bioimage_pipeline/pipeline_catalog.py` documents the settings to extract and
+vary across variants (see list above). The recommender reads and writes these
+via `cppipe_io`, not via new Python threshold code.
+
+**Note:** `normalize_identify_primary_objects_for_cellprofiler()` resets IPO to
+catalog template before some runs. Variant workflows must apply tuned values
+**after** normalization or preserve recommender overrides explicitly.
+
+**Measurement parsing already available**
+
+- `bioimage_pipeline/cellprofiler_runner.py` loads and merges CP CSV outputs —
+  **primary hook for comparing variant results**.
+- `bioimage_pipeline/validation.py` compares counts and areas across outputs.
+- `bioimage_pipeline/measure.py` remains Python-fallback only; not the Phase 17
+  production path for EV spot detection.
+
+**Current gaps to address in future implementation**
+
+- threshold-setting extractor (parse imported `.cppipe`, list tunable settings)
+- pipeline variant generator (clone + bounded grid of setting combinations)
+- multi-variant CellProfiler runner (one subprocess per variant, organized outputs)
+- variant output comparator and spot-quality scorer
+- side-by-side **Global vs Adaptive** comparison panel in the GUI
+- dedicated parsing of `Location_Center_X` / `Location_Center_Y`
+- colocalization table handling for `MeasureColocalization`
+- dual-positive / per-channel positive count aggregation
 
 ### Validation strategy
 
 Validation should combine:
 
-- synthetic fixtures (controlled ground truth)
-- real microscopy datasets (assay diversity)
-- comparisons against manual masks and/or trusted CellProfiler pipelines
+- synthetic sparse spot fixtures with known red/green counts
+- real confocal EV fluorescence images when available
+- comparisons against trusted CellProfiler pipelines and manual review
 
-Define acceptance targets appropriate for biology (e.g. Dice/IoU + count/morphology
-sanity), not only histogram-based metrics.
+Success should be defined primarily by:
 
-Important: the recommender should assist and provide evidence; it does not replace
-biological validation by the user.
+- stable spot counts
+- plausible spot centers
+- useful colocalization outputs
+- reasonable behavior across nearby parameter settings
+
+Do **not** use nuclei-boundary quality as the primary acceptance target.
+
+Important: the recommender should assist and provide evidence; it does not
+replace biological validation by the user.
 
 ### How CellProfiler and Fiji fit
 
-- **CellProfiler**: remains the primary downstream engine for measurement and
-  standardized pipelines; Phase 17 can output masks/labels to feed CP, or select
-  CP threshold modules/configuration when appropriate.
-- **Fiji/ImageJ**: remains export/QC tooling and a source of threshold method
-  implementations; Phase 17 uses Fiji-style methods as options within the method
-  library, not as the primary UX surface.
+- **CellProfiler**: the **sole execution engine** for thresholding and spot
+  detection in Phase 17. Our code orchestrates pipeline variants and compares CP
+  outputs; CellProfiler performs all segmentation and measurement.
+- **Fiji/ImageJ**: export/QC tooling only; not used for threshold candidate
+  evaluation in Phase 17.
+
+### Phase 17 sub-phases
+
+| Sub-phase | Goal | Status |
+|-----------|------|--------|
+| 17.0 | Design spec: EV spot assay profile, scoring metrics, threshold-setting extraction rules | `PLANNED` |
+| 17.1 | Threshold-setting extractor: parse imported `.cppipe`, identify tunable threshold settings | `PLANNED` |
+| 17.2 | Pipeline variant generator: clone pipelines, bounded setting grids (global + adaptive) | `PLANNED` |
+| 17.3 | Multi-variant CellProfiler runner: one headless run per variant, organized per-variant outputs | `PLANNED` |
+| 17.4 | Output comparator: spot counts, size/intensity summaries, heuristic ranking | `DONE` |
+| 17.5A | Heuristic scoring with explanations (no auto-apply) | `DONE` |
+| 17.5B | Subset-first trial GUI, confirmed full-dataset apply, human review loop | `DONE` |
+
+**Subset-first recommender workflow (implemented):**
+
+1. Stage a small representative image subset (auto-sampled or user-selected).
+2. Run all candidate `.cppipe` variants on the subset only.
+3. Compare measurements, rank with heuristic scores, save CSV/JSON + QC previews.
+4. User inspects top variants in the Threshold Recommender window.
+5. Only after explicit confirmation, run the chosen variant on the full dataset.
+6. The imported `.cppipe` is never modified automatically.
 
 ### Requested deliverable before implementing
 
 Before implementing Phase 17, provide:
 
-1. Updated architecture proposal.
-2. Revised roadmap focused on thresholding.
-3. Threshold intelligence design.
-4. Image-feature extraction plan.
-5. Automatic parameter recommendation plan.
+1. Updated architecture proposal (CellProfiler variant workflow).
+2. Revised roadmap focused on EV fluorescence spot detection.
+3. Threshold-setting extraction and variant-generation design.
+4. Multi-variant CellProfiler run orchestration plan.
+5. Output comparison and ranking plan.
 6. Validation strategy.
-7. Biological-quality scoring strategy.
-8. How CellProfiler and Fiji thresholding methods fit into the architecture.
+7. Biological-quality scoring strategy for spot detection and colocalization.
+8. GUI comparison panel design (global vs adaptive visible in final stage).
 
 Status: `PLANNED` (do not start coding until this design/roadmap is finalized)
 
