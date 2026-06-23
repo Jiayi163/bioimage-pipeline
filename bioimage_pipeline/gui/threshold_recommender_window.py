@@ -47,6 +47,12 @@ def launch_threshold_recommender_window(
     state: dict[str, ThresholdRecommenderTrialResult | None] = {"trial": None}
     image_names: list[str] = []
 
+    def window_is_open() -> bool:
+        try:
+            return bool(window.winfo_exists())
+        except tk.TclError:
+            return False
+
     main = ttk.Frame(window, padding=8)
     main.pack(fill="both", expand=True)
     main.columnconfigure(0, weight=1)
@@ -108,16 +114,23 @@ def launch_threshold_recommender_window(
         variable=fast_optimistic_var,
     ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(0, 4))
 
+    force_full_search_var = tk.BooleanVar(value=False)
+    ttk.Checkbutton(
+        subset_frame,
+        text="Always run full variant search (do not accept optimistic candidate even if QC passes)",
+        variable=force_full_search_var,
+    ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(0, 4))
+
     image_list = tk.Listbox(
         subset_frame,
         selectmode="extended",
         height=6,
         exportselection=False,
     )
-    image_list.grid(row=3, column=0, columnspan=3, sticky="nsew", pady=(0, 4))
-    subset_frame.rowconfigure(3, weight=1)
+    image_list.grid(row=4, column=0, columnspan=3, sticky="nsew", pady=(0, 4))
+    subset_frame.rowconfigure(4, weight=1)
     image_scroll = ttk.Scrollbar(subset_frame, orient="vertical", command=image_list.yview)
-    image_scroll.grid(row=3, column=3, sticky="ns")
+    image_scroll.grid(row=4, column=3, sticky="ns")
     image_list.configure(yscrollcommand=image_scroll.set)
 
     def refresh_image_list() -> None:
@@ -131,7 +144,7 @@ def launch_threshold_recommender_window(
         status_var.set(f"Detected {len(image_names)} image(s) in input folder.")
 
     ttk.Button(subset_frame, text="Refresh images", command=refresh_image_list).grid(
-        row=4,
+        row=5,
         column=0,
         sticky="w",
     )
@@ -150,6 +163,7 @@ def launch_threshold_recommender_window(
         "name",
         "score",
         "object_count",
+        "count_ratio",
         "tiny_frac",
         "huge_frac",
         "reason",
@@ -166,6 +180,7 @@ def launch_threshold_recommender_window(
         "name": "Name",
         "score": "Score",
         "object_count": "Objects",
+        "count_ratio": "Count/baseline",
         "tiny_frac": "Tiny",
         "huge_frac": "Huge",
         "reason": "Reason",
@@ -209,6 +224,11 @@ def launch_threshold_recommender_window(
                     score.display_name,
                     f"{score.score:.2f}",
                     score.object_count if score.object_count is not None else "",
+                    (
+                        f"{score.object_count_ratio_vs_baseline:.1f}x"
+                        if score.object_count_ratio_vs_baseline is not None
+                        else ""
+                    ),
                     f"{score.tiny_frac:.2f}" if score.tiny_frac is not None else "",
                     f"{score.huge_frac:.2f}" if score.huge_frac is not None else "",
                     score.reason,
@@ -300,6 +320,7 @@ def launch_threshold_recommender_window(
             subset_method=subset_method_var.get(),  # type: ignore[arg-type]
             manual_subset_image_names=manual_names,
             fast_optimistic=fast_optimistic_var.get(),
+            force_full_search=force_full_search_var.get(),
         )
 
         trial_button.configure(state="disabled")
@@ -322,8 +343,19 @@ def launch_threshold_recommender_window(
             f"image(s), ranking saved to {trial_result.ranking_paths['csv']}"
         )
         if trial_result.trial_mode == "optimistic" and trial_result.optimistic_qc is not None:
+            ratio_note = ""
+            optimistic_qc = trial_result.optimistic_qc
+            if optimistic_qc.object_count_ratio_vs_baseline is not None:
+                ratio_note = (
+                    f" (object_count {optimistic_qc.object_count_ratio_vs_baseline:.1f}x baseline)"
+                )
             return (
-                f"{base} — optimistic candidate passed QC; you can apply it to the full dataset."
+                f"{base} — optimistic candidate passed QC{ratio_note}; "
+                "you can apply it to the full dataset."
+            )
+        if trial_result.forced_full_search:
+            return (
+                f"{base} — full variant search was forced despite optimistic QC pass."
             )
         if trial_result.fell_back_to_full_search:
             reasons = ""
@@ -333,6 +365,8 @@ def launch_threshold_recommender_window(
         return base
 
     def _finish_trial_success(trial_result: ThresholdRecommenderTrialResult) -> None:
+        if not window_is_open():
+            return
         state["trial"] = trial_result
         populate_ranking(trial_result)
         if trial_result.ranked_scores:
@@ -344,12 +378,27 @@ def launch_threshold_recommender_window(
         trial_button.configure(state="normal")
         apply_button.configure(state="normal")
         if trial_result.trial_mode == "optimistic":
+            optimistic_qc = trial_result.optimistic_qc
+            warning_lines = ""
+            if optimistic_qc is not None and optimistic_qc.warnings:
+                warning_lines = "\n\nWarnings:\n" + "\n".join(
+                    f"- {line}" for line in optimistic_qc.warnings
+                )
             messagebox.showinfo(
                 "Optimistic candidate passed QC",
                 (
                     "The fast optimistic Otsu adaptive candidate passed basic QC on the "
                     "subset.\n\nReview the preview and metrics, then apply to the full "
                     "dataset if it looks reasonable."
+                    f"{warning_lines}"
+                ),
+            )
+        elif trial_result.forced_full_search:
+            messagebox.showinfo(
+                "Full variant search completed",
+                (
+                    "The optimistic candidate passed QC, but full variant search was "
+                    "requested.\n\nReview the full ranking before applying a variant."
                 ),
             )
         elif trial_result.fell_back_to_full_search:
@@ -362,6 +411,8 @@ def launch_threshold_recommender_window(
             )
 
     def _finish_trial_error(exc: Exception) -> None:
+        if not window_is_open():
+            return
         messagebox.showerror("Subset trial failed", str(exc))
         status_var.set("Subset trial failed.")
         trial_button.configure(state="normal")
@@ -403,6 +454,7 @@ def launch_threshold_recommender_window(
             subset_count=subset_count_var.get(),
             subset_method=subset_method_var.get(),  # type: ignore[arg-type]
             fast_optimistic=fast_optimistic_var.get(),
+            force_full_search=force_full_search_var.get(),
         )
 
         apply_button.configure(state="disabled")
@@ -423,6 +475,8 @@ def launch_threshold_recommender_window(
         threading.Thread(target=worker, daemon=True).start()
 
     def _finish_apply_success(apply_result: object) -> None:
+        if not window_is_open():
+            return
         from bioimage_pipeline.threshold_recommender import ThresholdRecommenderApplyResult
 
         assert isinstance(apply_result, ThresholdRecommenderApplyResult)
@@ -441,6 +495,8 @@ def launch_threshold_recommender_window(
         apply_button.configure(state="normal")
 
     def _finish_apply_error(exc: Exception) -> None:
+        if not window_is_open():
+            return
         messagebox.showerror("Apply failed", str(exc))
         status_var.set("Apply failed.")
         apply_button.configure(state="normal")

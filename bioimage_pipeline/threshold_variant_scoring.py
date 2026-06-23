@@ -28,6 +28,9 @@ class ThresholdVariantScoreConfig:
     tiny_frac_flag_threshold: float = 0.2
     huge_frac_flag_threshold: float = 0.1
     failure_penalty: float = 10.0
+    object_count_ratio_fail_max: float = 5.0
+    object_count_ratio_fail_min: float = 0.2
+    object_count_extreme_penalty: float = 2.0
     object_count_deviation_threshold: float = 2.0
     object_count_deviation_penalty: float = 0.5
     low_object_count_threshold: int = 1
@@ -53,6 +56,7 @@ class ThresholdVariantScore:
     tiny_frac: float | None = None
     huge_frac: float | None = None
     median_intensity: float | None = None
+    object_count_ratio_vs_baseline: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -75,6 +79,20 @@ def _clamp_score(score: float) -> float:
     return max(0.0, min(1.0, score))
 
 
+def object_count_ratio_vs_baseline(
+    summary: ThresholdVariantMeasurementSummary,
+    baseline: ThresholdVariantMeasurementSummary | None,
+) -> float | None:
+    """Return candidate object_count divided by baseline object_count."""
+    count = summary.object_count
+    if count is None or baseline is None:
+        return None
+    reference_count = baseline.object_count
+    if reference_count is None or reference_count <= 0:
+        return None
+    return count / reference_count
+
+
 def _scale_intensity(
     median_intensity: float | None,
     *,
@@ -89,40 +107,57 @@ def _object_count_penalty(
     summary: ThresholdVariantMeasurementSummary,
     baseline: ThresholdVariantMeasurementSummary | None,
     config: ThresholdVariantScoreConfig,
-) -> tuple[float, list[str]]:
+) -> tuple[float, list[str], float | None]:
     explanations: list[str] = []
     count = summary.object_count
+    ratio = object_count_ratio_vs_baseline(summary, baseline)
     if count is None:
-        return 0.0, explanations
+        return 0.0, explanations, ratio
 
     if count <= config.low_object_count_threshold:
         explanations.append(
             f"Flagged because object_count = {count}, suggesting the threshold may "
             "be too strict."
         )
-        return config.low_object_count_penalty, explanations
+        return config.low_object_count_penalty, explanations, ratio
 
-    reference_count = baseline.object_count if baseline is not None else None
-    if reference_count is None or reference_count <= 0:
-        return 0.0, explanations
+    if ratio is None:
+        return 0.0, explanations, ratio
 
-    ratio = count / reference_count
+    if ratio > config.object_count_ratio_fail_max:
+        penalty = config.object_count_extreme_penalty * (
+            ratio / config.object_count_ratio_fail_max
+        )
+        explanations.append(
+            f"Flagged because object_count is {ratio:.1f}x higher than baseline."
+        )
+        return penalty, explanations, ratio
+
+    if ratio < config.object_count_ratio_fail_min:
+        penalty = config.object_count_extreme_penalty * (
+            config.object_count_ratio_fail_min / ratio
+        )
+        explanations.append(
+            f"Flagged because object_count is {1.0 / ratio:.1f}x lower than baseline."
+        )
+        return penalty, explanations, ratio
+
     threshold = config.object_count_deviation_threshold
     if ratio > threshold:
         penalty = config.object_count_deviation_penalty * (ratio - threshold) / threshold
         explanations.append(
             f"Flagged because object_count is {ratio:.1f}x higher than baseline."
         )
-        return penalty, explanations
+        return penalty, explanations, ratio
 
     if ratio < (1.0 / threshold):
         penalty = config.object_count_deviation_penalty * ((1.0 / ratio) - threshold) / threshold
         explanations.append(
             f"Flagged because object_count is {1.0 / ratio:.1f}x lower than baseline."
         )
-        return penalty, explanations
+        return penalty, explanations, ratio
 
-    return 0.0, explanations
+    return 0.0, explanations, ratio
 
 
 def _primary_reason(
@@ -179,6 +214,9 @@ def score_threshold_variant_summary(
             tiny_frac=summary.tiny_frac,
             huge_frac=summary.huge_frac,
             median_intensity=summary.median_intensity,
+            object_count_ratio_vs_baseline=object_count_ratio_vs_baseline(
+                summary, baseline
+            ),
         )
 
     raw_score = 0.0
@@ -231,7 +269,9 @@ def score_threshold_variant_summary(
                 f"Ranked high because huge_frac = {huge_frac:.2f}."
             )
 
-    count_penalty, count_explanations = _object_count_penalty(summary, baseline, config)
+    count_penalty, count_explanations, count_ratio = _object_count_penalty(
+        summary, baseline, config
+    )
     if count_penalty:
         components["object_count_penalty"] = -count_penalty
         raw_score -= count_penalty
@@ -265,6 +305,7 @@ def score_threshold_variant_summary(
         tiny_frac=summary.tiny_frac,
         huge_frac=summary.huge_frac,
         median_intensity=summary.median_intensity,
+        object_count_ratio_vs_baseline=count_ratio,
     )
 
 
@@ -302,6 +343,7 @@ def rank_threshold_variant_summaries(
                 tiny_frac=item.tiny_frac,
                 huge_frac=item.huge_frac,
                 median_intensity=item.median_intensity,
+                object_count_ratio_vs_baseline=item.object_count_ratio_vs_baseline,
             )
         )
     return ranked
@@ -320,6 +362,7 @@ def threshold_variant_ranking_to_dataframe(
             "reason": score.reason,
             "success": score.success,
             "object_count": score.object_count,
+            "object_count_ratio_vs_baseline": score.object_count_ratio_vs_baseline,
             "normal_frac": score.normal_frac,
             "tiny_frac": score.tiny_frac,
             "huge_frac": score.huge_frac,

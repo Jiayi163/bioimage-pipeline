@@ -83,6 +83,7 @@ class ThresholdRecommenderConfig:
     )
     full_dataset_trial: bool = False
     fast_optimistic: bool = True
+    force_full_search: bool = False
 
 
 @dataclass
@@ -114,6 +115,7 @@ class ThresholdRecommenderTrialResult:
     optimistic_qc: OptimisticQcAssessment | None = None
     optimistic_qc_path: Path | None = None
     fell_back_to_full_search: bool = False
+    forced_full_search: bool = False
 
 
 @dataclass
@@ -280,6 +282,7 @@ def save_recommender_session(
     optimistic_qc: OptimisticQcAssessment | None = None,
     optimistic_qc_path: Path | None = None,
     fell_back_to_full_search: bool = False,
+    forced_full_search: bool = False,
 ) -> Path:
     payload = {
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -289,7 +292,9 @@ def save_recommender_session(
         "recommender_root": str(recommender_root.resolve()),
         "trial_mode": trial_mode,
         "fast_optimistic": config.fast_optimistic,
+        "force_full_search": config.force_full_search,
         "fell_back_to_full_search": fell_back_to_full_search,
+        "forced_full_search": forced_full_search,
         "subset_manifest": subset_manifest.to_dict(),
         "comparison_paths": {key: str(path) for key, path in comparison_paths.items()},
         "ranking_paths": {key: str(path) for key, path in ranking_paths.items()},
@@ -437,10 +442,11 @@ def _run_optimistic_trial(
     Path,
 ]:
     optimistic_spec = generate_optimistic_threshold_variant_spec(profile)
+    baseline_spec = generate_basic_threshold_variant_specs(profile)[0]
     artifact_list = write_threshold_pipeline_variants(
         imported_path,
         optimistic_root,
-        [optimistic_spec],
+        [baseline_spec, optimistic_spec],
     )
     run_results = run_threshold_variant_artifacts(
         artifact_list,
@@ -458,7 +464,20 @@ def _run_optimistic_trial(
         optimistic_root,
         basename="optimistic_threshold_comparison",
     )
-    optimistic_qc = assess_optimistic_qc(summaries[0])
+    baseline_summary = next(
+        (item for item in summaries if item.variant_id == baseline_spec.variant_id),
+        None,
+    )
+    optimistic_summary = next(
+        (item for item in summaries if item.variant_id == optimistic_spec.variant_id),
+        summaries[-1] if summaries else None,
+    )
+    if optimistic_summary is None:
+        raise ValueError("Optimistic trial produced no measurement summary.")
+    optimistic_qc = assess_optimistic_qc(
+        optimistic_summary,
+        baseline=baseline_summary,
+    )
     preview_index = _build_preview_index(run_results)
     preview_paths = []
     optimistic_preview = preview_index.get(optimistic_spec.variant_id)
@@ -487,6 +506,7 @@ def _run_optimistic_trial(
                 tiny_frac=optimistic_qc.score.tiny_frac,
                 huge_frac=optimistic_qc.score.huge_frac,
                 median_intensity=optimistic_qc.score.median_intensity,
+                object_count_ratio_vs_baseline=optimistic_qc.score.object_count_ratio_vs_baseline,
             )
         ]
     else:
@@ -544,6 +564,7 @@ def run_threshold_recommender_trial(
     optimistic_qc: OptimisticQcAssessment | None = None
     optimistic_qc_path: Path | None = None
     fell_back_to_full_search = False
+    forced_full_search = False
 
     if config.fast_optimistic:
         (
@@ -564,11 +585,15 @@ def run_threshold_recommender_trial(
             optimistic_root=optimistic_dir(root),
         )
         variant_root = optimistic_dir(root)
-        if optimistic_qc.passed:
+        accept_optimistic = optimistic_qc.passed and not config.force_full_search
+        if accept_optimistic:
             trial_mode = "optimistic"
         else:
             trial_mode = "full_search"
-            fell_back_to_full_search = True
+            if config.force_full_search and optimistic_qc.passed:
+                forced_full_search = True
+            else:
+                fell_back_to_full_search = True
             (
                 artifact_list,
                 run_results,
@@ -616,6 +641,7 @@ def run_threshold_recommender_trial(
         optimistic_qc=optimistic_qc,
         optimistic_qc_path=optimistic_qc_path,
         fell_back_to_full_search=fell_back_to_full_search,
+        forced_full_search=forced_full_search,
     )
 
     return ThresholdRecommenderTrialResult(
@@ -635,6 +661,7 @@ def run_threshold_recommender_trial(
         optimistic_qc=optimistic_qc,
         optimistic_qc_path=optimistic_qc_path,
         fell_back_to_full_search=fell_back_to_full_search,
+        forced_full_search=forced_full_search,
     )
 
 
@@ -737,6 +764,7 @@ def load_trial_result_from_session(
             tiny_frac=entry.get("tiny_frac"),
             huge_frac=entry.get("huge_frac"),
             median_intensity=entry.get("median_intensity"),
+            object_count_ratio_vs_baseline=entry.get("object_count_ratio_vs_baseline"),
         )
         for entry in ranked_payload
     ]
@@ -794,6 +822,10 @@ def load_trial_result_from_session(
             ),
             warnings=list(optimistic_payload.get("warnings", [])),
             reasons=list(optimistic_payload.get("reasons", [])),
+            baseline_object_count=optimistic_payload.get("baseline_object_count"),
+            object_count_ratio_vs_baseline=optimistic_payload.get(
+                "object_count_ratio_vs_baseline"
+            ),
         )
         score_payload = optimistic_payload.get("score")
         if score_payload is not None:
@@ -811,6 +843,9 @@ def load_trial_result_from_session(
                 tiny_frac=score_payload.get("tiny_frac"),
                 huge_frac=score_payload.get("huge_frac"),
                 median_intensity=score_payload.get("median_intensity"),
+                object_count_ratio_vs_baseline=score_payload.get(
+                    "object_count_ratio_vs_baseline"
+                ),
             )
 
     return ThresholdRecommenderTrialResult(
@@ -830,4 +865,5 @@ def load_trial_result_from_session(
         optimistic_qc=optimistic_qc,
         optimistic_qc_path=optimistic_qc_path,
         fell_back_to_full_search=session.get("fell_back_to_full_search", False),
+        forced_full_search=session.get("forced_full_search", False),
     )

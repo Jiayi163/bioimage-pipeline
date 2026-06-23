@@ -608,6 +608,19 @@ def run_cellprofiler_pipeline_logged(
     )
 
 
+_CELLPROFILER_CSV_ENCODINGS = ("utf-8", "utf-8-sig", "cp1252", "latin-1")
+
+
+def _read_cellprofiler_csv(csv_file: Path) -> pd.DataFrame:
+    """Read a CellProfiler CSV, trying common Windows/export encodings."""
+    for encoding in _CELLPROFILER_CSV_ENCODINGS:
+        try:
+            return pd.read_csv(csv_file, encoding=encoding)
+        except UnicodeDecodeError:
+            continue
+    return pd.read_csv(csv_file, encoding="latin-1")
+
+
 def read_cellprofiler_csv(csv_path: str | Path) -> pd.DataFrame:
     """Read a CellProfiler-exported CSV file.
 
@@ -624,7 +637,7 @@ def read_cellprofiler_csv(csv_path: str | Path) -> pd.DataFrame:
     if not csv_file.is_file():
         raise FileNotFoundError(f"CSV file not found: {csv_file}")
 
-    dataframe = pd.read_csv(csv_file)
+    dataframe = _read_cellprofiler_csv(csv_file)
     return normalize_cellprofiler_dataframe(dataframe, table_name=csv_file.stem)[0]
 
 
@@ -797,7 +810,7 @@ def load_cellprofiler_measurements(
 
     for csv_file in csv_files:
         table_name = csv_file.stem
-        raw_dataframe = pd.read_csv(csv_file)
+        raw_dataframe = _read_cellprofiler_csv(csv_file)
         raw_columns = list(raw_dataframe.columns)
         column_log = f"{table_name}: columns found — {', '.join(raw_columns)}"
         logger.info(column_log)

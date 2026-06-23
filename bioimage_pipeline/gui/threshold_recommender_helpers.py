@@ -26,6 +26,7 @@ def build_recommender_config(
     tiny_area_px: float = 2.0,
     huge_area_px: float = 200.0,
     fast_optimistic: bool = True,
+    force_full_search: bool = False,
 ) -> ThresholdRecommenderConfig:
     """Map GUI/CLI-like values to :class:`ThresholdRecommenderConfig`."""
     manual_names = manual_subset_image_names or []
@@ -47,6 +48,7 @@ def build_recommender_config(
             huge_area_px=huge_area_px,
         ),
         fast_optimistic=fast_optimistic,
+        force_full_search=force_full_search,
     )
 
 

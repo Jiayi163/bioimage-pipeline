@@ -37,6 +37,17 @@ from bioimage_pipeline.io import read_tiff, save_tiff
 from bioimage_pipeline.qc import generate_qc_for_cellprofiler_results
 
 
+@pytest.fixture(autouse=True)
+def _stub_cellprofiler_executable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Workflow validation checks for CellProfiler before mocked runs start."""
+    executable = tmp_path / "cellprofiler"
+    executable.write_text("stub", encoding="utf-8")
+    monkeypatch.setattr(
+        "bioimage_pipeline.cellprofiler_runner.find_cellprofiler_executable",
+        lambda preferred=None: executable,
+    )
+
+
 def _successful_run_result(output_dir: Path, log_dir: Path) -> CellProfilerRunResult:
     log_files = {
         "stdout": log_dir / "cellprofiler_stdout.log",

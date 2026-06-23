@@ -66,3 +66,32 @@ python examples/validate_real_data.py ^
 
 Re-run `examples/validate_real_data.py` whenever you change preprocessing,
 thresholding, or CellProfiler pipelines.
+
+## Threshold recommender E2E (Phase 17.6)
+
+Subset trial smoke test with a real CellProfiler install:
+
+```bash
+python examples/validate_threshold_recommender_e2e.py ^
+  --cppipe path\to\your\assay.cppipe ^
+  --input-dir path\to\real_images ^
+  --output-dir path\to\e2e_output ^
+  --apply
+```
+
+With synthetic spot TIFFs (pipeline generation smoke test only):
+
+```bash
+python examples/validate_threshold_recommender_e2e.py ^
+  --output-dir path\to\e2e_output
+```
+
+The script stages a subset, runs the threshold recommender trial, checks ranking
+artifacts, and optionally applies the top variant to the full input folder.
+
+**Recommended:** use your real assay `.cppipe` and lab images. Synthetic
+fixtures help test pipeline generation, but some CellProfiler installs may still
+report `Empty image set list` until real assay data is used.
+
+GUI equivalent: open `python examples/run_gui.py`, set paths, click **Threshold
+Recommender**, run subset trial, review ranking, then apply to the full dataset.

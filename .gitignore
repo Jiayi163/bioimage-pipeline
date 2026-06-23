@@ -22,6 +22,7 @@ output/
 validation_output/
 reports/
 test_output/
+_e2e_output/
 
 # CellProfiler / workflow run folders (often created beside the repo)
 cellprofiler_raw/

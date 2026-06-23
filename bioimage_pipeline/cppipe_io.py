@@ -319,6 +319,44 @@ def _append_module_setting_line(lines: list[str], setting_key: str, value: str) 
     return trimmed
 
 
+def _sync_module_settings_from_catalog(module: CppipeModule) -> CppipeModule:
+    """Add catalog default settings that are visible but missing from a module block."""
+    try:
+        definition = get_module_definition(module.name)
+    except KeyError:
+        return module
+
+    settings_dict = _module_settings_dict(module)
+    lines = list(module.lines)
+    for parameter in definition.parameters:
+        if parameter.label in settings_dict:
+            continue
+        if parameter.label in GUI_MANAGED_CPPIPE_SETTINGS:
+            continue
+        if not (
+            parameter.internal
+            or parameter.visibility.is_visible(settings_dict)
+        ):
+            continue
+        lines = _append_module_setting_line(lines, parameter.label, parameter.default)
+        settings_dict[parameter.label] = parameter.default
+
+    return _module_from_lines(lines, module.start_line, module.module_num)
+
+
+def _setting_controls_visibility(module_name: str, setting_key: str) -> bool:
+    """Return whether changing ``setting_key`` can reveal other catalog settings."""
+    try:
+        definition = get_module_definition(module_name)
+    except KeyError:
+        return False
+    for parameter in definition.parameters:
+        visibility = parameter.visibility
+        if visibility.mode == "conditional" and visibility.setting_label == setting_key:
+            return True
+    return False
+
+
 def update_module_setting(
     pipeline: CppipePipeline,
     module_index: int,
@@ -339,7 +377,13 @@ def update_module_setting(
     if not updated:
         lines = _append_module_setting_line(lines, setting_key, value)
 
-    modules[module_index] = _module_from_lines(lines, module.start_line, module.module_num)
+    new_module = _module_from_lines(lines, module.start_line, module.module_num)
+    if (
+        new_module.name in REQUIRED_SETUP_MODULES
+        and _setting_controls_visibility(new_module.name, setting_key)
+    ):
+        new_module = _sync_module_settings_from_catalog(new_module)
+    modules[module_index] = new_module
     return CppipePipeline(
         preamble=list(pipeline.preamble),
         modules=modules,
@@ -684,6 +728,7 @@ def module_template(
     *,
     module_num: int = 1,
     include_hidden: bool = False,
+    setting_overrides: dict[str, str] | None = None,
 ) -> CppipeModule:
     """Create a conservative ``.cppipe`` module block for a catalog module."""
     lines = [
@@ -697,15 +742,20 @@ def module_template(
     default_settings = {
         parameter.label: parameter.default for parameter in module.parameters
     }
+    if setting_overrides:
+        default_settings.update(setting_overrides)
     for parameter in module.parameters:
         if parameter.label in GUI_MANAGED_CPPIPE_SETTINGS:
             continue
-        if (
-            include_hidden
-            or parameter.internal
-            or parameter.visibility.is_visible(default_settings)
-        ):
-            lines.append(f"    {parameter.label}:{parameter.default}")
+        if parameter.internal and not include_hidden:
+            if parameter.visibility.mode != "always":
+                continue
+        if parameter.internal and parameter.default in ("[]", "{}", "None|None"):
+            if parameter.visibility.mode != "always":
+                continue
+        if not parameter.visibility.is_visible(default_settings):
+            continue
+        lines.append(f"    {parameter.label}:{default_settings[parameter.label]}")
     lines.append("")
     return _module_from_lines(lines, start_line=0, fallback_num=module_num)
 

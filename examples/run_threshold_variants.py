@@ -75,6 +75,7 @@ def _config_from_args(args: argparse.Namespace) -> ThresholdRecommenderConfig:
         ),
         full_dataset_trial=args.full_dataset_trial,
         fast_optimistic=not args.no_fast_optimistic,
+        force_full_search=args.force_full_search,
     )
 
 
@@ -249,6 +250,14 @@ def _add_trial_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Skip the fast optimistic single-candidate trial and run full variant search.",
     )
+    parser.add_argument(
+        "--force-full-search",
+        action="store_true",
+        help=(
+            "Run the full multi-variant search even when the optimistic candidate "
+            "passes QC (optimistic trial still runs for comparison)."
+        ),
+    )
 
 
 def _add_apply_arguments(parser: argparse.ArgumentParser) -> None:
@@ -311,6 +320,8 @@ def _run_trial(args: argparse.Namespace) -> int:
     )
     if config.fast_optimistic:
         print("Fast optimistic mode enabled: trying one Otsu adaptive candidate first.")
+    if config.force_full_search:
+        print("Force full search enabled: will not accept optimistic candidate.")
     trial_result = run_threshold_recommender_trial(config)
 
     failed = sum(1 for result in trial_result.run_results if not result.success)
@@ -322,6 +333,10 @@ def _run_trial(args: argparse.Namespace) -> int:
             print(f"Optimistic QC report: {trial_result.optimistic_qc_path}")
     elif trial_result.fell_back_to_full_search:
         print("Optimistic QC failed; fell back to full multi-variant search.")
+        if trial_result.optimistic_qc_path is not None:
+            print(f"Optimistic QC report: {trial_result.optimistic_qc_path}")
+    elif trial_result.forced_full_search:
+        print("Optimistic QC passed but full variant search was forced.")
         if trial_result.optimistic_qc_path is not None:
             print(f"Optimistic QC report: {trial_result.optimistic_qc_path}")
 

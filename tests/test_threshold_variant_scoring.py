@@ -146,7 +146,7 @@ def test_rank_flags_extreme_object_count_relative_to_baseline() -> None:
         _summary(
             "005_mce_adaptive_cf_0_9",
             "Minimum Cross-Entropy Adaptive (CF 0.9)",
-            object_count=400,
+            object_count=600,
             normal_frac=0.85,
             tiny_frac=0.05,
             huge_frac=0.05,
@@ -158,7 +158,30 @@ def test_rank_flags_extreme_object_count_relative_to_baseline() -> None:
         item for item in ranked if item.variant_id.endswith("mce_adaptive_cf_0_9")
     )
 
-    assert any("4.0x higher than baseline" in line for line in candidate.explanations)
+    assert candidate.object_count_ratio_vs_baseline == 6.0
+    assert any("6.0x higher than baseline" in line for line in candidate.explanations)
+
+
+def test_score_penalizes_extreme_object_count_despite_perfect_size_metrics() -> None:
+    baseline = _summary("001_baseline", "Baseline (original)", object_count=701)
+    over_detected = _summary(
+        "001_optimistic_otsu_adaptive",
+        "Optimistic Otsu Adaptive",
+        object_count=39_792,
+        normal_frac=1.0,
+        tiny_frac=0.0,
+        huge_frac=0.0,
+    )
+
+    score = score_threshold_variant_summary(
+        over_detected,
+        ThresholdVariantScoreConfig(),
+        baseline=baseline,
+    )
+
+    assert score.object_count_ratio_vs_baseline is not None
+    assert score.object_count_ratio_vs_baseline > 50.0
+    assert score.score < 0.5
 
 
 def test_save_threshold_variant_ranking_writes_csv_and_json(tmp_path: Path) -> None:
@@ -189,6 +212,7 @@ def test_save_threshold_variant_ranking_writes_csv_and_json(tmp_path: Path) -> N
         "reason",
         "success",
         "object_count",
+        "object_count_ratio_vs_baseline",
         "normal_frac",
         "tiny_frac",
         "huge_frac",

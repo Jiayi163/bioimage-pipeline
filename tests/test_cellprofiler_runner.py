@@ -230,6 +230,20 @@ def test_load_cellprofiler_measurements_reads_fixture_csvs() -> None:
     assert not load_result.warnings
 
 
+def test_load_cellprofiler_measurements_reads_cp1252_csv(tmp_path: Path) -> None:
+    output_dir = tmp_path / "measurements"
+    output_dir.mkdir()
+    csv_path = output_dir / "MyExpt_Image.csv"
+    csv_path.write_bytes(
+        b"Image_Number,FileName,Count_Cells\r\n1,test\xcfimage.tif,2\r\n"
+    )
+
+    load_result = load_cellprofiler_measurements(output_dir)
+
+    assert "MyExpt_Image" in load_result.tables
+    assert load_result.tables["MyExpt_Image"].loc[0, "FileName"] == "testÏimage.tif"
+
+
 def test_load_cellprofiler_measurements_empty_dir_raises(tmp_path) -> None:
     empty_dir = tmp_path / "empty"
     empty_dir.mkdir()

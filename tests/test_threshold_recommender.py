@@ -139,16 +139,36 @@ def test_run_threshold_recommender_trial_optimistic_pass_skips_full_search(
 ) -> None:
     input_dir, cppipe_path = _setup_input_and_cppipe(tmp_path)
     optimistic_root = tmp_path / "out" / "threshold_recommender" / "optimistic"
-    artifact = _artifact(
+    baseline_artifact = _artifact(
+        optimistic_root / "variant_001_baseline",
+        "001_baseline",
+        display_name="Baseline (original)",
+    )
+    optimistic_artifact = _artifact(
         optimistic_root / "variant_001_optimistic_otsu_adaptive",
         "001_optimistic_otsu_adaptive",
         display_name="Optimistic Otsu Adaptive",
     )
-    artifact.variant_dir.mkdir(parents=True)
-    artifact.pipeline_path.write_text(SAMPLE_CPPIPE, encoding="utf-8")
-    mock_write.return_value = [artifact]
-    mock_run.return_value = [_run_result(artifact)]
-    mock_compare.return_value = [_good_optimistic_summary(artifact)]
+    for artifact in (baseline_artifact, optimistic_artifact):
+        artifact.variant_dir.mkdir(parents=True)
+        artifact.pipeline_path.write_text(SAMPLE_CPPIPE, encoding="utf-8")
+    mock_write.return_value = [baseline_artifact, optimistic_artifact]
+    mock_run.return_value = [
+        _run_result(baseline_artifact),
+        _run_result(optimistic_artifact),
+    ]
+    mock_compare.return_value = [
+        ThresholdVariantMeasurementSummary(
+            variant_id=baseline_artifact.spec.variant_id,
+            display_name=baseline_artifact.spec.display_name,
+            success=True,
+            object_count=100,
+            tiny_frac=0.03,
+            huge_frac=0.01,
+            normal_frac=0.96,
+        ),
+        _good_optimistic_summary(optimistic_artifact),
+    ]
 
     config = ThresholdRecommenderConfig(
         imported_cppipe_path=cppipe_path,
@@ -161,8 +181,10 @@ def test_run_threshold_recommender_trial_optimistic_pass_skips_full_search(
 
     assert trial_result.trial_mode == "optimistic"
     assert trial_result.fell_back_to_full_search is False
+    assert trial_result.forced_full_search is False
     assert trial_result.optimistic_qc is not None
     assert trial_result.optimistic_qc.passed is True
+    assert trial_result.optimistic_qc.object_count_ratio_vs_baseline == 1.2
     assert trial_result.optimistic_qc_path is not None
     assert trial_result.optimistic_qc_path.is_file()
     assert mock_run.call_count == 1
@@ -186,25 +208,35 @@ def test_run_threshold_recommender_trial_optimistic_fail_falls_back_to_full_sear
         "001_optimistic_otsu_adaptive",
         display_name="Optimistic Otsu Adaptive",
     )
+    baseline_artifact = _artifact(
+        optimistic_root / "variant_001_baseline",
+        "001_baseline",
+        display_name="Baseline (original)",
+    )
     full_artifact = _artifact(variant_root / "variant_001_baseline", "001_baseline")
-    optimistic_artifact.variant_dir.mkdir(parents=True)
-    optimistic_artifact.pipeline_path.write_text(SAMPLE_CPPIPE, encoding="utf-8")
-    full_artifact.variant_dir.mkdir(parents=True)
-    full_artifact.pipeline_path.write_text(SAMPLE_CPPIPE, encoding="utf-8")
+    for artifact in (optimistic_artifact, baseline_artifact, full_artifact):
+        artifact.variant_dir.mkdir(parents=True)
+        artifact.pipeline_path.write_text(SAMPLE_CPPIPE, encoding="utf-8")
 
-    mock_write.side_effect = [[optimistic_artifact], [full_artifact]]
+    mock_write.side_effect = [[baseline_artifact, optimistic_artifact], [full_artifact]]
     mock_run.side_effect = [
-        [_run_result(optimistic_artifact)],
+        [_run_result(baseline_artifact), _run_result(optimistic_artifact)],
         [_run_result(full_artifact)],
     ]
     mock_compare.side_effect = [
         [
             ThresholdVariantMeasurementSummary(
+                variant_id=baseline_artifact.spec.variant_id,
+                display_name=baseline_artifact.spec.display_name,
+                success=True,
+                object_count=100,
+            ),
+            ThresholdVariantMeasurementSummary(
                 variant_id=optimistic_artifact.spec.variant_id,
                 display_name=optimistic_artifact.spec.display_name,
                 success=True,
                 object_count=0,
-            )
+            ),
         ],
         [_good_optimistic_summary(full_artifact)],
     ]
@@ -227,6 +259,71 @@ def test_run_threshold_recommender_trial_optimistic_fail_falls_back_to_full_sear
     assert mock_write.call_count == 2
     session = load_recommender_session(tmp_path / "out" / "threshold_recommender")
     assert session["fell_back_to_full_search"] is True
+
+
+@patch("bioimage_pipeline.threshold_recommender.compare_threshold_variant_run_results")
+@patch("bioimage_pipeline.threshold_recommender.run_threshold_variant_artifacts")
+@patch("bioimage_pipeline.threshold_recommender.write_threshold_pipeline_variants")
+def test_run_threshold_recommender_trial_force_full_search_runs_despite_optimistic_pass(
+    mock_write: MagicMock,
+    mock_run: MagicMock,
+    mock_compare: MagicMock,
+    tmp_path: Path,
+) -> None:
+    input_dir, cppipe_path = _setup_input_and_cppipe(tmp_path)
+    optimistic_root = tmp_path / "out" / "threshold_recommender" / "optimistic"
+    variant_root = tmp_path / "out" / "threshold_recommender" / "threshold_variants"
+    baseline_artifact = _artifact(
+        optimistic_root / "variant_001_baseline",
+        "001_baseline",
+        display_name="Baseline (original)",
+    )
+    optimistic_artifact = _artifact(
+        optimistic_root / "variant_001_optimistic_otsu_adaptive",
+        "001_optimistic_otsu_adaptive",
+        display_name="Optimistic Otsu Adaptive",
+    )
+    full_artifact = _artifact(variant_root / "variant_001_baseline", "001_baseline")
+    for artifact in (baseline_artifact, optimistic_artifact, full_artifact):
+        artifact.variant_dir.mkdir(parents=True)
+        artifact.pipeline_path.write_text(SAMPLE_CPPIPE, encoding="utf-8")
+
+    mock_write.side_effect = [[baseline_artifact, optimistic_artifact], [full_artifact]]
+    mock_run.side_effect = [
+        [_run_result(baseline_artifact), _run_result(optimistic_artifact)],
+        [_run_result(full_artifact)],
+    ]
+    mock_compare.side_effect = [
+        [
+            ThresholdVariantMeasurementSummary(
+                variant_id=baseline_artifact.spec.variant_id,
+                display_name=baseline_artifact.spec.display_name,
+                success=True,
+                object_count=100,
+            ),
+            _good_optimistic_summary(optimistic_artifact),
+        ],
+        [_good_optimistic_summary(full_artifact)],
+    ]
+
+    config = ThresholdRecommenderConfig(
+        imported_cppipe_path=cppipe_path,
+        input_dir=input_dir,
+        output_dir=tmp_path / "out",
+        subset_selection=ThresholdSubsetSelection(sample_count=3, sample_method="even"),
+        fast_optimistic=True,
+        force_full_search=True,
+        max_variants=1,
+    )
+    trial_result = run_threshold_recommender_trial(config)
+
+    assert trial_result.trial_mode == "full_search"
+    assert trial_result.forced_full_search is True
+    assert trial_result.fell_back_to_full_search is False
+    assert trial_result.optimistic_qc is not None
+    assert trial_result.optimistic_qc.passed is True
+    assert mock_run.call_count == 2
+    assert mock_write.call_count == 2
 
 
 def test_apply_confirmed_threshold_variant_requires_confirmation(tmp_path: Path) -> None:

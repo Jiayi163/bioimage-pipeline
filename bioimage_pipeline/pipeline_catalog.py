@@ -109,6 +109,7 @@ _MODULES: tuple[ModuleDefinition, ...] = (
                 "Select the rule criteria",
                 'and (extension does isimage) (directory doesnot containregexp "[\\\\\\\\/]\\\\.")',
                 "Rule expression used when image filtering is enabled.",
+                visibility=visible_when("Filter images?", "Images only", "Custom"),
             ),
         ),
         variable_revision_number=2,

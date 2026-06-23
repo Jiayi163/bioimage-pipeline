@@ -231,7 +231,7 @@ CP subprocess.
 
 ## Thresholding & spot-detection intelligence (Phase 17 — primary focus, next milestone)
 
-**Status: `PLANNED` — redesign roadmap around this milestone before implementing.**
+**Status: `IN VALIDATION` — core orchestration implemented; real-data E2E and EV scoring upgrades pending.**
 
 Phase 17 becomes the primary focus: a **CellProfiler-based assistive EV
 spot-detection recommender**. The user imports one pipeline; our code identifies
@@ -335,7 +335,7 @@ For every phase:
 | 15.1 | GUI workflow shell (run, logs, preview, export) | `PHASE COMPLETE` ✔ |
 | 15.2 | GUI pipeline builder & CP module exposure | `PHASE COMPLETE` ✔ |
 | 16 | Optional Python analysis enhancements (deprioritized vs EV Phase 17 work) | `PHASE NOT COMPLETE` |
-| 17 | **EV spot detection: CP pipeline variant recommender** | `PLANNED` |
+| 17 | **EV spot detection: CP pipeline variant recommender** | `IN VALIDATION` |
 | **S.0** | **Stack track prep — fix failing test, update docs** | `PHASE COMPLETE` ✔ |
 | **S.1** | **Stack I/O — AxisInfo, StackFrame, iter_stack_frames** | `PHASE COMPLETE` ✔ |
 | **S.2** | Stack data model — ImageStack, load from folder or file | `PHASE COMPLETE` ✔ |
@@ -728,7 +728,7 @@ external launches only as a documented fallback.
 | 15.1 | GUI workflow shell | `PHASE COMPLETE` ✔ |
 | 15.2 | GUI pipeline builder & CP module exposure | `PHASE COMPLETE` ✔ |
 | 16 | Optional Python analysis enhancements (fallback engine only) | `PHASE NOT COMPLETE` |
-| 17 | **EV spot detection: CP pipeline variant recommender** | `PLANNED` |
+| 17 | **EV spot detection: CP pipeline variant recommender** | `IN VALIDATION` |
 
 ## Phase 10.1: CellProfiler Integration Validation
 
@@ -1810,13 +1810,14 @@ replace biological validation by the user.
 
 | Sub-phase | Goal | Status |
 |-----------|------|--------|
-| 17.0 | Design spec: EV spot assay profile, scoring metrics, threshold-setting extraction rules | `PLANNED` |
-| 17.1 | Threshold-setting extractor: parse imported `.cppipe`, identify tunable threshold settings | `PLANNED` |
-| 17.2 | Pipeline variant generator: clone pipelines, bounded setting grids (global + adaptive) | `PLANNED` |
-| 17.3 | Multi-variant CellProfiler runner: one headless run per variant, organized per-variant outputs | `PLANNED` |
-| 17.4 | Output comparator: spot counts, size/intensity summaries, heuristic ranking | `DONE` |
-| 17.5A | Heuristic scoring with explanations (no auto-apply) | `DONE` |
-| 17.5B | Subset-first trial GUI, confirmed full-dataset apply, human review loop | `DONE` |
+| 17.0 | Design spec: EV spot assay profile, scoring metrics, threshold-setting extraction rules | `PARTIAL` — architecture in plan; assay profile doc pending |
+| 17.1 | Threshold-setting extractor: parse imported `.cppipe`, identify tunable threshold settings | `IMPLEMENTED` |
+| 17.2 | Pipeline variant generator: clone pipelines, bounded setting grids (global + adaptive) | `IMPLEMENTED` |
+| 17.3 | Multi-variant CellProfiler runner: one headless run per variant, organized per-variant outputs | `IMPLEMENTED` |
+| 17.4 | Output comparator: spot counts, size/intensity summaries, heuristic ranking | `IMPLEMENTED` |
+| 17.5A | Heuristic scoring with explanations (no auto-apply) | `IMPLEMENTED` |
+| 17.5B | Subset-first trial GUI, confirmed full-dataset apply, human review loop | `IMPLEMENTED` |
+| 17.6 | Real-data validation, colocalization-aware scoring, confirmed-apply workflow hardening | `NEXT` |
 
 **Subset-first recommender workflow (implemented):**
 
@@ -1829,18 +1830,21 @@ replace biological validation by the user.
 
 ### Requested deliverable before implementing
 
-Before implementing Phase 17, provide:
+The items below were drafted before the initial Phase 17 implementation. Core
+orchestration (17.1–17.5B) is now in the codebase; remaining work is validation
+and biological scoring (17.6):
 
-1. Updated architecture proposal (CellProfiler variant workflow).
-2. Revised roadmap focused on EV fluorescence spot detection.
-3. Threshold-setting extraction and variant-generation design.
-4. Multi-variant CellProfiler run orchestration plan.
-5. Output comparison and ranking plan.
-6. Validation strategy.
-7. Biological-quality scoring strategy for spot detection and colocalization.
-8. GUI comparison panel design (global vs adaptive visible in final stage).
+1. Updated architecture proposal (CellProfiler variant workflow). — **done in this plan**
+2. Revised roadmap focused on EV fluorescence spot detection. — **done**
+3. Threshold-setting extraction and variant-generation design. — **implemented**
+4. Multi-variant CellProfiler run orchestration plan. — **implemented**
+5. Output comparison and ranking plan. — **implemented (heuristic; colocalization pending)**
+6. Validation strategy. — **next (17.6)**
+7. Biological-quality scoring strategy for spot detection and colocalization. — **partial; 17.6**
+8. GUI comparison panel design (global vs adaptive visible in final stage). — **implemented in Threshold Recommender window**
 
-Status: `PLANNED` (do not start coding until this design/roadmap is finalized)
+Status: `IN VALIDATION` — run subset trials on real EV images before expanding scope
+(ISO / ApplyThreshold modules, colocalization scoring).
 
 ## Optional future work (not scheduled)
 

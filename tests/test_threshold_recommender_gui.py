@@ -69,3 +69,17 @@ def test_build_recommender_config_can_disable_fast_optimistic() -> None:
     )
 
     assert config.fast_optimistic is False
+
+
+def test_build_recommender_config_can_force_full_search() -> None:
+    config = build_recommender_config(
+        imported_cppipe_path="pipeline.cppipe",
+        input_dir="input",
+        output_dir="output",
+        cellprofiler_executable="cellprofiler",
+        subset_count=3,
+        subset_method="first",
+        force_full_search=True,
+    )
+
+    assert config.force_full_search is True
