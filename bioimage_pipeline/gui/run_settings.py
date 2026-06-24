@@ -275,3 +275,12 @@ def parse_bool_setting(value: str | None, *, default: bool) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     return default
+
+
+def extract_recent_workflow_paths(settings: dict[str, str]) -> dict[str, str]:
+    """Return saved experiment paths for explicit 'Load recent paths' actions."""
+    return {
+        INPUT_DIR_KEY: settings.get(INPUT_DIR_KEY, "").strip(),
+        OUTPUT_DIR_KEY: settings.get(OUTPUT_DIR_KEY, "").strip(),
+        CPPIPE_PATH_KEY: settings.get(CPPIPE_PATH_KEY, "").strip(),
+    }

@@ -32,6 +32,8 @@ class MainWorkflowPanel:
     run_button: Any
     open_results_button: Any
     threshold_recommender_button: Any
+    load_recent_paths_button: Any
+    clear_session_button: Any
 
 
 def build_main_workflow_panel(
@@ -50,7 +52,6 @@ def build_main_workflow_panel(
     ttk.Label(parent, text="Default Input Folder").grid(row=0, column=0, sticky="w", pady=2)
     input_dir_entry = ttk.Entry(parent)
     input_dir_entry.grid(row=0, column=1, sticky="ew", padx=(8, 8), pady=2)
-    input_dir_entry.insert(0, saved_settings.get(INPUT_DIR_KEY, ""))
     ttk.Button(
         parent,
         text="Browse",
@@ -60,7 +61,6 @@ def build_main_workflow_panel(
     ttk.Label(parent, text="Default Output Folder").grid(row=1, column=0, sticky="w", pady=2)
     output_dir_entry = ttk.Entry(parent)
     output_dir_entry.grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=2)
-    output_dir_entry.insert(0, saved_settings.get(OUTPUT_DIR_KEY, ""))
     ttk.Button(
         parent,
         text="Browse",
@@ -130,6 +130,16 @@ def build_main_workflow_panel(
         text="Threshold Recommender…",
     )
     threshold_recommender_button.pack(side="left", padx=(8, 0))
+    load_recent_paths_button = ttk.Button(
+        run_buttons,
+        text="Load recent paths…",
+    )
+    load_recent_paths_button.pack(side="left", padx=(8, 0))
+    clear_session_button = ttk.Button(
+        run_buttons,
+        text="Clear session",
+    )
+    clear_session_button.pack(side="left", padx=(8, 0))
 
     return MainWorkflowPanel(
         input_dir_entry=input_dir_entry,
@@ -142,4 +152,6 @@ def build_main_workflow_panel(
         run_button=run_button,
         open_results_button=open_results_button,
         threshold_recommender_button=threshold_recommender_button,
+        load_recent_paths_button=load_recent_paths_button,
+        clear_session_button=clear_session_button,
     )

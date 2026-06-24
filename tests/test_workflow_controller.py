@@ -6,11 +6,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from bioimage_pipeline.gui.run_settings import (
+    CELLPROFILER_SETTINGS_KEY,
     CPPIPE_PATH_KEY,
     FORCE_OIR_REPROJECT_KEY,
     INPUT_DIR_KEY,
     OUTPUT_DIR_KEY,
     collect_run_settings_from_values,
+    extract_recent_workflow_paths,
     parse_bool_setting,
 )
 from bioimage_pipeline.gui.workflow_controller import (
@@ -59,6 +61,86 @@ def test_collect_run_settings_from_values_persists_workflow_paths() -> None:
     assert payload[INPUT_DIR_KEY] == "input"
     assert payload[OUTPUT_DIR_KEY] == "output"
     assert payload[FORCE_OIR_REPROJECT_KEY] == "true"
+
+
+def test_extract_recent_workflow_paths_returns_saved_experiment_paths() -> None:
+    recent = extract_recent_workflow_paths(
+        {
+            INPUT_DIR_KEY: " C:\\data\\in ",
+            OUTPUT_DIR_KEY: "C:\\data\\out",
+            CPPIPE_PATH_KEY: "C:\\assay.cppipe",
+        }
+    )
+
+    assert recent[INPUT_DIR_KEY] == "C:\\data\\in"
+    assert recent[OUTPUT_DIR_KEY] == "C:\\data\\out"
+    assert recent[CPPIPE_PATH_KEY] == "C:\\assay.cppipe"
+
+
+def test_build_main_workflow_panel_starts_with_blank_experiment_paths() -> None:
+    import tkinter as tk
+    from tkinter import ttk
+
+    from bioimage_pipeline.gui.panels.main_workflow_panel import build_main_workflow_panel
+
+    root = tk.Tk()
+    root.withdraw()
+    frame = ttk.Frame(root)
+    panel = build_main_workflow_panel(
+        frame,
+        saved_settings={
+            INPUT_DIR_KEY: "C:\\old\\input",
+            OUTPUT_DIR_KEY: "C:\\old\\output",
+            CELLPROFILER_SETTINGS_KEY: "cellprofiler.exe",
+        },
+        browse_folder=lambda _entry: None,
+        browse_file=lambda _entry: None,
+    )
+
+    assert panel.input_dir_entry.get() == ""
+    assert panel.output_dir_entry.get() == ""
+    assert panel.cellprofiler_executable_entry.get() == "cellprofiler.exe"
+    assert panel.clear_session_button is not None
+    root.destroy()
+
+
+def test_clear_session_button_clears_experiment_fields_but_keeps_cellprofiler_path() -> None:
+    import tkinter as tk
+    from tkinter import ttk
+
+    from bioimage_pipeline.gui.panels.main_workflow_panel import build_main_workflow_panel
+    from bioimage_pipeline.gui.workflow_session_reset import clear_experiment_paths_from_settings
+
+    root = tk.Tk()
+    root.withdraw()
+    frame = ttk.Frame(root)
+    panel = build_main_workflow_panel(
+        frame,
+        saved_settings={CELLPROFILER_SETTINGS_KEY: "C:\\CellProfiler.exe"},
+        browse_folder=lambda _entry: None,
+        browse_file=lambda _entry: None,
+    )
+    panel.input_dir_entry.insert(0, "C:\\data\\in")
+    panel.output_dir_entry.insert(0, "C:\\data\\out")
+
+    panel.input_dir_entry.delete(0, "end")
+    panel.output_dir_entry.delete(0, "end")
+
+    cleared_settings = clear_experiment_paths_from_settings(
+        {
+            INPUT_DIR_KEY: "C:\\data\\in",
+            OUTPUT_DIR_KEY: "C:\\data\\out",
+            CELLPROFILER_SETTINGS_KEY: panel.cellprofiler_executable_entry.get(),
+        }
+    )
+
+    assert panel.input_dir_entry.get() == ""
+    assert panel.output_dir_entry.get() == ""
+    assert panel.cellprofiler_executable_entry.get() == "C:\\CellProfiler.exe"
+    assert INPUT_DIR_KEY not in cleared_settings
+    assert OUTPUT_DIR_KEY not in cleared_settings
+    assert cleared_settings[CELLPROFILER_SETTINGS_KEY] == "C:\\CellProfiler.exe"
+    root.destroy()
 
 
 def test_build_gui_workflow_config_maps_force_oir_reproject() -> None:

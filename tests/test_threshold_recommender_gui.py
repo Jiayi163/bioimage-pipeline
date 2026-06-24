@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from bioimage_pipeline.gui.threshold_recommender_helpers import (
     build_recommender_config,
     selected_manual_subset_names,
@@ -83,3 +85,17 @@ def test_build_recommender_config_can_force_full_search() -> None:
     )
 
     assert config.force_full_search is True
+
+
+def test_build_recommender_config_passes_reference_mask_dir() -> None:
+    config = build_recommender_config(
+        imported_cppipe_path="pipeline.cppipe",
+        input_dir="input",
+        output_dir="output",
+        cellprofiler_executable="cellprofiler",
+        subset_count=3,
+        subset_method="first",
+        reference_mask_dir=r"C:\refs\masks",
+    )
+
+    assert config.reference_mask_dir == Path(r"C:\refs\masks")

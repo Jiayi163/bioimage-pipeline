@@ -571,7 +571,10 @@ def launch_workflow_shell() -> None:
     )
     from bioimage_pipeline.gui.run_settings import (
         CPPIPE_PATH_KEY,
+        INPUT_DIR_KEY,
+        OUTPUT_DIR_KEY,
         collect_run_settings_from_values,
+        extract_recent_workflow_paths,
         load_gui_run_settings,
         save_gui_run_settings,
         sync_discovered_executables_to_settings,
@@ -579,10 +582,17 @@ def launch_workflow_shell() -> None:
     from bioimage_pipeline.gui.threshold_recommender_window import (
         ThresholdRecommenderLaunchContext,
         launch_threshold_recommender_window,
+        reset_open_threshold_recommender_windows,
     )
     from bioimage_pipeline.gui.workflow_controller import (
         WorkflowFormValues,
         prepare_workflow_run,
+    )
+    from bioimage_pipeline.gui.workflow_session_reset import (
+        clear_experiment_paths_from_settings,
+        needs_reset_confirmation,
+        workflow_has_experiment_fields,
+        workflow_run_actions_enabled,
     )
 
     root = tk.Tk()
@@ -638,6 +648,7 @@ def launch_workflow_shell() -> None:
         refresh_module_list(module_list)
         status.set(f"Imported {selected}")
         persist_settings()
+        update_workflow_action_states()
 
     def browse_pipeline(module_list: tk.Listbox) -> None:
         file_open(module_list)
@@ -824,6 +835,93 @@ def launch_workflow_shell() -> None:
         )
         save_gui_run_settings(payload)
 
+    def results_panel_has_display() -> bool:
+        return polish_panel._last_summary is not None
+
+    def update_workflow_action_states() -> None:
+        enabled = workflow_run_actions_enabled(
+            cppipe_path=pipeline_path_var.get(),
+            input_dir=workflow_panel.input_dir_entry.get(),
+            output_dir=workflow_panel.output_dir_entry.get(),
+            running=run_state["running"],
+        )
+        run_state_value = "normal" if enabled else "disabled"
+        workflow_panel.run_button.configure(state=run_state_value)
+        workflow_panel.threshold_recommender_button.configure(state=run_state_value)
+        output_dir = workflow_panel.output_dir_entry.get().strip()
+        open_results_state = "normal" if output_dir and not run_state["running"] else "disabled"
+        workflow_panel.open_results_button.configure(state=open_results_state)
+        clear_state = "disabled" if run_state["running"] else "normal"
+        workflow_panel.clear_session_button.configure(state=clear_state)
+
+    def apply_cleared_experiment_state(*, status_message: str) -> None:
+        pipeline_path_var.set("")
+        imported_state["state"] = None
+        refresh_module_list(module_list)
+        refresh_title()
+
+        workflow_panel.input_dir_entry.delete(0, "end")
+        workflow_panel.output_dir_entry.delete(0, "end")
+
+        polish_panel.clear_session()
+        reset_open_threshold_recommender_windows()
+
+        payload = clear_experiment_paths_from_settings(load_gui_run_settings())
+        payload.update(
+            collect_run_settings_from_values(
+                cellprofiler_executable=workflow_panel.cellprofiler_executable_entry.get().strip(),
+                fiji_executable=workflow_panel.fiji_executable_entry.get().strip(),
+                oir_projection_method=preprocessing_panel.oir_projection_method_var.get().strip(),
+                fiji_macro_path=workflow_panel.fiji_macro_entry.get().strip(),
+                oir_projection_engine=preprocessing_panel.oir_projection_engine_var.get().strip(),
+                export_fiji_tiffs=workflow_panel.export_fiji_var.get(),
+                generate_qc=workflow_panel.generate_qc_var.get(),
+                force_oir_reproject=preprocessing_panel.force_oir_reproject_var.get(),
+            )
+        )
+        save_gui_run_settings(payload)
+        status.set(status_message)
+        update_workflow_action_states()
+
+    def clear_experiment_session() -> None:
+        if run_state["running"]:
+            messagebox.showwarning(
+                "Clear session",
+                "A workflow run is in progress. Wait for it to finish before clearing.",
+            )
+            return
+
+        values = current_form_values()
+        has_fields = workflow_has_experiment_fields(
+            cppipe_path=values.cppipe_path,
+            input_dir=values.input_dir,
+            output_dir=values.output_dir,
+            pipeline_loaded=imported_state["state"] is not None,
+        )
+        if not has_fields and not results_panel_has_display():
+            status.set("Session is already clear.")
+            return
+
+        if needs_reset_confirmation(
+            cppipe_path=values.cppipe_path,
+            input_dir=values.input_dir,
+            output_dir=values.output_dir,
+            pipeline_loaded=imported_state["state"] is not None,
+            has_result_display=results_panel_has_display(),
+            run_in_progress=run_state["running"],
+        ):
+            proceed = messagebox.askyesno(
+                "Clear session",
+                "Clear the current pipeline, input/output paths, and displayed results?\n\n"
+                "Saved files on disk are not deleted.",
+            )
+            if not proceed:
+                return
+
+        apply_cleared_experiment_state(
+            status_message="Session cleared. Import a pipeline and set folders to start a new run.",
+        )
+
     def run_async() -> None:
         path_text = pipeline_path_var.get().strip()
         if not path_text:
@@ -881,6 +979,9 @@ def launch_workflow_shell() -> None:
 
         run_state["running"] = True
         workflow_panel.run_button.configure(state="disabled")
+        workflow_panel.threshold_recommender_button.configure(state="disabled")
+        workflow_panel.open_results_button.configure(state="disabled")
+        workflow_panel.clear_session_button.configure(state="disabled")
         status.set("Running headless CellProfiler/Fiji workflow...")
         polish_panel.set_running(output_dir=str(config.output_dir))
         schedule_log_polling(
@@ -905,7 +1006,7 @@ def launch_workflow_shell() -> None:
         polish_panel.set_idle()
         polish_panel.show_success(summary)
         status.set("Workflow complete.")
-        workflow_panel.run_button.configure(state="normal")
+        update_workflow_action_states()
 
     def _finish_error(exc: Exception) -> None:
         import traceback
@@ -914,7 +1015,7 @@ def launch_workflow_shell() -> None:
         polish_panel.set_idle()
         polish_panel.show_error("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
         status.set("Workflow failed.")
-        workflow_panel.run_button.configure(state="normal")
+        update_workflow_action_states()
 
     def open_results() -> None:
         output_dir = workflow_panel.output_dir_entry.get().strip()
@@ -961,20 +1062,60 @@ def launch_workflow_shell() -> None:
             ),
         )
 
+    def load_recent_paths(module_list: tk.Listbox) -> None:
+        recent = extract_recent_workflow_paths(load_gui_run_settings())
+        input_path = recent.get(INPUT_DIR_KEY, "")
+        output_path = recent.get(OUTPUT_DIR_KEY, "")
+        cppipe_path = recent.get(CPPIPE_PATH_KEY, "")
+        if not any((input_path, output_path, cppipe_path)):
+            messagebox.showinfo(
+                "Load recent paths",
+                "No recent input, output, or pipeline paths are saved yet.",
+            )
+            return
+
+        workflow_panel.input_dir_entry.delete(0, "end")
+        if input_path:
+            workflow_panel.input_dir_entry.insert(0, input_path)
+        workflow_panel.output_dir_entry.delete(0, "end")
+        if output_path:
+            workflow_panel.output_dir_entry.insert(0, output_path)
+
+        if cppipe_path:
+            try:
+                set_imported_pipeline(cppipe_path)
+            except Exception as exc:
+                pipeline_path_var.set(cppipe_path)
+                messagebox.showwarning(
+                    "Load recent paths",
+                    f"Restored pipeline path, but import validation failed:\n{exc}",
+                )
+        else:
+            pipeline_path_var.set("")
+            imported_state["state"] = None
+
+        refresh_module_list(module_list)
+        refresh_title()
+        status.set("Loaded recent workflow paths.")
+        update_workflow_action_states()
+
+    workflow_panel.load_recent_paths_button.configure(
+        command=lambda: load_recent_paths(module_list),
+    )
+    workflow_panel.clear_session_button.configure(command=clear_experiment_session)
     workflow_panel.run_button.configure(command=run_async)
     workflow_panel.open_results_button.configure(command=open_results)
     workflow_panel.threshold_recommender_button.configure(command=open_threshold_recommender)
 
+    for entry in (
+        workflow_panel.input_dir_entry,
+        workflow_panel.output_dir_entry,
+    ):
+        entry.bind("<KeyRelease>", lambda _event: update_workflow_action_states())
+    pipeline_path_var.trace_add("write", lambda *_args: update_workflow_action_states())
+
     if startup_warnings:
         polish_panel.summary_text.insert("end", "\n".join(startup_warnings))
-
-    saved_cppipe = saved_settings.get(CPPIPE_PATH_KEY, "").strip()
-    if saved_cppipe:
-        try:
-            set_imported_pipeline(saved_cppipe)
-            refresh_module_list(module_list)
-        except Exception:
-            pipeline_path_var.set(saved_cppipe)
 
     def on_close() -> None:
         persist_settings()
@@ -982,4 +1123,5 @@ def launch_workflow_shell() -> None:
 
     root.protocol("WM_DELETE_WINDOW", on_close)
     refresh_title()
+    update_workflow_action_states()
     root.mainloop()

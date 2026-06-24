@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,30 @@ class ThresholdRecommenderLaunchContext:
     input_dir: str
     output_dir: str
     cellprofiler_executable: str = "cellprofiler"
+
+
+_RESET_HANDLERS: list[Callable[[], None]] = []
+
+
+def reset_open_threshold_recommender_windows() -> None:
+    """Clear trial display and reference-mask state in open recommender windows."""
+    for handler in list(_RESET_HANDLERS):
+        handler()
+
+
+def _register_threshold_recommender_reset_handler(
+    handler: Callable[[], None],
+) -> Callable[[], None]:
+    """Register a reset handler and return an unregister callback."""
+    _RESET_HANDLERS.append(handler)
+
+    def unregister() -> None:
+        try:
+            _RESET_HANDLERS.remove(handler)
+        except ValueError:
+            pass
+
+    return unregister
 
 
 def launch_threshold_recommender_window(
@@ -142,14 +167,26 @@ def launch_threshold_recommender_window(
         row=4, column=0, sticky="w"
     )
     reference_masks_var = tk.StringVar(value="")
-    ttk.Entry(subset_frame, textvariable=reference_masks_var, width=72).grid(
+    ttk.Entry(subset_frame, textvariable=reference_masks_var).grid(
         row=4,
         column=1,
-        columnspan=3,
         sticky="ew",
-        padx=(8, 0),
+        padx=(8, 8),
         pady=(0, 4),
     )
+
+    def browse_reference_masks_folder() -> None:
+        from tkinter import filedialog
+
+        selected = filedialog.askdirectory()
+        if selected:
+            reference_masks_var.set(selected)
+
+    ttk.Button(
+        subset_frame,
+        text="Browse",
+        command=browse_reference_masks_folder,
+    ).grid(row=4, column=2, sticky="w", pady=(0, 4))
 
     image_list = tk.Listbox(
         subset_frame,
@@ -846,6 +883,38 @@ def launch_threshold_recommender_window(
         side="left",
         padx=(8, 0),
     )
+
+    def clear_session_state() -> None:
+        if not window_is_open():
+            return
+        state["trial"] = None
+        ranking_tree.delete(*ranking_tree.get_children())
+        per_image_tree.delete(*per_image_tree.get_children())
+        reference_masks_var.set("")
+        compare_image_var.set("")
+        compare_variant_a_var.set("")
+        compare_variant_b_var.set("")
+        compare_image_combo.configure(values=[])
+        compare_variant_a_combo.configure(values=[])
+        compare_variant_b_combo.configure(values=[])
+        for label in compare_labels.values():
+            label.configure(image="", text="")
+            label.image = None  # type: ignore[attr-defined]
+        preview_label.configure(
+            image="",
+            text="Run a subset trial to preview variants.",
+        )
+        preview_label.image = None  # type: ignore[attr-defined]
+        apply_button.configure(state="disabled")
+        status_var.set(
+            "Session cleared from main workflow. Close this window and reopen "
+            "after configuring new paths.",
+        )
+
+    unregister_reset_handler = _register_threshold_recommender_reset_handler(
+        clear_session_state,
+    )
+    window.protocol("WM_DELETE_WINDOW", lambda: (unregister_reset_handler(), window.destroy()))
 
     refresh_image_list()
     reload_existing_session()

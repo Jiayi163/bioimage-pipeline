@@ -46,6 +46,17 @@ class ResultsPolishPanel:
         self.progress_bar.stop()
         self.progress_bar.grid_remove()
 
+    def clear_session(self) -> None:
+        """Clear displayed results from a previous workflow run."""
+        self._active_output_dir = None
+        self._last_summary = None
+        self.set_idle()
+        self.summary_text.delete("1.0", "end")
+        self.logs_text.delete("1.0", "end")
+        self.measurements_text.delete("1.0", "end")
+        self.preview_label.configure(image="", text="")
+        self.preview_label.image = None  # type: ignore[attr-defined]
+
     def update_logs(self, output_dir: str | None = None) -> None:
         """Refresh the live log panel from workflow log files."""
         target = output_dir or self._active_output_dir
