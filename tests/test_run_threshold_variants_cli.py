@@ -61,6 +61,7 @@ def test_run_threshold_variants_default_trial_command(
     trial_result.summaries = []
     trial_result.ranked_scores = []
     trial_result.run_results = []
+    trial_result.gt_ranked_scores = []
     mock_trial.return_value = trial_result
 
     spec = importlib.util.spec_from_file_location("run_threshold_variants", SCRIPT)

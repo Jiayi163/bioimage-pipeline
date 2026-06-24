@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
@@ -43,6 +43,31 @@ class MaskComparison:
     foreground_pixels_b: int
     object_count_a: int
     object_count_b: int
+
+
+@dataclass
+class ObjectLevelComparison:
+    """Object-level agreement between predicted and reference segmentations."""
+
+    true_positives: int
+    false_positives: int
+    false_negatives: int
+    precision: float
+    recall: float
+    f1: float
+    count_error: int
+    count_ratio: float | None
+    predicted_object_count: int
+    reference_object_count: int
+    match_iou_threshold: float
+
+
+@dataclass
+class SegmentationComparison:
+    """Combined pixel- and object-level segmentation agreement."""
+
+    pixel: MaskComparison
+    object_level: ObjectLevelComparison
 
 
 @dataclass
@@ -154,6 +179,156 @@ def compare_masks(mask_a: np.ndarray, mask_b: np.ndarray) -> MaskComparison:
         object_count_a=_count_objects(a),
         object_count_b=_count_objects(b),
     )
+
+
+def _object_masks_from_labels(
+    labels: np.ndarray,
+    object_ids: Sequence[int],
+) -> dict[int, np.ndarray]:
+    mapping: dict[int, np.ndarray] = {}
+    for object_id in object_ids:
+        mapping[int(object_id)] = labels == object_id
+    return mapping
+
+
+def _label_iou(mask_a: np.ndarray, mask_b: np.ndarray) -> float:
+    intersection = np.logical_and(mask_a, mask_b).sum()
+    union = np.logical_or(mask_a, mask_b).sum()
+    return float(intersection / union) if union else 0.0
+
+
+def compare_objects(
+    predicted_mask: np.ndarray,
+    reference_mask: np.ndarray,
+    *,
+    match_iou_threshold: float = 0.3,
+) -> ObjectLevelComparison:
+    """Match labeled objects and compute precision, recall, and F1."""
+    pred = _normalize_mask(predicted_mask)
+    ref = _normalize_mask(reference_mask)
+    if pred.shape != ref.shape:
+        raise ValueError(f"Mask shapes do not match: {pred.shape} vs {ref.shape}")
+
+    pred_labels = label_objects(pred)
+    ref_labels = label_objects(ref)
+    pred_ids = [int(value) for value in np.unique(pred_labels) if value > 0]
+    ref_ids = [int(value) for value in np.unique(ref_labels) if value > 0]
+
+    if not pred_ids and not ref_ids:
+        return ObjectLevelComparison(
+            true_positives=0,
+            false_positives=0,
+            false_negatives=0,
+            precision=1.0,
+            recall=1.0,
+            f1=1.0,
+            count_error=0,
+            count_ratio=1.0,
+            predicted_object_count=0,
+            reference_object_count=0,
+            match_iou_threshold=match_iou_threshold,
+        )
+
+    if not pred_ids:
+        return ObjectLevelComparison(
+            true_positives=0,
+            false_positives=0,
+            false_negatives=len(ref_ids),
+            precision=0.0,
+            recall=0.0,
+            f1=0.0,
+            count_error=len(ref_ids),
+            count_ratio=0.0,
+            predicted_object_count=0,
+            reference_object_count=len(ref_ids),
+            match_iou_threshold=match_iou_threshold,
+        )
+
+    if not ref_ids:
+        return ObjectLevelComparison(
+            true_positives=0,
+            false_positives=len(pred_ids),
+            false_negatives=0,
+            precision=0.0,
+            recall=0.0,
+            f1=0.0,
+            count_error=len(pred_ids),
+            count_ratio=None,
+            predicted_object_count=len(pred_ids),
+            reference_object_count=0,
+            match_iou_threshold=match_iou_threshold,
+        )
+
+    pred_masks = _object_masks_from_labels(pred_labels, pred_ids)
+    ref_masks = _object_masks_from_labels(ref_labels, ref_ids)
+
+    iou_matrix = np.zeros((len(pred_ids), len(ref_ids)), dtype=float)
+    for row, pred_id in enumerate(pred_ids):
+        for col, ref_id in enumerate(ref_ids):
+            iou_matrix[row, col] = _label_iou(
+                pred_masks[pred_id],
+                ref_masks[ref_id],
+            )
+
+    from scipy.optimize import linear_sum_assignment
+
+    row_indices, col_indices = linear_sum_assignment(-iou_matrix)
+    matched_pairs = 0
+    for row, col in zip(row_indices, col_indices, strict=True):
+        if iou_matrix[row, col] >= match_iou_threshold:
+            matched_pairs += 1
+
+    false_positives = len(pred_ids) - matched_pairs
+    false_negatives = len(ref_ids) - matched_pairs
+    true_positives = matched_pairs
+
+    precision = (
+        float(true_positives / (true_positives + false_positives))
+        if (true_positives + false_positives)
+        else 0.0
+    )
+    recall = (
+        float(true_positives / (true_positives + false_negatives))
+        if (true_positives + false_negatives)
+        else 0.0
+    )
+    f1 = (
+        float(2 * precision * recall / (precision + recall))
+        if (precision + recall)
+        else 0.0
+    )
+    count_error = abs(len(pred_ids) - len(ref_ids))
+    count_ratio = float(len(pred_ids) / len(ref_ids)) if len(ref_ids) else None
+
+    return ObjectLevelComparison(
+        true_positives=true_positives,
+        false_positives=false_positives,
+        false_negatives=false_negatives,
+        precision=precision,
+        recall=recall,
+        f1=f1,
+        count_error=count_error,
+        count_ratio=count_ratio,
+        predicted_object_count=len(pred_ids),
+        reference_object_count=len(ref_ids),
+        match_iou_threshold=match_iou_threshold,
+    )
+
+
+def compare_segmentation(
+    predicted_mask: np.ndarray,
+    reference_mask: np.ndarray,
+    *,
+    match_iou_threshold: float = 0.3,
+) -> SegmentationComparison:
+    """Compare predicted and reference masks at pixel and object level."""
+    pixel = compare_masks(predicted_mask, reference_mask)
+    object_level = compare_objects(
+        predicted_mask,
+        reference_mask,
+        match_iou_threshold=match_iou_threshold,
+    )
+    return SegmentationComparison(pixel=pixel, object_level=object_level)
 
 
 def _pick_area_column(dataframe: pd.DataFrame) -> str | None:

@@ -34,3 +34,6 @@ Thumbs.db
 
 # Stray pytest cache directories
 pytest-cache-files-*/
+
+# Debug session logs (local only)
+debug-*.log

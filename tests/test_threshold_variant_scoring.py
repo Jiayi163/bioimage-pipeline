@@ -74,7 +74,7 @@ def test_score_prefers_good_size_distribution_over_noisy_candidate() -> None:
 
     assert good_score.score > noisy_score.score
     assert any("tiny_frac = 0.48" in line for line in noisy_score.explanations)
-    assert any("normal_frac = 0.91" in line for line in good_score.explanations)
+    assert good_score.reason.startswith("Heuristic screening:")
 
 
 def test_score_marks_failed_variant_invalid() -> None:
@@ -209,6 +209,7 @@ def test_save_threshold_variant_ranking_writes_csv_and_json(tmp_path: Path) -> N
         "variant_id",
         "name",
         "score",
+        "screening_label",
         "reason",
         "success",
         "object_count",

@@ -27,6 +27,8 @@ def build_recommender_config(
     huge_area_px: float = 200.0,
     fast_optimistic: bool = True,
     force_full_search: bool = False,
+    reference_mask_dir: str | Path | None = None,
+    ground_truth_match_iou_threshold: float = 0.3,
 ) -> ThresholdRecommenderConfig:
     """Map GUI/CLI-like values to :class:`ThresholdRecommenderConfig`."""
     manual_names = manual_subset_image_names or []
@@ -49,6 +51,10 @@ def build_recommender_config(
         ),
         fast_optimistic=fast_optimistic,
         force_full_search=force_full_search,
+        reference_mask_dir=(
+            Path(reference_mask_dir) if reference_mask_dir else None
+        ),
+        ground_truth_match_iou_threshold=ground_truth_match_iou_threshold,
     )
 
 

@@ -10,9 +10,13 @@ import pytest
 
 from bioimage_pipeline.threshold_variant_comparison import (
     ThresholdVariantMeasurementSummary,
+    ThresholdVariantPerImageSummary,
     ThresholdVariantSizeThresholds,
+    compare_threshold_variant_per_image,
     compare_threshold_variant_run_results,
+    load_threshold_variant_per_image_comparison,
     save_threshold_variant_comparison,
+    save_threshold_variant_per_image_comparison,
     summarize_threshold_variant_measurements,
     threshold_variant_comparison_to_dataframe,
 )
@@ -223,3 +227,44 @@ def test_summarize_warns_when_no_object_tables_found(tmp_path: Path) -> None:
 
     assert summary.object_count is None
     assert any("No object measurement tables" in warning for warning in summary.warnings)
+
+
+def test_compare_threshold_variant_per_image_builds_rows(tmp_path: Path) -> None:
+    measurements_dir = tmp_path / "variant_001_baseline" / "measurements"
+    _write_measurements(measurements_dir)
+    run_result = _run_result(
+        measurements_dir,
+        variant_id="001_baseline",
+        display_name="Baseline (original)",
+    )
+
+    rows = compare_threshold_variant_per_image(
+        [run_result],
+        image_names=["sample.tif"],
+    )
+
+    assert len(rows) == 1
+    assert rows[0].object_count == 4
+    assert rows[0].image_name == "sample.tif"
+
+
+def test_load_threshold_variant_per_image_comparison_round_trip(tmp_path: Path) -> None:
+    rows = [
+        ThresholdVariantPerImageSummary(
+            variant_id="001_baseline",
+            display_name="Baseline",
+            image_number=1,
+            image_name="sample.tif",
+            success=True,
+            object_count=10,
+            foreground_coverage=0.02,
+            warnings=["test warning"],
+        )
+    ]
+    paths = save_threshold_variant_per_image_comparison(rows, tmp_path)
+    loaded = load_threshold_variant_per_image_comparison(paths["json"])
+
+    assert len(loaded) == 1
+    assert loaded[0].variant_id == "001_baseline"
+    assert loaded[0].object_count == 10
+    assert loaded[0].warnings == ["test warning"]

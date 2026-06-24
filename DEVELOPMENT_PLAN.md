@@ -1583,12 +1583,13 @@ Status: `PHASE NOT COMPLETE`
 
 ## Phase 17: EV Spot Detection & Threshold Intelligence (CellProfiler-based)
 
-Goal: build an **assistive auto-threshold / spot-detection recommender** for
+Goal: build a **Threshold Parameter Assistant** for
 confocal fluorescence EV-style images with sparse bright spots on a dark
 background. The user imports one CellProfiler pipeline; our code identifies
 threshold-related settings, generates candidate pipeline variants, runs
-CellProfiler for each variant, compares outputs, and selects the best result.
-It does **not** claim perfect biological segmentation and does **not**
+CellProfiler for each variant, compares outputs with heuristic screening, and
+presents results for human review. It does **not** claim optimal biological
+segmentation or ground-truth optimality and does **not**
 reimplement CellProfiler thresholding in Python.
 
 ```text
@@ -1600,9 +1601,9 @@ Our code creates candidate pipeline variants
 ↓
 CellProfiler runs each variant
 ↓
-Our code compares outputs
+Our code compares outputs with heuristic screening + QC warnings
 ↓
-Best result is selected and shown (user override)
+User reviews previews and confirms a setting for full-dataset apply
 ```
 
 ### Biological context
@@ -1817,34 +1818,41 @@ replace biological validation by the user.
 | 17.4 | Output comparator: spot counts, size/intensity summaries, heuristic ranking | `IMPLEMENTED` |
 | 17.5A | Heuristic scoring with explanations (no auto-apply) | `IMPLEMENTED` |
 | 17.5B | Subset-first trial GUI, confirmed full-dataset apply, human review loop | `IMPLEMENTED` |
-| 17.6 | Real-data validation, colocalization-aware scoring, confirmed-apply workflow hardening | `NEXT` |
+| 17.6 | Threshold Parameter Assistant (heuristic screening, previews, per-image QC) | `COMPLETE` |
+| 17.7 | Ground-truth mask catalog and pairing | `IMPLEMENTED` |
+| 17.8 | Pixel + object-level segmentation metrics | `IMPLEMENTED` |
+| 17.9 | GT-scored variant comparison and parallel ranking | `IMPLEMENTED` |
+| 17.10 | GT UX in assistant GUI/CLI | `IMPLEMENTED` |
+| 18.x | ML segmentation (only if GT proves CP insufficient) | `NOT SCHEDULED` |
 
 **Subset-first recommender workflow (implemented):**
 
 1. Stage a small representative image subset (auto-sampled or user-selected).
 2. Run all candidate `.cppipe` variants on the subset only.
-3. Compare measurements, rank with heuristic scores, save CSV/JSON + QC previews.
-4. User inspects top variants in the Threshold Recommender window.
+3. Compare measurements, rank with heuristic scores (and ground-truth scores when
+   reference masks are provided), save CSV/JSON + QC previews.
+4. User inspects top variants in the Threshold Parameter Assistant window.
 5. Only after explicit confirmation, run the chosen variant on the full dataset.
 6. The imported `.cppipe` is never modified automatically.
 
 ### Requested deliverable before implementing
 
 The items below were drafted before the initial Phase 17 implementation. Core
-orchestration (17.1–17.5B) is now in the codebase; remaining work is validation
-and biological scoring (17.6):
+orchestration (17.1–17.5B) is in the codebase; assistant UX (17.6) and
+ground-truth scoring (17.7–17.10) are implemented:
 
 1. Updated architecture proposal (CellProfiler variant workflow). — **done in this plan**
 2. Revised roadmap focused on EV fluorescence spot detection. — **done**
 3. Threshold-setting extraction and variant-generation design. — **implemented**
 4. Multi-variant CellProfiler run orchestration plan. — **implemented**
-5. Output comparison and ranking plan. — **implemented (heuristic; colocalization pending)**
-6. Validation strategy. — **next (17.6)**
-7. Biological-quality scoring strategy for spot detection and colocalization. — **partial; 17.6**
-8. GUI comparison panel design (global vs adaptive visible in final stage). — **implemented in Threshold Recommender window**
+5. Output comparison and ranking plan. — **implemented (heuristic; GT when masks provided)**
+6. Validation strategy. — **implemented (17.7–17.10)**
+7. Biological-quality scoring strategy for spot detection and colocalization. — **GT-primary when masks available; heuristic fallback**
+8. GUI comparison panel design (global vs adaptive visible in final stage). — **implemented in Threshold Parameter Assistant window**
 
-Status: `IN VALIDATION` — run subset trials on real EV images before expanding scope
-(ISO / ApplyThreshold modules, colocalization scoring).
+Status: `IN VALIDATION` — run subset trials on real EV images with optional
+reference masks before expanding scope (ISO / ApplyThreshold modules,
+colocalization scoring, ML).
 
 ## Optional future work (not scheduled)
 

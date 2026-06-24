@@ -7,9 +7,13 @@ import random
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import Any, Literal, Sequence
+
+import numpy as np
 
 from bioimage_pipeline.gui.workflow_editor import scan_detected_images
+from bioimage_pipeline.io import read_tiff
+from bioimage_pipeline.validation import inspect_image
 
 SubsetMode = Literal["auto", "manual"]
 SubsetSampleMethod = Literal["first", "even", "random"]
@@ -17,6 +21,8 @@ SubsetSampleMethod = Literal["first", "even", "random"]
 DEFAULT_SUBSET_COUNT = 5
 DEFAULT_SAMPLE_METHOD: SubsetSampleMethod = "even"
 SUBSET_MANIFEST_FILENAME = "subset_manifest.json"
+SUBSET_CHARACTERIZATION_FILENAME = "subset_characterization.json"
+SUBSET_CHARACTERIZATION_CSV = "subset_characterization.csv"
 
 
 @dataclass(frozen=True)
@@ -216,3 +222,107 @@ def load_subset_manifest(path: str | Path) -> ThresholdSubsetManifest:
     manifest_path = Path(path)
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     return ThresholdSubsetManifest.from_dict(payload)
+
+
+@dataclass(frozen=True)
+class SubsetImageCharacterization:
+    """Intensity and histogram summary for one subset image."""
+
+    image_name: str
+    shape: tuple[int, ...]
+    dtype: str
+    min_value: float
+    max_value: float
+    mean_intensity: float
+    p5_intensity: float
+    p50_intensity: float
+    p95_intensity: float
+    background_mean: float
+    dynamic_range: float
+    estimated_snr: float | None
+    limitations: tuple[str, ...] = field(default_factory=tuple)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "image_name": self.image_name,
+            "shape": list(self.shape),
+            "dtype": self.dtype,
+            "min_value": self.min_value,
+            "max_value": self.max_value,
+            "mean_intensity": self.mean_intensity,
+            "p5_intensity": self.p5_intensity,
+            "p50_intensity": self.p50_intensity,
+            "p95_intensity": self.p95_intensity,
+            "background_mean": self.background_mean,
+            "dynamic_range": self.dynamic_range,
+            "estimated_snr": self.estimated_snr,
+            "limitations": list(self.limitations),
+        }
+
+
+def characterize_subset_image(image_path: Path) -> SubsetImageCharacterization:
+    """Summarize one staged subset image for pre-trial review."""
+    array = np.asarray(read_tiff(image_path))
+    properties = inspect_image(array)
+    working = array[0] if array.ndim == 3 and array.shape[0] <= 4 else array
+    if working.ndim != 2:
+        working = np.squeeze(working)
+    plane = np.asarray(working, dtype=np.float64)
+    background = plane[plane <= np.percentile(plane, 25)]
+    background_mean = float(background.mean()) if background.size else 0.0
+
+    return SubsetImageCharacterization(
+        image_name=image_path.name,
+        shape=properties.shape,
+        dtype=properties.dtype,
+        min_value=properties.min_value,
+        max_value=properties.max_value,
+        mean_intensity=properties.mean_intensity,
+        p5_intensity=float(np.percentile(plane, 5)),
+        p50_intensity=float(np.percentile(plane, 50)),
+        p95_intensity=float(np.percentile(plane, 95)),
+        background_mean=background_mean,
+        dynamic_range=properties.dynamic_range,
+        estimated_snr=properties.estimated_snr,
+        limitations=tuple(properties.limitations),
+    )
+
+
+def build_subset_characterization_report(
+    staged_dir: str | Path,
+    image_names: Sequence[str],
+) -> list[SubsetImageCharacterization]:
+    """Characterize each image in a staged subset folder."""
+    staged_path = Path(staged_dir)
+    report: list[SubsetImageCharacterization] = []
+    for name in image_names:
+        image_path = staged_path / name
+        if not image_path.is_file():
+            raise FileNotFoundError(f"Subset image not found for characterization: {image_path}")
+        report.append(characterize_subset_image(image_path))
+    return report
+
+
+def save_subset_characterization_report(
+    report: Sequence[SubsetImageCharacterization],
+    output_dir: str | Path,
+) -> dict[str, Path]:
+    """Write subset characterization JSON and CSV under ``output_dir``."""
+    destination = Path(output_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+    json_path = (destination / SUBSET_CHARACTERIZATION_FILENAME).resolve()
+    csv_path = (destination / SUBSET_CHARACTERIZATION_CSV).resolve()
+
+    payload = [entry.to_dict() for entry in report]
+    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    import pandas as pd
+
+    pd.DataFrame(payload).to_csv(csv_path, index=False)
+    return {"json": json_path, "csv": csv_path}
+
+
+def load_subset_characterization_report(path: str | Path) -> list[dict[str, Any]]:
+    """Load subset characterization JSON."""
+    report_path = Path(path)
+    return json.loads(report_path.read_text(encoding="utf-8"))

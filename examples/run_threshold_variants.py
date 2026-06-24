@@ -1,11 +1,12 @@
-"""Run subset-first threshold recommender trials and confirmed full applies.
+"""Run subset-first threshold parameter assistant trials and confirmed full applies.
 
 Phase 17 orchestration CLI:
 
-1. ``trial`` (default) — stage a subset, run candidate variants, rank with heuristics
+1. ``trial`` (default) — stage a subset, run candidate variants, screen with heuristics
 2. ``apply`` — after user review, run one chosen variant on the full dataset
 
 The imported pipeline file is never modified. Nothing is auto-applied without ``--confirm``.
+Heuristic rankings are screening aids only, not ground-truth optimality.
 """
 
 from __future__ import annotations
@@ -31,6 +32,9 @@ from bioimage_pipeline.threshold_variant_comparison import (
 )
 from bioimage_pipeline.threshold_variant_scoring import (
     threshold_variant_ranking_to_dataframe,
+)
+from bioimage_pipeline.threshold_variant_gt_scoring import (
+    ground_truth_variant_scores_to_dataframe,
 )
 
 
@@ -76,6 +80,14 @@ def _config_from_args(args: argparse.Namespace) -> ThresholdRecommenderConfig:
         full_dataset_trial=args.full_dataset_trial,
         fast_optimistic=not args.no_fast_optimistic,
         force_full_search=args.force_full_search,
+        reference_mask_dir=(
+            args.reference_mask_dir.resolve()
+            if getattr(args, "reference_mask_dir", None) is not None
+            else None
+        ),
+        ground_truth_match_iou_threshold=getattr(
+            args, "ground_truth_match_iou_threshold", 0.3
+        ),
     )
 
 
@@ -124,7 +136,7 @@ def _print_trial_summary(trial_result: object, *, json_summary: bool) -> None:
         )
         top = trial_result.ranked_scores[0]
         print()
-        print("Top candidate (not auto-applied):")
+        print("Top candidate (not auto-applied; review previews and per-image QC first):")
         print(f"  {top.variant_id} — {top.display_name} (score={top.score:.2f})")
         print(f"  Reason: {top.reason}")
         for line in top.explanations[:3]:
@@ -139,6 +151,27 @@ def _print_trial_summary(trial_result: object, *, json_summary: bool) -> None:
         )
     else:
         print("  (no ranked variants)")
+
+    if getattr(trial_result, "gt_ranked_scores", None):
+        gt_scores = trial_result.gt_ranked_scores
+        if gt_scores:
+            print()
+            print("Ground-truth ranking:")
+            print(
+                ground_truth_variant_scores_to_dataframe(gt_scores)[
+                    ["gt_rank", "variant_id", "name", "gt_score", "gt_label", "mean_f1"]
+                ].to_string(index=False)
+            )
+            top_gt = gt_scores[0]
+            print()
+            print("Top GT match (review previews before applying):")
+            print(
+                f"  {top_gt.variant_id} — {top_gt.display_name} "
+                f"(gt_score={top_gt.gt_score:.2f}, label={top_gt.gt_label})"
+            )
+            gt_paths = getattr(trial_result, "ground_truth_comparison_paths", {}) or {}
+            if gt_paths.get("ranking_csv"):
+                print(f"GT ranking CSV: {gt_paths['ranking_csv']}")
 
 
 def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
@@ -258,6 +291,20 @@ def _add_trial_arguments(parser: argparse.ArgumentParser) -> None:
             "passes QC (optimistic trial still runs for comparison)."
         ),
     )
+    parser.add_argument(
+        "--reference-mask-dir",
+        type=Path,
+        help=(
+            "Folder with lab-approved reference masks named "
+            "<image_stem>_reference_mask.tif for ground-truth scoring."
+        ),
+    )
+    parser.add_argument(
+        "--ground-truth-match-iou-threshold",
+        type=float,
+        default=0.3,
+        help="Minimum object IoU to count as a true positive (default: 0.3).",
+    )
 
 
 def _add_apply_arguments(parser: argparse.ArgumentParser) -> None:
@@ -322,23 +369,36 @@ def _run_trial(args: argparse.Namespace) -> int:
         print("Fast optimistic mode enabled: trying one Otsu adaptive candidate first.")
     if config.force_full_search:
         print("Force full search enabled: will not accept optimistic candidate.")
+    if config.reference_mask_dir is not None:
+        print(f"Ground-truth scoring enabled: {config.reference_mask_dir}")
     trial_result = run_threshold_recommender_trial(config)
 
     failed = sum(1 for result in trial_result.run_results if not result.success)
     successful = len(trial_result.run_results) - failed
     print(f"Variant runs: {successful} succeeded, {failed} failed.")
     if trial_result.trial_mode == "optimistic":
-        print("Optimistic candidate passed basic QC on the subset.")
+        print("Optimistic candidate passed basic heuristic screening on the subset.")
         if trial_result.optimistic_qc_path is not None:
             print(f"Optimistic QC report: {trial_result.optimistic_qc_path}")
     elif trial_result.fell_back_to_full_search:
-        print("Optimistic QC failed; fell back to full multi-variant search.")
+        print("Optimistic screening failed; fell back to full multi-variant search.")
         if trial_result.optimistic_qc_path is not None:
             print(f"Optimistic QC report: {trial_result.optimistic_qc_path}")
     elif trial_result.forced_full_search:
-        print("Optimistic QC passed but full variant search was forced.")
+        print("Optimistic screening passed but full variant search was forced.")
         if trial_result.optimistic_qc_path is not None:
             print(f"Optimistic QC report: {trial_result.optimistic_qc_path}")
+
+    if trial_result.subset_characterization_paths.get("csv"):
+        print(
+            "Subset characterization CSV: "
+            f"{trial_result.subset_characterization_paths['csv']}"
+        )
+    if trial_result.per_image_comparison_paths.get("csv"):
+        print(
+            "Per-image comparison CSV: "
+            f"{trial_result.per_image_comparison_paths['csv']}"
+        )
 
     _print_trial_summary(trial_result, json_summary=args.json_summary)
     print("Subset trial complete.")

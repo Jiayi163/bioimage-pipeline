@@ -7,6 +7,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import numpy as np
+
+from bioimage_pipeline.io import save_tiff
 from bioimage_pipeline.threshold_recommender import (
     ThresholdRecommenderConfig,
     apply_confirmed_threshold_variant,
@@ -45,7 +48,9 @@ def _setup_input_and_cppipe(tmp_path: Path) -> tuple[Path, Path]:
     input_dir = tmp_path / "input"
     input_dir.mkdir()
     for index in range(6):
-        (input_dir / f"img_{index:03d}.tif").write_bytes(b"fake")
+        image = np.zeros((32, 32), dtype=np.uint16)
+        image[8 + index, 8 + index] = 1000
+        save_tiff(input_dir / f"img_{index:03d}.tif", image, imagej_compatible=True)
     cppipe_path = tmp_path / "pipeline.cppipe"
     cppipe_path.write_text(SAMPLE_CPPIPE, encoding="utf-8")
     return input_dir, cppipe_path
@@ -94,11 +99,13 @@ def _good_optimistic_summary(artifact: ThresholdVariantArtifact) -> ThresholdVar
     )
 
 
+@patch("bioimage_pipeline.threshold_recommender.compare_threshold_variant_per_image")
 @patch("bioimage_pipeline.threshold_recommender.run_threshold_variant_artifacts")
 @patch("bioimage_pipeline.threshold_recommender.write_threshold_pipeline_variants")
 def test_run_threshold_recommender_trial_stages_subset_and_saves_session(
     mock_write: MagicMock,
     mock_run: MagicMock,
+    mock_per_image: MagicMock,
     tmp_path: Path,
 ) -> None:
     input_dir, cppipe_path = _setup_input_and_cppipe(tmp_path)
@@ -108,6 +115,7 @@ def test_run_threshold_recommender_trial_stages_subset_and_saves_session(
     artifact.pipeline_path.write_text(SAMPLE_CPPIPE, encoding="utf-8")
     mock_write.return_value = [artifact]
     mock_run.return_value = [_run_result(artifact)]
+    mock_per_image.return_value = []
 
     config = ThresholdRecommenderConfig(
         imported_cppipe_path=cppipe_path,
@@ -128,6 +136,7 @@ def test_run_threshold_recommender_trial_stages_subset_and_saves_session(
     assert cppipe_path.read_text(encoding="utf-8") == SAMPLE_CPPIPE
 
 
+@patch("bioimage_pipeline.threshold_recommender.compare_threshold_variant_per_image")
 @patch("bioimage_pipeline.threshold_recommender.compare_threshold_variant_run_results")
 @patch("bioimage_pipeline.threshold_recommender.run_threshold_variant_artifacts")
 @patch("bioimage_pipeline.threshold_recommender.write_threshold_pipeline_variants")
@@ -135,6 +144,7 @@ def test_run_threshold_recommender_trial_optimistic_pass_skips_full_search(
     mock_write: MagicMock,
     mock_run: MagicMock,
     mock_compare: MagicMock,
+    mock_per_image: MagicMock,
     tmp_path: Path,
 ) -> None:
     input_dir, cppipe_path = _setup_input_and_cppipe(tmp_path)
@@ -163,12 +173,10 @@ def test_run_threshold_recommender_trial_optimistic_pass_skips_full_search(
             display_name=baseline_artifact.spec.display_name,
             success=True,
             object_count=100,
-            tiny_frac=0.03,
-            huge_frac=0.01,
-            normal_frac=0.96,
         ),
         _good_optimistic_summary(optimistic_artifact),
     ]
+    mock_per_image.return_value = []
 
     config = ThresholdRecommenderConfig(
         imported_cppipe_path=cppipe_path,
@@ -191,6 +199,7 @@ def test_run_threshold_recommender_trial_optimistic_pass_skips_full_search(
     assert mock_write.call_count == 1
 
 
+@patch("bioimage_pipeline.threshold_recommender.compare_threshold_variant_per_image")
 @patch("bioimage_pipeline.threshold_recommender.compare_threshold_variant_run_results")
 @patch("bioimage_pipeline.threshold_recommender.run_threshold_variant_artifacts")
 @patch("bioimage_pipeline.threshold_recommender.write_threshold_pipeline_variants")
@@ -198,6 +207,7 @@ def test_run_threshold_recommender_trial_optimistic_fail_falls_back_to_full_sear
     mock_write: MagicMock,
     mock_run: MagicMock,
     mock_compare: MagicMock,
+    mock_per_image: MagicMock,
     tmp_path: Path,
 ) -> None:
     input_dir, cppipe_path = _setup_input_and_cppipe(tmp_path)
@@ -240,6 +250,7 @@ def test_run_threshold_recommender_trial_optimistic_fail_falls_back_to_full_sear
         ],
         [_good_optimistic_summary(full_artifact)],
     ]
+    mock_per_image.return_value = []
 
     config = ThresholdRecommenderConfig(
         imported_cppipe_path=cppipe_path,
@@ -261,6 +272,7 @@ def test_run_threshold_recommender_trial_optimistic_fail_falls_back_to_full_sear
     assert session["fell_back_to_full_search"] is True
 
 
+@patch("bioimage_pipeline.threshold_recommender.compare_threshold_variant_per_image")
 @patch("bioimage_pipeline.threshold_recommender.compare_threshold_variant_run_results")
 @patch("bioimage_pipeline.threshold_recommender.run_threshold_variant_artifacts")
 @patch("bioimage_pipeline.threshold_recommender.write_threshold_pipeline_variants")
@@ -268,6 +280,7 @@ def test_run_threshold_recommender_trial_force_full_search_runs_despite_optimist
     mock_write: MagicMock,
     mock_run: MagicMock,
     mock_compare: MagicMock,
+    mock_per_image: MagicMock,
     tmp_path: Path,
 ) -> None:
     input_dir, cppipe_path = _setup_input_and_cppipe(tmp_path)
@@ -305,6 +318,7 @@ def test_run_threshold_recommender_trial_force_full_search_runs_despite_optimist
         ],
         [_good_optimistic_summary(full_artifact)],
     ]
+    mock_per_image.return_value = []
 
     config = ThresholdRecommenderConfig(
         imported_cppipe_path=cppipe_path,

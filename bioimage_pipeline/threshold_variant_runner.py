@@ -46,6 +46,7 @@ class ThresholdVariantRunResult:
     measurement_files: list[Path] = field(default_factory=list)
     qc_artifacts: dict[str, dict[str, Path]] = field(default_factory=dict)
     log_files: dict[str, Path] = field(default_factory=dict)
+    qc_generation_warning: str | None = None
 
 
 def _ensure_under_directory(path: Path, root: Path) -> Path:
@@ -184,6 +185,7 @@ def run_threshold_variant_artifact(
     )
 
     qc_artifacts: dict[str, dict[str, Path]] = {}
+    qc_generation_warning: str | None = None
     if generate_qc:
         try:
             qc_artifacts = _generate_variant_qc(
@@ -194,6 +196,11 @@ def run_threshold_variant_artifact(
             )
         except (FileNotFoundError, OSError, ValueError):
             qc_artifacts = {}
+        if not qc_artifacts:
+            qc_generation_warning = (
+                "No QC overlay PNGs were generated. Ensure the pipeline exports "
+                "mask or label images (e.g. SaveImages) so previews can be built."
+            )
 
     return ThresholdVariantRunResult(
         spec=artifact.spec,
@@ -209,6 +216,7 @@ def run_threshold_variant_artifact(
         measurement_files=measurement_files,
         qc_artifacts=qc_artifacts,
         log_files=dict(run_result.log_files),
+        qc_generation_warning=qc_generation_warning,
     )
 
 

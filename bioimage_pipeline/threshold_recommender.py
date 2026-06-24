@@ -9,6 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
+from bioimage_pipeline.ground_truth import (
+    MANIFEST_FILENAME,
+    build_ground_truth_manifest,
+    save_ground_truth_manifest,
+)
 from bioimage_pipeline.threshold_extraction import (
     load_identify_primary_objects_threshold_profiles,
 )
@@ -21,16 +26,22 @@ from bioimage_pipeline.threshold_subset import (
     SUBSET_MANIFEST_FILENAME,
     ThresholdSubsetManifest,
     ThresholdSubsetSelection,
+    build_subset_characterization_report,
     list_candidate_input_images,
     materialize_input_subset,
+    save_subset_characterization_report,
     save_subset_manifest,
     select_input_subset,
 )
 from bioimage_pipeline.threshold_variant_comparison import (
     ThresholdVariantMeasurementSummary,
+    ThresholdVariantPerImageSummary,
     ThresholdVariantSizeThresholds,
+    compare_threshold_variant_per_image,
     compare_threshold_variant_run_results,
+    load_threshold_variant_per_image_comparison,
     save_threshold_variant_comparison,
+    save_threshold_variant_per_image_comparison,
 )
 from bioimage_pipeline.threshold_variant_runner import (
     ThresholdVariantRunResult,
@@ -41,6 +52,15 @@ from bioimage_pipeline.threshold_variant_scoring import (
     ThresholdVariantScore,
     rank_threshold_variant_summaries,
     save_threshold_variant_ranking,
+)
+from bioimage_pipeline.threshold_variant_gt_scoring import (
+    GroundTruthImageComparison,
+    GroundTruthVariantScore,
+    compare_threshold_variants_to_ground_truth,
+    load_ground_truth_image_comparisons,
+    load_ground_truth_variant_scores,
+    rank_ground_truth_variant_scores,
+    save_threshold_variant_gt_comparison,
 )
 from bioimage_pipeline.threshold_variants import (
     ThresholdVariantArtifact,
@@ -56,6 +76,7 @@ SUBSET_DIR = "subset"
 OPTIMISTIC_DIR = "optimistic"
 VARIANTS_DIR = "threshold_variants"
 CONFIRMED_RUN_DIR = "confirmed_full_run"
+GROUND_TRUTH_DIR = "ground_truth"
 SESSION_FILENAME = "recommender_session.json"
 CONFIRMED_SELECTION_FILENAME = "confirmed_selection.json"
 
@@ -84,6 +105,8 @@ class ThresholdRecommenderConfig:
     full_dataset_trial: bool = False
     fast_optimistic: bool = True
     force_full_search: bool = False
+    reference_mask_dir: Path | None = None
+    ground_truth_match_iou_threshold: float = 0.3
 
 
 @dataclass
@@ -116,6 +139,17 @@ class ThresholdRecommenderTrialResult:
     optimistic_qc_path: Path | None = None
     fell_back_to_full_search: bool = False
     forced_full_search: bool = False
+    subset_characterization_paths: dict[str, Path] = field(default_factory=dict)
+    per_image_comparison_paths: dict[str, Path] = field(default_factory=dict)
+    per_image_summaries: list[ThresholdVariantPerImageSummary] = field(
+        default_factory=list
+    )
+    ground_truth_manifest_path: Path | None = None
+    ground_truth_comparison_paths: dict[str, Path] = field(default_factory=dict)
+    gt_image_comparisons: list[GroundTruthImageComparison] = field(
+        default_factory=list
+    )
+    gt_ranked_scores: list[GroundTruthVariantScore] = field(default_factory=list)
 
 
 @dataclass
@@ -173,6 +207,93 @@ def _build_preview_index(
             qc_preview_paths=[path.resolve() for path in qc_paths],
         )
     return preview_index
+
+
+def _characterize_subset(
+    subset_manifest: ThresholdSubsetManifest,
+    recommender_root: Path,
+) -> dict[str, Path]:
+    report = build_subset_characterization_report(
+        subset_manifest.staged_dir,
+        subset_manifest.image_names,
+    )
+    return save_subset_characterization_report(
+        report,
+        recommender_root / SUBSET_DIR,
+    )
+
+
+def _save_per_image_comparison(
+    run_results: Sequence[ThresholdVariantRunResult],
+    *,
+    subset_manifest: ThresholdSubsetManifest,
+    output_dir: Path,
+    size_thresholds: ThresholdVariantSizeThresholds,
+    basename: str = "threshold_variant_per_image_comparison",
+) -> tuple[list[ThresholdVariantPerImageSummary], dict[str, Path]]:
+    per_image_rows = compare_threshold_variant_per_image(
+        run_results,
+        subset_dir=subset_manifest.staged_dir,
+        image_names=subset_manifest.image_names,
+        size_thresholds=size_thresholds,
+    )
+    if not per_image_rows:
+        return per_image_rows, {}
+    paths = save_threshold_variant_per_image_comparison(
+        per_image_rows,
+        output_dir,
+        basename=basename,
+    )
+    return per_image_rows, paths
+
+
+def _save_ground_truth_comparison(
+    run_results: Sequence[ThresholdVariantRunResult],
+    *,
+    config: ThresholdRecommenderConfig,
+    subset_manifest: ThresholdSubsetManifest,
+    recommender_root: Path,
+) -> tuple[
+    Path | None,
+    dict[str, Path],
+    list[GroundTruthImageComparison],
+    list[GroundTruthVariantScore],
+]:
+    if config.reference_mask_dir is None:
+        return None, {}, [], []
+
+    reference_dir = Path(config.reference_mask_dir).resolve()
+    if not reference_dir.is_dir():
+        return None, {}, [], []
+
+    manifest = build_ground_truth_manifest(
+        subset_manifest.staged_dir,
+        reference_dir,
+        subset_manifest.image_names,
+    )
+    if not manifest.entries:
+        return None, {}, [], []
+
+    gt_root = recommender_root / GROUND_TRUTH_DIR
+    gt_root.mkdir(parents=True, exist_ok=True)
+    manifest_path = save_ground_truth_manifest(
+        manifest,
+        gt_root,
+        basename=MANIFEST_FILENAME,
+    )
+
+    image_rows = compare_threshold_variants_to_ground_truth(
+        run_results,
+        manifest=manifest,
+        match_iou_threshold=config.ground_truth_match_iou_threshold,
+    )
+    gt_ranked_scores = rank_ground_truth_variant_scores(image_rows)
+    comparison_paths = save_threshold_variant_gt_comparison(
+        image_rows,
+        gt_ranked_scores,
+        gt_root,
+    )
+    return manifest_path, comparison_paths, image_rows, gt_ranked_scores
 
 
 def _resolve_variant_artifact(
@@ -283,9 +404,21 @@ def save_recommender_session(
     optimistic_qc_path: Path | None = None,
     fell_back_to_full_search: bool = False,
     forced_full_search: bool = False,
+    subset_characterization_paths: dict[str, Path] | None = None,
+    per_image_comparison_paths: dict[str, Path] | None = None,
+    ground_truth_manifest_path: Path | None = None,
+    ground_truth_comparison_paths: dict[str, Path] | None = None,
+    gt_ranked_scores: Sequence[GroundTruthVariantScore] | None = None,
 ) -> Path:
     payload = {
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "screening_mode": "assistant",
+        "decision_by": "user",
+        "scoring_mode": (
+            "heuristic+ground_truth"
+            if ground_truth_manifest_path is not None
+            else "heuristic"
+        ),
         "imported_cppipe_path": str(config.imported_cppipe_path.resolve()),
         "input_dir": str(config.input_dir.resolve()),
         "output_dir": str(config.output_dir.resolve()),
@@ -293,6 +426,12 @@ def save_recommender_session(
         "trial_mode": trial_mode,
         "fast_optimistic": config.fast_optimistic,
         "force_full_search": config.force_full_search,
+        "reference_mask_dir": (
+            str(config.reference_mask_dir.resolve())
+            if config.reference_mask_dir is not None
+            else None
+        ),
+        "ground_truth_match_iou_threshold": config.ground_truth_match_iou_threshold,
         "fell_back_to_full_search": fell_back_to_full_search,
         "forced_full_search": forced_full_search,
         "subset_manifest": subset_manifest.to_dict(),
@@ -315,6 +454,22 @@ def save_recommender_session(
             for variant_id, preview in preview_index.items()
         },
     }
+    if subset_characterization_paths:
+        payload["subset_characterization_paths"] = {
+            key: str(path) for key, path in subset_characterization_paths.items()
+        }
+    if per_image_comparison_paths:
+        payload["per_image_comparison_paths"] = {
+            key: str(path) for key, path in per_image_comparison_paths.items()
+        }
+    if ground_truth_manifest_path is not None:
+        payload["ground_truth_manifest_path"] = str(ground_truth_manifest_path.resolve())
+    if ground_truth_comparison_paths:
+        payload["ground_truth_comparison_paths"] = {
+            key: str(path) for key, path in ground_truth_comparison_paths.items()
+        }
+    if gt_ranked_scores:
+        payload["ground_truth_ranking"] = [score.to_dict() for score in gt_ranked_scores]
     if optimistic_qc is not None:
         payload["optimistic_qc"] = optimistic_qc.to_dict()
     if optimistic_qc_path is not None:
@@ -507,6 +662,7 @@ def _run_optimistic_trial(
                 huge_frac=optimistic_qc.score.huge_frac,
                 median_intensity=optimistic_qc.score.median_intensity,
                 object_count_ratio_vs_baseline=optimistic_qc.score.object_count_ratio_vs_baseline,
+                screening_label=optimistic_qc.score.screening_label,
             )
         ]
     else:
@@ -551,6 +707,7 @@ def run_threshold_recommender_trial(
         root=root,
         input_path=input_path,
     )
+    subset_characterization_paths = _characterize_subset(subset_manifest, root)
 
     profiles = load_identify_primary_objects_threshold_profiles(imported_path)
     profile = select_ipo_threshold_profile(
@@ -628,6 +785,31 @@ def run_threshold_recommender_trial(
             variant_root=variant_root,
         )
 
+    per_image_basename = (
+        "optimistic_threshold_per_image_comparison"
+        if trial_mode == "optimistic"
+        else "threshold_variant_per_image_comparison"
+    )
+    per_image_summaries, per_image_comparison_paths = _save_per_image_comparison(
+        run_results,
+        subset_manifest=subset_manifest,
+        output_dir=variant_root,
+        size_thresholds=config.size_thresholds,
+        basename=per_image_basename,
+    )
+
+    (
+        ground_truth_manifest_path,
+        ground_truth_comparison_paths,
+        gt_image_comparisons,
+        gt_ranked_scores,
+    ) = _save_ground_truth_comparison(
+        run_results,
+        config=config,
+        subset_manifest=subset_manifest,
+        recommender_root=root,
+    )
+
     session_file = save_recommender_session(
         root,
         config=config,
@@ -642,6 +824,11 @@ def run_threshold_recommender_trial(
         optimistic_qc_path=optimistic_qc_path,
         fell_back_to_full_search=fell_back_to_full_search,
         forced_full_search=forced_full_search,
+        subset_characterization_paths=subset_characterization_paths,
+        per_image_comparison_paths=per_image_comparison_paths,
+        ground_truth_manifest_path=ground_truth_manifest_path,
+        ground_truth_comparison_paths=ground_truth_comparison_paths,
+        gt_ranked_scores=gt_ranked_scores,
     )
 
     return ThresholdRecommenderTrialResult(
@@ -662,6 +849,13 @@ def run_threshold_recommender_trial(
         optimistic_qc_path=optimistic_qc_path,
         fell_back_to_full_search=fell_back_to_full_search,
         forced_full_search=forced_full_search,
+        subset_characterization_paths=subset_characterization_paths,
+        per_image_comparison_paths=per_image_comparison_paths,
+        per_image_summaries=per_image_summaries,
+        ground_truth_manifest_path=ground_truth_manifest_path,
+        ground_truth_comparison_paths=ground_truth_comparison_paths,
+        gt_image_comparisons=gt_image_comparisons,
+        gt_ranked_scores=gt_ranked_scores,
     )
 
 
@@ -765,6 +959,7 @@ def load_trial_result_from_session(
             huge_frac=entry.get("huge_frac"),
             median_intensity=entry.get("median_intensity"),
             object_count_ratio_vs_baseline=entry.get("object_count_ratio_vs_baseline"),
+            screening_label=entry.get("screening_label", "plausible"),
         )
         for entry in ranked_payload
     ]
@@ -846,7 +1041,61 @@ def load_trial_result_from_session(
                 object_count_ratio_vs_baseline=score_payload.get(
                     "object_count_ratio_vs_baseline"
                 ),
+                screening_label=score_payload.get("screening_label", "plausible"),
             )
+
+    subset_characterization_paths = {
+        key: Path(path)
+        for key, path in session.get("subset_characterization_paths", {}).items()
+    }
+    per_image_comparison_paths = {
+        key: Path(path)
+        for key, path in session.get("per_image_comparison_paths", {}).items()
+    }
+    per_image_summaries: list[ThresholdVariantPerImageSummary] = []
+    json_path = per_image_comparison_paths.get("json")
+    if json_path is not None:
+        per_image_summaries = load_threshold_variant_per_image_comparison(json_path)
+
+    ground_truth_manifest_path = (
+        Path(session["ground_truth_manifest_path"])
+        if session.get("ground_truth_manifest_path")
+        else None
+    )
+    ground_truth_comparison_paths = {
+        key: Path(path)
+        for key, path in session.get("ground_truth_comparison_paths", {}).items()
+    }
+    gt_image_comparisons: list[GroundTruthImageComparison] = []
+    gt_image_json = ground_truth_comparison_paths.get("image_json")
+    if gt_image_json is not None:
+        gt_image_comparisons = load_ground_truth_image_comparisons(gt_image_json)
+
+    gt_ranked_scores: list[GroundTruthVariantScore] = []
+    ranking_payload = session.get("ground_truth_ranking")
+    if isinstance(ranking_payload, list) and ranking_payload:
+        gt_ranked_scores = [
+            GroundTruthVariantScore(
+                variant_id=str(entry.get("variant_id", "")),
+                display_name=str(entry.get("display_name", "")),
+                gt_rank=int(entry.get("gt_rank", 0)),
+                gt_score=float(entry.get("gt_score", 0.0)),
+                gt_label=str(entry.get("gt_label", "poor")),
+                mean_f1=entry.get("mean_f1"),
+                mean_dice=entry.get("mean_dice"),
+                mean_iou=entry.get("mean_iou"),
+                mean_count_error=entry.get("mean_count_error"),
+                annotated_image_count=int(entry.get("annotated_image_count", 0)),
+                success=bool(entry.get("success", False)),
+                warnings=list(entry.get("warnings", [])),
+            )
+            for entry in ranking_payload
+            if isinstance(entry, dict)
+        ]
+    elif ground_truth_comparison_paths.get("ranking_json") is not None:
+        gt_ranked_scores = load_ground_truth_variant_scores(
+            ground_truth_comparison_paths["ranking_json"]
+        )
 
     return ThresholdRecommenderTrialResult(
         recommender_root=root,
@@ -866,4 +1115,11 @@ def load_trial_result_from_session(
         optimistic_qc_path=optimistic_qc_path,
         fell_back_to_full_search=session.get("fell_back_to_full_search", False),
         forced_full_search=session.get("forced_full_search", False),
+        subset_characterization_paths=subset_characterization_paths,
+        per_image_comparison_paths=per_image_comparison_paths,
+        per_image_summaries=per_image_summaries,
+        ground_truth_manifest_path=ground_truth_manifest_path,
+        ground_truth_comparison_paths=ground_truth_comparison_paths,
+        gt_image_comparisons=gt_image_comparisons,
+        gt_ranked_scores=gt_ranked_scores,
     )

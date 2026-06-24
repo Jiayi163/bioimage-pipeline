@@ -159,6 +159,43 @@ def _find_matching_tiff(image_stem: str, search_dir: Path) -> Path | None:
     return None
 
 
+def find_matching_tiff(image_stem: str, search_dir: str | Path) -> Path | None:
+    """Return the first TIFF in ``search_dir`` matching ``image_stem``."""
+    return _find_matching_tiff(image_stem, Path(search_dir))
+
+
+def create_fp_fn_overlay(
+    image: np.ndarray,
+    predicted_mask: np.ndarray,
+    reference_mask: np.ndarray,
+    *,
+    alpha: float = 0.55,
+) -> np.ndarray:
+    """Create an RGB overlay highlighting TP (green), FP (red), and FN (blue)."""
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError("alpha must be between 0 and 1")
+
+    base = normalize_for_display(image)
+    rgb = np.stack([base, base, base], axis=-1).astype(np.float32)
+    pred = np.asarray(predicted_mask).astype(bool)
+    ref = np.asarray(reference_mask).astype(bool)
+    if pred.shape != base.shape or ref.shape != base.shape:
+        raise ValueError("Mask shapes must match the image plane.")
+
+    true_positive = pred & ref
+    false_positive = pred & ~ref
+    false_negative = (~pred) & ref
+
+    def _paint(region: np.ndarray, color: tuple[int, int, int]) -> None:
+        color_arr = np.array(color, dtype=np.float32)
+        rgb[region] = (1.0 - alpha) * rgb[region] + alpha * color_arr
+
+    _paint(true_positive, (0, 220, 0))
+    _paint(false_positive, (255, 0, 0))
+    _paint(false_negative, (0, 128, 255))
+    return np.clip(rgb, 0, 255).astype(np.uint8)
+
+
 def generate_qc_for_cellprofiler_results(
     input_dir: str | Path,
     masks_dir: str | Path,

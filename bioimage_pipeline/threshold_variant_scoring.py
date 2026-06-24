@@ -13,7 +13,47 @@ from bioimage_pipeline.threshold_variant_comparison import (
     ThresholdVariantMeasurementSummary,
 )
 
+SCREENING_FAILED = "failed"
+SCREENING_FLAGGED = "flagged"
+SCREENING_PLAUSIBLE = "plausible"
+HEURISTIC_SCREENING_PREFIX = "Heuristic screening: "
+
 _DEFAULT_BASELINE_MARKERS = ("baseline",)
+
+
+def derive_screening_label(
+    score: "ThresholdVariantScore",
+    *,
+    extra_warnings: Sequence[str] = (),
+) -> str:
+    """Classify a candidate for human review, not biological optimality."""
+    if not score.success:
+        return SCREENING_FAILED
+
+    explanations = score.explanations
+    if any(line.startswith("Rejected") for line in explanations):
+        return SCREENING_FAILED
+    if score.score < 0.5:
+        return SCREENING_FAILED
+
+    ratio = score.object_count_ratio_vs_baseline
+    if ratio is not None:
+        if ratio > 5.0 or ratio < 0.2:
+            return SCREENING_FLAGGED
+
+    if any(line.startswith("Flagged") for line in explanations):
+        return SCREENING_FLAGGED
+    if extra_warnings:
+        return SCREENING_FLAGGED
+
+    return SCREENING_PLAUSIBLE
+
+
+def format_screening_reason(reason: str) -> str:
+    """Prefix ranking reason text to clarify heuristic screening role."""
+    if reason.startswith(HEURISTIC_SCREENING_PREFIX):
+        return reason
+    return f"{HEURISTIC_SCREENING_PREFIX}{reason}"
 
 
 @dataclass(frozen=True)
@@ -57,6 +97,7 @@ class ThresholdVariantScore:
     huge_frac: float | None = None
     median_intensity: float | None = None
     object_count_ratio_vs_baseline: float | None = None
+    screening_label: str = "plausible"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -200,12 +241,14 @@ def score_threshold_variant_summary(
         )
         if summary.error_message:
             explanations.append(f"Failure detail: {summary.error_message}")
-        return ThresholdVariantScore(
+        failed_score = ThresholdVariantScore(
             rank=0,
             variant_id=summary.variant_id,
             display_name=summary.display_name,
             score=0.0,
-            reason=_primary_reason(success=False, score=0.0, explanations=explanations),
+            reason=format_screening_reason(
+                _primary_reason(success=False, score=0.0, explanations=explanations)
+            ),
             explanations=explanations,
             component_scores={"failure_penalty": -config.failure_penalty},
             success=False,
@@ -217,7 +260,9 @@ def score_threshold_variant_summary(
             object_count_ratio_vs_baseline=object_count_ratio_vs_baseline(
                 summary, baseline
             ),
+            screening_label="failed",
         )
+        return failed_score
 
     raw_score = 0.0
 
@@ -287,16 +332,19 @@ def score_threshold_variant_summary(
         explanations.append("Limited metrics available for detailed scoring.")
 
     clamped_score = _clamp_score(raw_score)
-    return ThresholdVariantScore(
+    reason = format_screening_reason(
+        _primary_reason(
+            success=True,
+            score=clamped_score,
+            explanations=explanations,
+        )
+    )
+    provisional = ThresholdVariantScore(
         rank=0,
         variant_id=summary.variant_id,
         display_name=summary.display_name,
         score=clamped_score,
-        reason=_primary_reason(
-            success=True,
-            score=clamped_score,
-            explanations=explanations,
-        ),
+        reason=reason,
         explanations=explanations,
         component_scores=components,
         success=True,
@@ -307,13 +355,18 @@ def score_threshold_variant_summary(
         median_intensity=summary.median_intensity,
         object_count_ratio_vs_baseline=count_ratio,
     )
+    provisional.screening_label = derive_screening_label(
+        provisional,
+        extra_warnings=summary.warnings,
+    )
+    return provisional
 
 
 def rank_threshold_variant_summaries(
     summaries: Sequence[ThresholdVariantMeasurementSummary],
     config: ThresholdVariantScoreConfig | None = None,
 ) -> list[ThresholdVariantScore]:
-    """Score and rank variant summaries from best to worst."""
+    """Score and rank variant summaries for human screening (most to least plausible)."""
     score_config = config or ThresholdVariantScoreConfig()
     baseline = _find_baseline_summary(summaries)
 
@@ -344,6 +397,7 @@ def rank_threshold_variant_summaries(
                 huge_frac=item.huge_frac,
                 median_intensity=item.median_intensity,
                 object_count_ratio_vs_baseline=item.object_count_ratio_vs_baseline,
+                screening_label=item.screening_label,
             )
         )
     return ranked
@@ -359,6 +413,7 @@ def threshold_variant_ranking_to_dataframe(
             "variant_id": score.variant_id,
             "name": score.display_name,
             "score": score.score,
+            "screening_label": score.screening_label,
             "reason": score.reason,
             "success": score.success,
             "object_count": score.object_count,
