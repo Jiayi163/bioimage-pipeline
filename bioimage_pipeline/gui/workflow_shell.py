@@ -742,10 +742,17 @@ def launch_workflow_shell() -> None:
     workflow_frame.grid(row=0, column=0, sticky="ew")
     workflow_frame.columnconfigure(1, weight=1)
 
+    path_change_callbacks: list[Callable[[], None]] = []
+
+    def browse_folder(entry: Any) -> None:
+        _browse_folder(entry)
+        for callback in path_change_callbacks:
+            callback()
+
     workflow_panel = build_main_workflow_panel(
         workflow_frame,
         saved_settings=saved_settings,
-        browse_folder=_browse_folder,
+        browse_folder=browse_folder,
         browse_file=_browse_file,
     )
 
@@ -853,6 +860,8 @@ def launch_workflow_shell() -> None:
         workflow_panel.open_results_button.configure(state=open_results_state)
         clear_state = "disabled" if run_state["running"] else "normal"
         workflow_panel.clear_session_button.configure(state=clear_state)
+
+    path_change_callbacks.append(update_workflow_action_states)
 
     def apply_cleared_experiment_state(*, status_message: str) -> None:
         pipeline_path_var.set("")
@@ -1112,6 +1121,7 @@ def launch_workflow_shell() -> None:
         workflow_panel.output_dir_entry,
     ):
         entry.bind("<KeyRelease>", lambda _event: update_workflow_action_states())
+        entry.bind("<FocusOut>", lambda _event: update_workflow_action_states())
     pipeline_path_var.trace_add("write", lambda *_args: update_workflow_action_states())
 
     if startup_warnings:

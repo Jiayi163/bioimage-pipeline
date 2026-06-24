@@ -23,6 +23,156 @@ GT_LABEL_BEST = "best_match"
 GT_LABEL_ACCEPTABLE = "acceptable"
 GT_LABEL_POOR = "poor"
 
+PREDICTED_MASK_NOT_FOUND_MSG = (
+    "Predicted mask not found. Ensure the pipeline exports "
+    "segmentation masks via SaveImages."
+)
+
+SEGMENTATION_SUFFIXES: tuple[str, ...] = (
+    "_mask",
+    "_predicted_mask",
+    "_objects",
+    "_labels",
+    "_segmented",
+    "_seg",
+)
+
+SEGMENTATION_KEYWORDS: tuple[str, ...] = (
+    "mask",
+    "objects",
+    "labels",
+    "label",
+    "segmented",
+    "primaryobjects",
+    "secondaryobjects",
+    "tertiaryobjects",
+)
+
+FOREGROUND_NEAR_EMPTY = 0.001
+FOREGROUND_NEAR_FULL = 0.99
+REFERENCE_NEAR_FULL = 0.99
+
+
+def is_segmentation_export_filename(image_stem: str, tiff_stem: str) -> bool:
+    """Return whether a TIFF stem looks like a SaveImages segmentation export."""
+    image_lower = image_stem.lower()
+    tiff_lower = tiff_stem.lower()
+
+    if tiff_lower == image_lower:
+        return False
+    if not tiff_lower.startswith(image_lower):
+        return False
+
+    remainder = tiff_lower[len(image_lower) :]
+    if not remainder or remainder[0] not in "._-":
+        return False
+
+    remainder_body = remainder.lstrip("._-")
+    for suffix in SEGMENTATION_SUFFIXES:
+        token = suffix.lstrip("_")
+        if remainder_body == token or remainder_body.startswith(f"{token}_"):
+            return True
+        if remainder_body.endswith(f"_{token}") or remainder_body.endswith(token):
+            return True
+
+    return any(keyword in remainder_body for keyword in SEGMENTATION_KEYWORDS)
+
+
+def _foreground_fraction(array: np.ndarray) -> float:
+    """Estimate foreground coverage for a mask or label image."""
+    squeezed = np.squeeze(np.asarray(array))
+    if squeezed.dtype == bool:
+        return float(np.count_nonzero(squeezed)) / squeezed.size
+    return float(np.count_nonzero(squeezed > 0)) / squeezed.size
+
+
+def appears_grayscale_raw(array: np.ndarray, *, kind: str) -> bool:
+    """Return whether an array looks like fluorescence rather than segmentation."""
+    if kind == "mask":
+        return False
+
+    squeezed = np.squeeze(np.asarray(array))
+    if squeezed.ndim != 2:
+        return True
+
+    unique = np.unique(squeezed)
+    if len(unique) <= 3 and set(unique.tolist()).issubset({0, 1, 255}):
+        return False
+
+    if kind == "label" and np.issubdtype(squeezed.dtype, np.integer):
+        positive = unique[unique > 0]
+        if positive.size and int(positive.max()) <= len(positive) * 2:
+            return False
+
+    if int(unique.min()) > 0 and len(unique) >= 4:
+        return True
+    if len(unique) > 32:
+        return True
+    return False
+
+
+def validate_reference_mask_array(array: np.ndarray) -> list[str]:
+    """Return blocking warnings for an invalid reference mask."""
+    warnings: list[str] = []
+    squeezed = np.squeeze(np.asarray(array))
+    if squeezed.ndim != 2:
+        warnings.append(
+            f"Reference mask must be 2D, got shape {getattr(squeezed, 'shape', ())}."
+        )
+        return warnings
+
+    foreground = _foreground_fraction(squeezed)
+    if foreground >= REFERENCE_NEAR_FULL:
+        warnings.append(
+            "Reference mask foreground fraction is near 100%; "
+            "annotations may be invalid for comparison."
+        )
+    elif foreground <= FOREGROUND_NEAR_EMPTY:
+        warnings.append(
+            f"Reference mask foreground fraction is near 0% ({foreground:.1%})."
+        )
+    return warnings
+
+
+def validate_predicted_segmentation_array(
+    array: np.ndarray,
+    *,
+    filename: str = "",
+) -> list[str]:
+    """Return blocking warnings when a candidate is not a valid segmentation mask."""
+    warnings: list[str] = []
+    kind = classify_tiff_for_fiji_export(array, filename=filename)
+    if kind == "intensity":
+        warnings.append(
+            "Predicted mask appears to be a raw/grayscale image, not a "
+            "SaveImages segmentation export."
+        )
+        return warnings
+
+    squeezed = np.squeeze(np.asarray(array))
+    if squeezed.ndim != 2:
+        warnings.append(
+            f"Predicted mask must be 2D, got shape {getattr(squeezed, 'shape', ())}."
+        )
+        return warnings
+
+    if appears_grayscale_raw(squeezed, kind=kind):
+        warnings.append(
+            "Predicted mask appears grayscale/raw-like rather than binary "
+            "or label-like."
+        )
+
+    foreground = _foreground_fraction(squeezed)
+    if foreground <= FOREGROUND_NEAR_EMPTY:
+        warnings.append(
+            f"Predicted mask foreground fraction is near 0% ({foreground:.1%})."
+        )
+    elif foreground >= FOREGROUND_NEAR_FULL:
+        warnings.append(
+            f"Predicted mask foreground fraction is near 100% ({foreground:.1%})."
+        )
+    return warnings
+
 
 @dataclass
 class GroundTruthImageComparison:
@@ -87,13 +237,21 @@ def resolve_predicted_mask_path(
     label_paths: list[Path] = []
 
     for tiff_path in discover_cellprofiler_tiff_files(raw_path):
-        if tiff_path.stem != image_stem and image_stem not in tiff_path.stem:
+        if not is_segmentation_export_filename(image_stem, tiff_path.stem):
             continue
         try:
             image = read_tiff(tiff_path)
             kind = classify_tiff_for_fiji_export(image, filename=tiff_path.name)
         except (OSError, ValueError):
             continue
+        if kind == "intensity":
+            continue
+        if validate_predicted_segmentation_array(
+            image,
+            filename=tiff_path.name,
+        ):
+            continue
+
         resolved = tiff_path.resolve()
         if kind == "mask":
             mask_paths.append(resolved)
@@ -101,16 +259,17 @@ def resolve_predicted_mask_path(
             label_paths.append(resolved)
 
     def _pick(candidates: list[Path]) -> Path | None:
+        if not candidates:
+            return None
         for candidate in candidates:
-            if candidate.stem == image_stem:
+            if candidate.stem.lower().endswith("_mask"):
                 return candidate
         for candidate in candidates:
             if image_stem in candidate.stem:
                 return candidate
-        return candidates[0] if candidates else None
+        return candidates[0]
 
-    result = _pick(mask_paths) or _pick(label_paths)
-    return result
+    return _pick(mask_paths) or _pick(label_paths)
 
 
 def load_predicted_mask(path: str | Path) -> np.ndarray:
@@ -163,16 +322,34 @@ def compare_variant_run_to_ground_truth(
                     success=False,
                     reference_available=True,
                     predicted_mask_available=False,
-                    warnings=[
-                        "Predicted mask not found. Ensure the pipeline exports "
-                        "segmentation masks via SaveImages."
-                    ],
+                    warnings=[PREDICTED_MASK_NOT_FOUND_MSG],
                 )
             )
             continue
 
         try:
             reference_mask = load_reference_mask(entry.reference_mask_path)
+            predicted_array = np.asarray(read_tiff(predicted_path))
+            reference_warnings = validate_reference_mask_array(reference_mask)
+            predicted_warnings = validate_predicted_segmentation_array(
+                predicted_array,
+                filename=predicted_path.name,
+            )
+            blocking_warnings = [*reference_warnings, *predicted_warnings]
+            if blocking_warnings:
+                rows.append(
+                    GroundTruthImageComparison(
+                        variant_id=run_result.spec.variant_id,
+                        display_name=run_result.spec.display_name,
+                        image_name=entry.image_name,
+                        success=False,
+                        reference_available=True,
+                        predicted_mask_available=True,
+                        warnings=blocking_warnings,
+                    )
+                )
+                continue
+
             predicted_mask = load_predicted_mask(predicted_path)
             comparison = compare_segmentation(
                 predicted_mask,
