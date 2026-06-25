@@ -68,7 +68,7 @@ optional manual inspection in Fiji GUI
 **Implemented today:** TIFF I/O, Python TIFF fallback, CellProfiler CLI runner,
 CellProfiler workflow orchestration (Phase 13), QC overlays, and example scripts.
 
-**Next priority:** Phase 16 — optional Python analysis enhancements.
+**Next priority:** Phase 18 — ML-assisted Fiji/Weka + CellProfiler workflow (`weka_ml`).
 
 | Phase | Focus | Status |
 |-------|--------|--------|
@@ -79,7 +79,8 @@ CellProfiler workflow orchestration (Phase 13), QC overlays, and example scripts
 | 15.1 | GUI workflow shell (run, logs, preview) | Complete |
 | 15.2 | GUI pipeline builder & CP module exposure | Complete |
 | 16 | Optional Python analysis enhancements | Not started |
-| 17 | Self-adaptive threshold at import (hybrid CP) — core differentiator | Deferred — prototype only |
+| 17 | CP threshold parameter assistant (**fallback** `cellprofiler_threshold`) | Maintained |
+| 18 | **ML-assisted Fiji/Weka + CP** (**preferred** `weka_ml`) | Planned |
 
 ### GUI direction (Phase 15)
 

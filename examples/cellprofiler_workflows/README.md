@@ -29,3 +29,26 @@ via Fiji macros. That step is **not** a standard CellProfiler module — use the
 editor **Run workflow** panel after saving your `.cppipe`.
 
 See [cellprofiler_authoring.md](../docs/cellprofiler_authoring.md).
+
+## Weka ML assay template (Phase 18 — planned)
+
+**Goal:** CellProfiler pipeline for `weka_ml` segmentation mode — original
+fluorescence + single-channel foreground probability maps (`*_prob.tif`,
+normalized to 0–1 by Python staging before CP runs).
+
+**Planned file:** `weka_assay_template.cppipe` (authored once in CellProfiler
+desktop, tested, then committed).
+
+**Expected modules:**
+
+| # | Module | Notes |
+|---|--------|--------|
+| 1 | Images | Reads staged `cellprofiler_input/` |
+| 2 | Metadata | Optional |
+| 3 | NamesAndTypes | `EV` = originals; `Prob` = `*_prob.tif` |
+| 4 | Groups | Optional |
+| 5 | IdentifyPrimaryObjects | Input `Prob`; manual threshold on 0–1 scale |
+| 6+ | Measure*, SaveImages, ExportToSpreadsheet | Same export goals as standard workflow |
+
+Weka classifier **training** happens in Fiji Trainable Weka Segmentation, not in
+this repository. See [DEVELOPMENT_PLAN.md](../DEVELOPMENT_PLAN.md) Phase 18.
