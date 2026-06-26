@@ -59,6 +59,9 @@ _SUPPORTED_LABELING = frozenset({"connected", "watershed"})
 
 RESULTS_STAGING_DIR = "staging"
 RESULTS_OIR_PROJECTION_DIR = "oir_projection"
+RESULTS_CLASSIFIER_OUTPUT_DIR = "classifier_output"
+RESULTS_CELLPROFILER_INPUT_DIR = "cellprofiler_input"
+SegmentationMode = Literal["standard", "python_classifier"]
 
 
 def resolve_workflow_output_dir(output_dir: str | Path) -> Path:
@@ -167,7 +170,7 @@ class CellProfilerWorkflowConfig:
 
     input_dir: str | Path
     output_dir: str | Path
-    cppipe_path: str | Path
+    cppipe_path: str | Path | None = None
     cellprofiler_executable: str = "cellprofiler"
     cellprofiler_extra_args: Sequence[str] | None = None
     merge_measurements: bool = True
@@ -185,6 +188,14 @@ class CellProfilerWorkflowConfig:
     adaptive_threshold: bool = False
     adaptive_min_object_size: int = 20
     adaptive_image_pattern: str = "*.tif"
+    segmentation_mode: SegmentationMode = "standard"
+    classifier_model_path: str | Path | None = None
+    classifier_measurement_mode: str = "binary_mask"
+    classifier_probability_threshold: float = 0.5
+    classifier_cppipe_template_path: str | Path | None = None
+    classifier_object_diameter_min: int = 3
+    classifier_object_diameter_max: int = 12
+    classifier_image_pattern: str = "*.tif"
 
 
 @dataclass
@@ -214,6 +225,8 @@ class CellProfilerWorkflowResult:
     export_warnings: list[str] | None = None
     adaptive_threshold_summary: dict[str, Any] | None = None
     import_warnings: list[str] | None = None
+    segmentation_mode: str | None = None
+    classifier_summary: dict[str, Any] | None = None
 
     @property
     def output_dir(self) -> Path:
@@ -260,6 +273,8 @@ class CellProfilerWorkflowResult:
             "export_warnings": list(self.export_warnings or []),
             "adaptive_threshold_summary": self.adaptive_threshold_summary,
             "import_warnings": list(self.import_warnings or []),
+            "segmentation_mode": self.segmentation_mode,
+            "classifier_summary": self.classifier_summary,
         }
 
 
@@ -705,6 +720,25 @@ def _write_workflow_summary(
     return summary_path
 
 
+def _resolve_classifier_cppipe_path(config: CellProfilerWorkflowConfig) -> Path:
+    """Return the CellProfiler pipeline path for classifier measurement."""
+    if config.cppipe_path:
+        return Path(config.cppipe_path).resolve()
+    from bioimage_pipeline.classifier_pipeline_adapter import materialize_classifier_pipeline
+
+    materialized = (
+        Path(config.output_dir).resolve() / "logs" / "working_classifier_pipeline.cppipe"
+    )
+    return materialize_classifier_pipeline(
+        materialized,
+        template_path=config.classifier_cppipe_template_path,
+        measurement_mode=config.classifier_measurement_mode,
+        probability_threshold=config.classifier_probability_threshold,
+        object_diameter_min=config.classifier_object_diameter_min,
+        object_diameter_max=config.classifier_object_diameter_max,
+    )
+
+
 def _validate_cellprofiler_workflow_config(config: CellProfilerWorkflowConfig) -> None:
     """Validate workflow paths and external executables before running."""
     from bioimage_pipeline.cellprofiler_runner import (
@@ -717,9 +751,24 @@ def _validate_cellprofiler_workflow_config(config: CellProfilerWorkflowConfig) -
     if not input_path.is_dir():
         raise FileNotFoundError(f"Input directory not found: {input_path}")
 
-    cppipe_path = Path(config.cppipe_path)
-    if not cppipe_path.is_file():
-        raise FileNotFoundError(f"CellProfiler pipeline file not found: {cppipe_path}")
+    if config.segmentation_mode == "python_classifier":
+        if config.classifier_model_path is None:
+            raise ValueError(
+                "classifier_model_path is required when segmentation_mode='python_classifier'."
+            )
+        model_path = Path(config.classifier_model_path)
+        if not model_path.is_file():
+            raise FileNotFoundError(f"Classifier model not found: {model_path}")
+        if config.classifier_cppipe_template_path is not None:
+            template_path = Path(config.classifier_cppipe_template_path)
+            if not template_path.is_file():
+                raise FileNotFoundError(
+                    f"Classifier pipeline template not found: {template_path}"
+                )
+    else:
+        cppipe_path = Path(config.cppipe_path)
+        if not cppipe_path.is_file():
+            raise FileNotFoundError(f"CellProfiler pipeline file not found: {cppipe_path}")
 
     if find_cellprofiler_executable(config.cellprofiler_executable) is None:
         raise RuntimeError(
@@ -869,7 +918,10 @@ def run_cellprofiler_workflow_from_config(
     timing["config_validation_seconds"] = elapsed_since(checkpoint)
 
     checkpoint = time.perf_counter()
-    materialized_cppipe = _materialize_pipeline_for_run(config.cppipe_path)
+    if config.segmentation_mode == "python_classifier":
+        materialized_cppipe = _resolve_classifier_cppipe_path(config)
+    else:
+        materialized_cppipe = _materialize_pipeline_for_run(config.cppipe_path)
     timing["pipeline_materialization_seconds"] = elapsed_since(checkpoint)
 
     checkpoint = time.perf_counter()
@@ -898,6 +950,54 @@ def run_cellprofiler_workflow_from_config(
         lifecycle=lifecycle,
     )
     timing["prepare_input_seconds"] = elapsed_since(checkpoint)
+
+    classifier_summary: dict[str, Any] | None = None
+    if config.segmentation_mode == "python_classifier":
+        from bioimage_pipeline.cellprofiler_input_staging import (
+            save_cellprofiler_input_manifest,
+            stage_cellprofiler_input,
+        )
+        from bioimage_pipeline.segmentation_qc import save_segmentation_qc_report, summarize_mask_folder
+        from bioimage_pipeline.trainable_rf import batch_predict
+
+        checkpoint = time.perf_counter()
+        classifier_output_dir = directories["results"] / RESULTS_CLASSIFIER_OUTPUT_DIR
+        batch_predict(
+            Path(config.classifier_model_path),
+            cellprofiler_input_dir,
+            classifier_output_dir,
+            pattern=config.classifier_image_pattern,
+            threshold=config.classifier_probability_threshold,
+        )
+        timing["classifier_prediction_seconds"] = elapsed_since(checkpoint)
+
+        checkpoint = time.perf_counter()
+        staging_dir = directories["results"] / RESULTS_CELLPROFILER_INPUT_DIR
+        staging_manifest = stage_cellprofiler_input(
+            cellprofiler_input_dir,
+            classifier_output_dir,
+            staging_dir,
+            measurement_mode=config.classifier_measurement_mode,
+            image_pattern=config.classifier_image_pattern,
+        )
+        if staging_manifest.warnings:
+            raise ValueError(
+                "Classifier staging validation failed:\n- "
+                + "\n- ".join(staging_manifest.warnings)
+            )
+        save_cellprofiler_input_manifest(staging_manifest, directories["logs"])
+        cellprofiler_input_dir = staging_dir
+        timing["classifier_staging_seconds"] = elapsed_since(checkpoint)
+
+        checkpoint = time.perf_counter()
+        qc_summaries = summarize_mask_folder(classifier_output_dir / "masks")
+        qc_paths = save_segmentation_qc_report(qc_summaries, directories["logs"])
+        classifier_summary = {
+            "model_path": str(Path(config.classifier_model_path).resolve()),
+            "staging_pair_count": len(staging_manifest.pairs),
+            "segmentation_qc": {key: str(path) for key, path in qc_paths.items()},
+        }
+        timing["classifier_qc_seconds"] = elapsed_since(checkpoint)
 
     adaptive_summary: dict[str, Any] | None = None
     if config.adaptive_threshold:
@@ -1189,6 +1289,8 @@ def run_cellprofiler_workflow_from_config(
         export_warnings=export_warnings or None,
         adaptive_threshold_summary=adaptive_summary,
         import_warnings=import_warnings or None,
+        segmentation_mode=config.segmentation_mode,
+        classifier_summary=classifier_summary,
     )
     summary_path = _write_workflow_summary(directories["logs"], result)
     result.log_files["workflow_summary"] = summary_path

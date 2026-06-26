@@ -1,0 +1,39 @@
+CellProfiler Pipeline: http://www.cellprofiler.org
+Version:5
+
+Images:[module_num:1|svn_version:'Unknown'|variable_revision_number:1|show_window:False|notes:[]]
+Filter images?:No
+
+Metadata:[module_num:2|svn_version:'Unknown'|variable_revision_number:1|show_window:False|notes:[]]
+Extract metadata?:No
+
+NamesAndTypes:[module_num:3|svn_version:'Unknown'|variable_revision_number:1|show_window:False|notes:[]]
+Process 3D?:No
+Assign a name to:Images matching a rule
+Match file:.*_mask\.tif
+Name to assign these images:Mask
+Assign a name to:Images matching a rule
+Match file:.*\.tif
+Name to assign these images:EV
+
+IdentifyPrimaryObjects:[module_num:4|svn_version:'Unknown'|variable_revision_number:1|show_window:False|notes:[]]
+Select the input image:Mask
+Name the primary objects to be identified:Spots
+Typical diameter of objects, in pixel units (Min,Max):3,12
+Method to distinguish clumped objects:None
+
+MeasureObjectSizeShape:[module_num:5|svn_version:'Unknown'|variable_revision_number:1|show_window:False|notes:[]]
+Select objects to measure:Spots
+
+MeasureObjectIntensity:[module_num:6|svn_version:'Unknown'|variable_revision_number:1|show_window:False|notes:[]]
+Select objects to measure:Spots
+Select the image to measure:EV
+
+ExportToSpreadsheet:[module_num:7|svn_version:'Unknown'|variable_revision_number:1|show_window:False|notes:[]]
+Select the column delimiter:Comma
+
+SaveImages:[module_num:8|svn_version:'Unknown'|variable_revision_number:1|show_window:False|notes:[]]
+Select the type of image to save:Binary mask
+Select image to save:Mask
+Select the objects to save:Spots
+File name within the folder:Mask

@@ -19,99 +19,150 @@ Fiji/ImageJ      →  headless macro export            →  final TIFFs + metada
 
 ---
 
-## Architecture direction: ML-assisted Fiji/Weka + CellProfiler (Phase 18 — preferred)
+## Architecture direction change: thresholding becomes the primary focus
 
-After reviewing project state and performance constraints, the **preferred EV
-segmentation path** shifts from multi-run CellProfiler threshold tuning (Phase 17)
-to an **ML-assisted Fiji and CellProfiler workflow**:
+After reviewing the current state of the project, the development priority
+changes.
+
+Most major pipeline components are already completed:
+
+- Fiji integration
+- CellProfiler integration
+- Pipeline orchestration
+- Image loading and preprocessing
+- Measurement extraction
+- Export workflows
+- GUI/workflow management
+
+Because of that, the next major development focus is **automatic threshold and
+spot-detection intelligence for EV fluorescence images**, not adding more
+general image-processing modules.
+
+### Goal (what “thresholding” means here)
+
+The goal is **not** to reimplement CellProfiler thresholding algorithms in Python.
+The architecture stays **CellProfiler-based**: our code orchestrates pipeline
+variants and compares CellProfiler outputs; CellProfiler performs all thresholding
+and spot detection.
 
 ```text
-Input images (TIFF or .oir)
-    ↓
-Fiji — OIR Z-max projection (existing prepare_input)
-    ↓
-Fiji — Trainable Weka Segmentation: apply user-trained classifier (batch)
-    ↓
-Python staging — single-channel foreground probability maps, normalized 0–1
-    ↓
-CellProfiler — ONE headless run on staged originals + probability maps
-    ↓
-Measurements, masks, labels, QC overlays, CSV (existing results layout)
+User imports one CellProfiler pipeline
+↓
+Our code identifies threshold-related settings
+↓
+Our code creates candidate pipeline variants
+↓
+CellProfiler runs each variant
+↓
+Our code compares outputs
+↓
+Best result is selected and shown (user override)
 ```
 
-**Framing:** This is no longer “CellProfiler automatic threshold parameter
-tuning.” It is **ML-assisted biological object segmentation and measurement**:
-Weka generates foreground probability maps; CellProfiler performs standardized
-object identification, filtering, measurement, and export.
+The user should not need to manually tune:
 
-**Architecture rules:**
+- threshold method
+- threshold correction factor
+- threshold smoothing scale
+- lower threshold bound
+- upper threshold bound
+- adaptive window size
+- local radius
+- minimum object size
+- maximum object size
+- noise rejection settings
 
-- Do **not** reimplement CellProfiler segmentation or measurement algorithms in Python.
-- Do **not** implement Weka training in this repository — the user trains in
-  Fiji / Trainable Weka Segmentation and provides a saved classifier file.
-- This project **applies** the classifier and passes normalized probability maps to CellProfiler.
-- CellProfiler remains the **primary measurement and export engine**.
+The system should recommend these automatically and transparently (with a score
+breakdown and confidence), while still allowing user override.
 
-### Segmentation modes
+### New development direction (assistive recommender, not “perfect AI”)
 
-| Mode | Config value | Role |
-|------|--------------|------|
-| **Preferred** | `weka_ml` (Phase 18) | Fiji/Weka probability maps → staged CP input → one CP run |
-| **Fallback** | `cellprofiler_threshold` (Phase 17) | User `.cppipe` with CP thresholding; optional Threshold Parameter Assistant |
+Move toward an **assistive EV spot-detection recommender** built on CellProfiler:
 
-### Phase 18 PoC constraints (approved)
+1. User imports a single `.cppipe` pipeline (their assay workflow).
+2. Our code parses the pipeline and identifies threshold-related settings
+   (e.g. `IdentifyPrimaryObjects`, `IdentifySecondaryObjects`, `ApplyThreshold`).
+3. Our code generates a bounded set of **candidate pipeline variants** by varying
+   those settings (global vs adaptive, correction factor, smoothing scale, object
+   size limits, noise rejection, etc.).
+4. **CellProfiler runs each variant** headlessly (one run per variant, batch over
+   images within each run).
+5. Our code compares CellProfiler outputs (spot counts, centers, colocalization)
+   using **biologically relevant EV spot heuristics**.
+6. Present the **best result plus ranked alternatives**, with clear confidence and
+   reasoning, and allow user override.
 
-1. **Single-channel foreground probability maps only** — no binary masks, no
-   multi-channel probability stacks in the PoC.
-2. **Staging normalizes all probability maps to 0–1** before CellProfiler runs.
-   Do not rely on documentation alone for 0–255 vs 0–1 behavior; normalization
-   is enforced in Python staging code.
-3. **Staging validates image pairs before CP** and writes `cellprofiler_input_manifest.json`:
-   - original image exists
-   - matching `*_prob.tif` exists
-   - dimensions match
-   - filenames pair correctly (stem + `_prob` suffix)
-   - fail fast on any validation error
-4. **Dedicated CellProfiler Weka template** — authored and tested once in
-   CellProfiler desktop (`examples/cellprofiler_workflows/weka_assay_template.cppipe`).
-   At runtime the program materializes a temporary working copy and patches only
-   minimal settings (e.g. probability threshold, object diameter range).
-5. **Weka training out of scope** — classifier training happens in Fiji TWSS;
-   this repo only applies the classifier and stages outputs for CellProfiler.
-6. **Phase 17 remains fallback** — `cellprofiler_threshold` mode and Threshold
-   Parameter Assistant code are maintained, not removed.
+**Do not** reimplement CellProfiler thresholding logic in `threshold.py` or
+similar modules for Phase 17. Python handles pipeline parsing, variant generation,
+output comparison, and presentation only.
 
-### Biological objective (unchanged)
+### Thresholding framework (global + adaptive/local via CellProfiler)
 
-Optimize for useful EV spot detection outputs: reliable counts, plausible spot
-sizes, low merge/split artifacts, and stable measurement CSVs. Biological
+Both categories must be supported and remain **visible in the final comparison
+stage** as separate pipeline variants. The system must not assume adaptive is
+always better.
+
+Global and adaptive strategies are configured through CellProfiler module
+settings (e.g. `Threshold strategy: Global` vs `Adaptive` in
+`IdentifyPrimaryObjects`). Phase 17 varies these across `.cppipe` variants; it
+does not implement parallel threshold algorithms in Python.
+
+### AI-assisted threshold selection (orchestration layer above CellProfiler)
+
+```text
+Imported .cppipe
+↓
+Threshold-setting extractor (parse modules + settings)
+↓
+Variant generator (bounded candidate pipelines)
+↓
+CellProfiler batch runs (one per variant)
+↓
+Output comparator + spot-quality scorer
+↓
+Ranked recommendations (best + alternatives)
+```
+
+Our code decides **which pipeline variants to try** and **which output is best**.
+CellProfiler decides **how each variant thresholds and detects spots**.
+
+Variant generation may consider image context (SNR, spot scale, channel layout) but
+threshold execution always happens inside CellProfiler, not in a Python reimplementation.
+
+### Biological objective (assistive target)
+
+The objective is not “best mathematical threshold,” and it is also not a claim
+of “perfect biological truth.” The objective is:
+
+```text
+most biologically useful EV spot detection / colocalization result (recommended)
+```
+
+Meaning (heuristics we optimize for):
+
+- reliable spot counts per channel
+- correct spot centers for overlap / colocalization analysis
+- minimal merged bright spots
+- minimal fragmented spot detections
+- minimal background false positives
+- biologically reasonable spot size distribution
+- stable dual-positive / colocalized particle counts
+
+The AI should assist parameter selection and provide ranked options; biological
 validation remains the user’s responsibility.
 
-| Layer | Role |
-|-------|------|
-| **Fiji/ImageJ** | OIR projection, Weka classifier application (batch macros) |
-| **Python staging** | Pair validation, probability normalization 0–1, CP input folder |
-| **CellProfiler** | Object ID on probability channel, filtering, measurement, export |
-| **Python orchestration** | Workflow, logs, QC overlays, results organization (Phases 13–15) |
-| **Python pipeline** | Optional fallback for teaching/tests only |
+### Requested deliverable (before implementing anything)
 
-**What we do (Phase 18 path):**
+Before implementing anything, provide:
 
-- Run existing OIR Z-max projection when needed (`prepare_input`).
-- Apply a user-provided Weka classifier to a batch of images via Fiji.
-- Stage validated, normalized probability maps with matching originals for CP.
-- Run CellProfiler **once** per folder using the Weka assay template.
-- Collect measurements, masks, labels, and QC artifacts in the existing layout.
-
-### Phase 17 fallback (summary)
-
-Phase 17 implements a **CellProfiler threshold parameter assistant**: parse an
-imported `.cppipe`, generate bounded threshold variants, run CellProfiler once
-**per variant**, compare outputs, and rank candidates for human review. This
-works conceptually but is **too slow** when many variants are needed. It remains
-available as `cellprofiler_threshold` fallback mode. See
-[Phase 17: EV Spot Detection & Threshold Intelligence (fallback: `cellprofiler_threshold`)](#phase-17-ev-spot-detection--threshold-intelligence-fallback-cellprofiler_threshold)
-for full design and implementation status.
+1. Updated architecture proposal.
+2. Revised roadmap focused on thresholding.
+3. Threshold intelligence design.
+4. Image-feature extraction plan.
+5. Automatic parameter recommendation plan.
+6. Validation strategy.
+7. Biological-quality scoring strategy.
+8. How CellProfiler and Fiji thresholding methods fit into the new architecture.
 
 | Layer | Role |
 |-------|------|
@@ -120,7 +171,7 @@ for full design and implementation status.
 | **Fiji/ImageJ** | External export/QC engine — headless TIFF export, macros |
 | **Python TIFF export** | In-process fallback — ImageJ-compatible TIFF writing via `tifffile` |
 
-**What we do (all modes):**
+**What we do:**
 
 - Process folders of TIFFs or multi-page TIFF stacks with a composable Python pipeline.
 - Run CellProfiler headlessly via `.cppipe` pipelines.
@@ -170,23 +221,23 @@ invocation is the default.
   `cellprofiler_raw/` instead.
 - Building GUI controls that duplicate CellProfiler module logic in Python — the
   GUI configures `.cppipe` pipelines and invokes CellProfiler instead.
-- Reimplementing CellProfiler thresholding algorithms in Python — use CP modules
-  or Weka probability maps instead.
-- Running many CellProfiler variant trials in production when a Weka classifier
-  is available (Phase 17 fallback only).
+- Reimplementing CellProfiler thresholding algorithms in Python for Phase 17 —
+  use pipeline variants and CellProfiler runs instead.
 
 **Phase 17 exception to single-run batch-first:** threshold optimization may
 run CellProfiler **once per candidate pipeline variant** (not once per image).
-This is why Phase 18 (one Fiji batch + one CP run) is preferred for EV spots.
-Keep Phase 17 variants bounded when used.
+Keep variants bounded; each variant still processes the full input folder in one
+CP subprocess.
 
-**Phase 18 batch-first:** one Fiji subprocess per folder for Weka apply; one
-CellProfiler subprocess per folder for measurement. Python staging is in-process.
+## Thresholding & spot-detection intelligence (Phase 17 — primary focus, next milestone)
 
-## Phase 17 — EV spot detection & threshold intelligence (fallback mode: `cellprofiler_threshold`)
+**Status: `IN VALIDATION` — core orchestration implemented; real-data E2E and EV scoring upgrades pending.**
 
-**Status: `MAINTAINED` — implemented; fallback when no Weka classifier is used.
-Not the preferred EV path (see Phase 18).**
+Phase 17 becomes the primary focus: a **CellProfiler-based assistive EV
+spot-detection recommender**. The user imports one pipeline; our code identifies
+threshold settings, generates candidate `.cppipe` variants, runs CellProfiler for
+each variant, compares outputs, and returns the **best result plus alternatives**
+with user override.
 
 **Architecture rule:** do **not** reimplement CellProfiler thresholding algorithms
 in our codebase. All thresholding and spot detection runs inside CellProfiler.
@@ -283,9 +334,8 @@ For every phase:
 | 14 | Fiji/ImageJ headless export integration | `PHASE COMPLETE` ✔ |
 | 15.1 | GUI workflow shell (run, logs, preview, export) | `PHASE COMPLETE` ✔ |
 | 15.2 | GUI pipeline builder & CP module exposure | `PHASE COMPLETE` ✔ |
-| 16 | Optional Python analysis enhancements (deprioritized) | `PHASE NOT COMPLETE` |
-| 17 | EV spot detection: CP threshold parameter assistant (**fallback** `cellprofiler_threshold`) | `MAINTAINED` |
-| 18 | **ML-assisted Fiji/Weka + CP workflow** (**preferred** `weka_ml`) | `PLANNED` |
+| 16 | Optional Python analysis enhancements (deprioritized vs EV Phase 17 work) | `PHASE NOT COMPLETE` |
+| 17 | **EV spot detection: CP pipeline variant recommender** | `IN VALIDATION` |
 | **S.0** | **Stack track prep — fix failing test, update docs** | `PHASE COMPLETE` ✔ |
 | **S.1** | **Stack I/O — AxisInfo, StackFrame, iter_stack_frames** | `PHASE COMPLETE` ✔ |
 | **S.2** | Stack data model — ImageStack, load from folder or file | `PHASE COMPLETE` ✔ |
@@ -660,15 +710,15 @@ Complete **Phase 12 (Python TIFF fallback)** before **Phase 13 (CellProfiler
 workflow integration)**. Complete **Phase 13** before **Phase 14 (Fiji/ImageJ
 headless export)**. Complete **Phase 14** before **Phase 15** (sub-phases
 **15.1 → 15.2**). Phase **16** extends the optional Python engine only.
-Phase **18** (ML-assisted Fiji/Weka + CellProfiler — **preferred EV path**) is
-the primary focus after integration phases. Phase **17** remains as fallback
-mode `cellprofiler_threshold` when no Weka classifier is used.
+Phase **17** (EV spot detection & threshold intelligence — **next milestone**)
+is the primary focus after the completed integration phases. Keep Phase 17
+visible in the roadmap; it complements CellProfiler, it does not compete with it.
 
 All workflow phases must follow **batch-first execution** (see above): one
 CellProfiler run per folder, one Fiji run per folder when possible, per-image
 external launches only as a documented fallback.
 
-**Forward roadmap (Phases 12–18):**
+**Forward roadmap (Phases 12–17):**
 
 | Phase | Focus | Status |
 |-------|-------|--------|
@@ -678,8 +728,7 @@ external launches only as a documented fallback.
 | 15.1 | GUI workflow shell | `PHASE COMPLETE` ✔ |
 | 15.2 | GUI pipeline builder & CP module exposure | `PHASE COMPLETE` ✔ |
 | 16 | Optional Python analysis enhancements (fallback engine only) | `PHASE NOT COMPLETE` |
-| 17 | EV spot detection: CP threshold assistant (**fallback** `cellprofiler_threshold`) | `MAINTAINED` |
-| 18 | **ML-assisted Fiji/Weka + CP** (**preferred** `weka_ml`) | `PLANNED` |
+| 17 | **EV spot detection: CP pipeline variant recommender** | `IN VALIDATION` |
 
 ## Phase 10.1: CellProfiler Integration Validation
 
@@ -1532,10 +1581,7 @@ Acceptance:
 
 Status: `PHASE NOT COMPLETE`
 
-## Phase 17: EV Spot Detection & Threshold Intelligence (fallback: `cellprofiler_threshold`)
-
-**Status: `MAINTAINED` — fully implemented as fallback mode. Not the preferred EV
-path; see Phase 18 for `weka_ml`.**
+## Phase 17: EV Spot Detection & Threshold Intelligence (CellProfiler-based)
 
 Goal: build a **Threshold Parameter Assistant** for
 confocal fluorescence EV-style images with sparse bright spots on a dark
@@ -1777,6 +1823,7 @@ replace biological validation by the user.
 | 17.8 | Pixel + object-level segmentation metrics | `IMPLEMENTED` |
 | 17.9 | GT-scored variant comparison and parallel ranking | `IMPLEMENTED` |
 | 17.10 | GT UX in assistant GUI/CLI | `IMPLEMENTED` |
+| 18.x | ML segmentation (only if GT proves CP insufficient) | `NOT SCHEDULED` |
 
 **Subset-first recommender workflow (implemented):**
 
@@ -1803,162 +1850,9 @@ ground-truth scoring (17.7–17.10) are implemented:
 7. Biological-quality scoring strategy for spot detection and colocalization. — **GT-primary when masks available; heuristic fallback**
 8. GUI comparison panel design (global vs adaptive visible in final stage). — **implemented in Threshold Parameter Assistant window**
 
-Status: `MAINTAINED` — use when no Weka classifier is available. Ground-truth
-scoring (17.7–17.10) can also validate Phase 18 Weka+CP outputs.
-
-## Phase 18: ML-Assisted Fiji/Weka + CellProfiler Workflow (preferred: `weka_ml`)
-
-**Status: `PLANNED` — Phase 18.0 documentation complete; implementation 18.1+ pending.**
-
-Goal: **ML-assisted biological object segmentation and measurement** for EV
-fluorescence images. Trainable Weka Segmentation (in Fiji, **outside this repo**)
-produces single-channel foreground probability maps; CellProfiler performs object
-identification on those maps, filtering, measurement, SaveImages, and
-ExportToSpreadsheet — **one CellProfiler run per batch**.
-
-```text
-Input images
-    ↓
-Fiji — OIR Z-max projection (existing prepare_input)
-    ↓
-Fiji — apply user-trained Weka classifier (batch macro)
-    ↓
-Python — stage cellprofiler_input/ (validate pairs, normalize prob maps to 0–1)
-    ↓
-CellProfiler — ONE run (weka_assay_template.cppipe, runtime materialization)
-    ↓
-measurements/, masks/, labels/, qc/, logs/ (existing layout)
-```
-
-### Scope boundaries
-
-**In scope (PoC):**
-
-- Single-channel **foreground probability maps** only (`*_prob.tif`).
-- Python staging: pair validation, **mandatory 0–1 normalization**, manifest JSON.
-- Dedicated CP template authored once in CellProfiler desktop; runtime temp copy
-  with minimal patches (probability threshold, object diameter range).
-- Reuse existing OIR projection, CP runner, export organization, QC overlays.
-- Segmentation QC metrics: object count, median area, tiny/huge fractions,
-  foreground percentage, overlay previews.
-
-**Out of scope:**
-
-- Weka / TWSS **training** UI or active learning in this repository.
-- Binary mask export path (deferred).
-- Multi-channel probability stacks (deferred).
-- Reimplementing CellProfiler or Weka algorithms in Python.
-
-### Segmentation mode: `weka_ml`
-
-Config surface (to be added to `CellProfilerWorkflowConfig` in Phase 18.4):
-
-- `segmentation_mode = "weka_ml"`
-- `weka_classifier_path` — saved classifier from Fiji TWSS
-- `weka_probability_threshold` — IPO manual threshold on normalized prob channel (default 0.5)
-- `weka_cppipe_template_path` — optional; default bundled template
-
-### Staging contract (`cellprofiler_input_staging.py` — Phase 18.2)
-
-For each image stem `sample_001`:
-
-| File | Role |
-|------|------|
-| `sample_001.tif` | Original fluorescence (post OIR projection if applicable) |
-| `sample_001_prob.tif` | Single-channel foreground probability, **normalized to 0–1** |
-
-**Required validations before CellProfiler** (fail fast):
-
-1. Original image file exists.
-2. Matching `*_prob.tif` exists for each original.
-3. Width and height match between original and probability map.
-4. Filename pairing is correct (`{stem}_prob.tif`).
-5. `logs/cellprofiler_input_manifest.json` is written on success.
-
-**Normalization (required, not documentation-only):**
-
-- Read each probability TIFF in staging.
-- If values appear to be 0–255 (e.g. integer dtype or max > 1), scale to 0–1.
-- Write normalized probability maps into `cellprofiler_input/` (or overwrite
-  staged prob files) before CP runs.
-- CellProfiler IPO manual threshold assumes **0–1** probability scale.
-
-### Results folder additions
-
-```text
-results/
-  oir_projection/           # existing
-  weka_segmentation/        # raw Weka macro outputs (pre-normalization)
-    probability/
-    logs/
-  cellprofiler_input/       # validated, normalized pairs for CP
-  cellprofiler_raw/         # existing
-  measurements/ masks/ labels/ qc/ logs/
-```
-
-### CellProfiler template (`weka_assay_template.cppipe` — Phase 18.3)
-
-Authored and tested **once** in CellProfiler desktop, committed under
-`examples/cellprofiler_workflows/`. Expected module flow:
-
-- **Images** — reads staged `cellprofiler_input/`
-- **NamesAndTypes** — `EV` (original `*.tif`, exclude `*_prob.tif`); `Prob` (`*_prob.tif`)
-- **IdentifyPrimaryObjects** — input `Prob`, Manual threshold on 0–1 scale
-- **MeasureObjectIntensity** (optional) — intensity image `EV`
-- **SaveImages** + **ExportToSpreadsheet**
-
-Runtime adapter (`weka_pipeline_adapter.py`) loads template, writes
-`logs/working_weka_pipeline.cppipe`, patches **only**:
-
-- IPO manual threshold (from `weka_probability_threshold`)
-- Typical object diameter range (from config)
-
-### Phase 18 sub-phases
-
-| Sub-phase | Goal | Status |
-|-----------|------|--------|
-| 18.0 | Architecture docs, roadmap reframe, staging contract | `PHASE COMPLETE` ✔ |
-| 18.1 | Fiji Weka batch macro + `weka_segmentation.py` | `PLANNED` |
-| 18.2 | `cellprofiler_input_staging.py` — validate, normalize 0–1, manifest | `PLANNED` |
-| 18.3 | `weka_assay_template.cppipe` + `weka_pipeline_adapter.py` | `PLANNED` |
-| 18.4 | Wire `segmentation_mode` into `analysis.py` + CLI | `PLANNED` |
-| 18.5 | `segmentation_qc.py` — reuse metrics from variant comparison | `PLANNED` |
-| 18.6 | PoC example, `docs/weka_cellprofiler_workflow.md`, manual E2E checklist | `PLANNED` |
-| 18.7+ | GUI mode selector, Weka cache, binary masks, multi-channel | `NOT SCHEDULED` |
-
-### Manual validation checklist (Phase 18 PoC)
-
-Mark each item after a successful real run (not mocked tests):
-
-- [ ] Fiji with Trainable Weka Segmentation installed; classifier trained externally.
-- [ ] Saved classifier file path resolves.
-- [ ] `apply_weka_classifier.ijm` (or equivalent) produces `*_prob.tif` per input image.
-- [ ] Staging rejects a deliberately mismatched pair (missing prob, wrong dimensions).
-- [ ] Staging normalizes uint8 0–255 probability maps to 0–1 (spot-check pixel values).
-- [ ] `logs/cellprofiler_input_manifest.json` lists all pairs.
-- [ ] `weka_assay_template.cppipe` runs in CellProfiler desktop on staged folder.
-- [ ] End-to-end Python workflow: one CP run → `measurements/*.csv` present.
-- [ ] Mask/label TIFFs and QC overlay PNGs match existing results layout.
-- [ ] `workflow_summary.json` includes `segmentation_mode: weka_ml` and Weka timing.
-
-Self-check (after 18.6):
-
-```bash
-python examples/run_weka_cellprofiler_workflow.py \
-  --input-dir path/to/images \
-  --output-dir path/to/results \
-  --weka-classifier path/to/classifier.model
-```
-
-### Integration map (existing code)
-
-| New work | Reuse |
-|----------|-------|
-| `weka_segmentation.py` | `fiji_runner.py`, `oir_zmax_batch.py` batch pattern |
-| `cellprofiler_input_staging.py` | `io.read_tiff`, `prepare_input_profile` logging style |
-| `weka_pipeline_adapter.py` | `cppipe_io.py`, `_materialize_pipeline_for_run` pattern |
-| Workflow hook | `analysis.run_cellprofiler_workflow_from_config` |
-| QC summary | `threshold_variant_comparison.py` metrics → `segmentation_qc.py` |
+Status: `IN VALIDATION` — run subset trials on real EV images with optional
+reference masks before expanding scope (ISO / ApplyThreshold modules,
+colocalization scoring, ML).
 
 ## Optional future work (not scheduled)
 
@@ -1978,7 +1872,7 @@ slice, apply the same preprocess → segment → measure pipeline to each slice,
 export per-frame TIFFs and a combined CSV.
 
 This is an **independent track** alongside the CellProfiler workflow track
-(Phases 13–18). Both use the same core Python pipeline modules.
+(Phases 13–17). Both use the same core Python pipeline modules.
 
 ```text
 Input (folder of TIFFs  OR  one multi-page stack TIFF)

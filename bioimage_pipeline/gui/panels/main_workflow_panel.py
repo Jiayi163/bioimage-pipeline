@@ -127,7 +127,7 @@ def build_main_workflow_panel(
     open_results_button.pack(side="left", padx=(8, 0))
     threshold_recommender_button = ttk.Button(
         run_buttons,
-        text="Threshold Recommender…",
+        text="Threshold Variant QC Assistant…",
     )
     threshold_recommender_button.pack(side="left", padx=(8, 0))
     load_recent_paths_button = ttk.Button(

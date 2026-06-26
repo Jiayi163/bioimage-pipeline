@@ -1,4 +1,4 @@
-"""Run subset-first threshold parameter assistant trials and confirmed full applies.
+"""Run subset-first CellProfiler threshold variant QC assistant trials and confirmed full applies.
 
 Phase 17 orchestration CLI:
 
@@ -6,7 +6,7 @@ Phase 17 orchestration CLI:
 2. ``apply`` — after user review, run one chosen variant on the full dataset
 
 The imported pipeline file is never modified. Nothing is auto-applied without ``--confirm``.
-Heuristic rankings are screening aids only, not ground-truth optimality.
+Heuristic rankings are QC aids only, not biological ground truth.
 """
 
 from __future__ import annotations

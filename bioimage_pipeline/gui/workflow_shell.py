@@ -1037,19 +1037,19 @@ def launch_workflow_shell() -> None:
         output_dir = workflow_panel.output_dir_entry.get().strip()
         if not path_text:
             messagebox.showerror(
-                "Threshold Recommender",
+                "Threshold Variant QC Assistant",
                 "Import a CellProfiler pipeline first.",
             )
             return
         if not input_dir:
             messagebox.showerror(
-                "Threshold Recommender",
+                "Threshold Variant QC Assistant",
                 "Select a default input folder first.",
             )
             return
         if not output_dir:
             messagebox.showerror(
-                "Threshold Recommender",
+                "Threshold Variant QC Assistant",
                 "Select a default output folder first.",
             )
             return
@@ -1057,7 +1057,7 @@ def launch_workflow_shell() -> None:
             cppipe_path = str(resolve_imported_pipeline_path(path_text))
             resolved_output_dir = str(resolve_workflow_output_dir(output_dir))
         except ValueError as exc:
-            messagebox.showerror("Threshold Recommender", str(exc))
+            messagebox.showerror("Threshold Variant QC Assistant", str(exc))
             return
 
         launch_threshold_recommender_window(

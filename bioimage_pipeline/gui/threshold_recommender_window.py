@@ -1,4 +1,4 @@
-"""Separate Tk window for subset-first threshold recommender trials."""
+"""Separate Tk window for CellProfiler threshold variant QC assistant trials."""
 
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ def launch_threshold_recommender_window(
     from tkinter import messagebox, ttk
 
     window = tk.Toplevel(parent)
-    window.title("Threshold Parameter Assistant")
+    window.title("CellProfiler Threshold Variant QC Assistant")
     window.geometry("1100x780")
     window.minsize(900, 620)
 
@@ -642,10 +642,10 @@ def launch_threshold_recommender_window(
 
     def run_trial_async() -> None:
         if not Path(context.cppipe_path).is_file():
-            messagebox.showerror("Threshold Recommender", "Import a pipeline first.")
+            messagebox.showerror("Threshold Variant QC Assistant", "Import a pipeline first.")
             return
         if not Path(context.input_dir).is_dir():
-            messagebox.showerror("Threshold Recommender", "Input folder not found.")
+            messagebox.showerror("Threshold Variant QC Assistant", "Input folder not found.")
             return
 
         selected_indices = list(image_list.curselection())

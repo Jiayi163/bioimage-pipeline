@@ -16,8 +16,14 @@ dependencies = [
     "tifffile",
     "scikit-image",
     "scipy",
-    "pandas"
+    "pandas",
+    "scikit-learn>=1.3",
+    "joblib>=1.3",
 ]
+
+[project.scripts]
+train-rf-segmenter = "bioimage_pipeline.trainable_rf:train_cli_main"
+predict-rf-segmenter = "bioimage_pipeline.trainable_rf:predict_cli_main"
 
 [project.optional-dependencies]
 dev = [

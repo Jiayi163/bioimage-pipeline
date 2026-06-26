@@ -1,4 +1,4 @@
-"""Subset-first threshold recommender orchestration."""
+"""Subset-first CellProfiler threshold variant QC assistant orchestration."""
 
 from __future__ import annotations
 
