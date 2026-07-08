@@ -1,8 +1,3 @@
-"""Run self-adaptive thresholding on a folder of microscopy images.
-
-Experimental Phase 17 prototype — see DEVELOPMENT_PLAN.md. Not the default
-workflow; for tuning and validation only.
-"""
 
 from __future__ import annotations
 
