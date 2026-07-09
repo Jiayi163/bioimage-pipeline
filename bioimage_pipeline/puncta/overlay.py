@@ -18,6 +18,35 @@ class OverlayRenderer:
     def __init__(self, *, cross_half_size: int = 3) -> None:
         self.cross_half_size = cross_half_size
 
+    def render_fiji_overlay(
+        self,
+        image: np.ndarray,
+        result: DeclumpResult,
+        *,
+        show_rejected: bool = True,
+    ) -> np.ndarray:
+        """RGB overlay for Fiji: green=fit_ok, yellow=fallback, red=rejected/suspicious."""
+        base = normalize_for_display(image)
+        overlay = np.stack([base, base, base], axis=-1).astype(np.float32)
+
+        for candidate in result.accepted:
+            if candidate.fit_status == "fit_ok":
+                if candidate.under_split_suspect:
+                    color = (255, 0, 0)
+                else:
+                    color = (0, 255, 0)
+            elif candidate.fit_status == "fit_failed_fallback":
+                color = (255, 220, 0)
+            else:
+                color = (255, 128, 0)
+            self._draw_cross(overlay, candidate, color=color)
+
+        if show_rejected:
+            for candidate in result.rejected:
+                self._draw_cross(overlay, candidate, color=(255, 0, 0))
+
+        return np.clip(overlay, 0, 255).astype(np.uint8)
+
     def render(
         self,
         image: np.ndarray,
@@ -32,14 +61,16 @@ class OverlayRenderer:
         overlay = np.stack([base, base, base], axis=-1).astype(np.float32)
 
         for candidate in result.accepted:
-            if candidate.sigma is not None:
+            if candidate.fit_status == "fit_ok":
                 color = (0, 255, 0)
                 if show_sigma_circles and candidate.sigma is not None:
                     self._draw_sigma_circle(overlay, candidate, color=(0, 200, 0))
                 if show_seed_shifts and candidate.center_shift is not None and candidate.center_shift > 0.25:
                     self._draw_shift_line(overlay, candidate, color=(0, 180, 255))
-            else:
+            elif candidate.fit_status == "fit_failed_fallback":
                 color = (255, 220, 0)
+            else:
+                color = (255, 128, 0)
             self._draw_cross(overlay, candidate, color=color)
 
         if show_rejected:
@@ -101,7 +132,7 @@ class OverlayRenderer:
     ) -> None:
         if candidate.sigma is None:
             return
-        radius = max(1.0, float(candidate.sigma) * 2.355 / 2.0)
+        radius = max(1.0, float(candidate.sigma or 1.0) * 2.355 / 2.0)
         row = candidate.final_row
         col = candidate.final_col
         height, width = overlay.shape[:2]

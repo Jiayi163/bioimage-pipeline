@@ -29,6 +29,18 @@ class ConnectedObjectAnalyzer:
             brightest_index = int(np.argmax(intensities))
             brightest_row, brightest_col = coords[brightest_index]
 
+            major = float(
+                getattr(region, "axis_major_length", None)
+                or getattr(region, "major_axis_length", 0.0)
+                or 0.0
+            )
+            minor = float(
+                getattr(region, "axis_minor_length", None)
+                or getattr(region, "minor_axis_length", 0.0)
+                or 0.0
+            )
+            elongation = major / max(minor, 1e-6) if minor > 0 else 1.0
+
             objects.append(
                 ObjectInfo(
                     label=int(region.label),
@@ -39,6 +51,11 @@ class ConnectedObjectAnalyzer:
                     brightest_row=float(brightest_row),
                     brightest_col=float(brightest_col),
                     brightest_intensity=float(intensities[brightest_index]),
+                    eccentricity=float(getattr(region, "eccentricity", 0.0) or 0.0),
+                    solidity=float(getattr(region, "solidity", 1.0) or 1.0),
+                    major_axis_length=major,
+                    minor_axis_length=minor,
+                    elongation=float(elongation),
                 )
             )
 

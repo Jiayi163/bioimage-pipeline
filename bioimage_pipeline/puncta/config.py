@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 ThresholdMethod = Literal["otsu", "manual", "adaptive", "sauvola", "external_mask"]
+DiagnosticMode = Literal[
+    "off",
+    "summary",
+    "balanced",
+    "suspicious_only",
+    "selected_objects",
+    "all",
+]
 
 
 @dataclass
 class PunctaDeclumpConfig:
-    """Tunable parameters for size-gated puncta declumping."""
+    """Tunable parameters for Gaussian / GMM puncta declumping."""
 
     # Mask generation
     threshold_method: ThresholdMethod = "otsu"
@@ -24,16 +32,30 @@ class PunctaDeclumpConfig:
     fill_holes: bool = True
     clear_border: bool = True
 
-    # Size gate
+    # Size gate / expected spot geometry
     expected_single_spot_diameter: float = 5.0
     single_spot_max_diameter: float = 7.0
+    expected_single_spot_area_factor: float = 1.8
+    elongation_gmm_threshold: float = 1.6
+    eccentricity_gmm_threshold: float = 0.65
+    solidity_gmm_threshold: float = 0.85
 
-    # Maxima detection (large / clumped objects)
-    smoothing_sigma: float = 0.75
-    min_peak_distance: int = 3
+    # Local background correction
+    background_ring_width: int = 3
+    background_margin: int = 4
+
+    # Maxima detection (defaults tuned for close/overlapping spots)
+    smoothing_sigma: float = 0.4
+    min_peak_distance: int = 2
     peak_noise_tolerance: float = 0.0
+    peak_relative_prominence: float = 0.08
+    peak_min_relative_height: float = 0.25
+    use_dog_peaks: bool = True
+    dog_sigma_small: float = 0.6
+    dog_sigma_large: float = 1.4
+    min_reliable_peaks_for_gmm: int = 2
 
-    # Gaussian fitting
+    # Single-component elliptical fitting
     fit_roi_radius: int = 5
     min_sigma: float = 0.5
     max_sigma: float = 4.0
@@ -41,12 +63,50 @@ class PunctaDeclumpConfig:
     min_amplitude: float = 10.0
     max_fit_residual: float | None = None
     max_fit_residual_relative: float = 0.25
+    min_r_squared: float = 0.3
+
+    # Balanced GMM triage thresholds (strong warnings — any one triggers GMM)
+    gmm_trigger_r_squared: float = 0.6
+    gmm_trigger_residual_relative: float = 0.18
+    gmm_trigger_sigma_factor: float = 1.4
+    gmm_trigger_area_factor: float = 3.0
+    gmm_weak_fit_r_squared: float = 0.75
+    # Legacy residual thresholds (used in under-split reporting)
+    residual_gmm_r_squared: float = 0.75
+    residual_gmm_relative: float = 0.12
+    residual_gmm_sigma_factor: float = 1.4
+
+    # GMM / mixture fitting
+    gmm_max_components: int = 5
+    gmm_try_component_delta: int = 1
+    gmm_min_component_separation: float = 1.5
+    gmm_merge_amplitude_ratio: float = 0.12
+    gmm_bic_improvement_margin: float = 0.0
 
     # Deduplication
-    min_center_separation: float = 3.0
+    min_center_separation: float = 2.5
 
-    # Single-object path: accept brightest pixel when fit fails
+    # Fallback / diagnostics (PNG exports are expensive; CSV debug columns always exported)
     accept_brightest_on_fit_failure: bool = True
+    diagnostic_mode: DiagnosticMode = "balanced"
+    max_diagnostic_objects: int = 50
+    log_progress: bool = True
+    progress_log_interval: int = 50
+    diagnostic_object_ids: tuple[int, ...] = ()
+    diagnostic_low_r_squared: float = 0.5
+    diagnostic_high_residual_relative: float = 0.20
+    under_split_report_top_n: int = 50
+
+    # Fiji TIFF exports
+    export_fiji_tiffs: bool = True
+    include_fallback_in_centers: bool = False
+    fiji_center_disk_radius: int = 2
+    fiji_label_disk_radius: float = 2.0
+
+    # Deprecated: use diagnostic_mode instead. Kept for backward compatibility.
+    export_diagnostics: bool | None = None
+    diagnostic_residual_threshold: float = 0.20
+    export_under_split_diagnostics: bool | None = None
 
     def __post_init__(self) -> None:
         if self.single_spot_max_diameter <= 0:
@@ -59,3 +119,35 @@ class PunctaDeclumpConfig:
             raise ValueError("min_center_separation must be non-negative")
         if self.max_fit_residual_relative <= 0:
             raise ValueError("max_fit_residual_relative must be positive")
+        if self.gmm_max_components < 1:
+            raise ValueError("gmm_max_components must be at least 1")
+        if self.max_diagnostic_objects < 1:
+            raise ValueError("max_diagnostic_objects must be at least 1")
+        if self.diagnostic_mode not in (
+            "off",
+            "summary",
+            "balanced",
+            "suspicious_only",
+            "selected_objects",
+            "all",
+        ):
+            raise ValueError(f"Invalid diagnostic_mode: {self.diagnostic_mode}")
+        if self.progress_log_interval < 1:
+            raise ValueError("progress_log_interval must be at least 1")
+
+        # Backward compatibility for legacy boolean flags.
+        if self.export_diagnostics is False and self.diagnostic_mode in (
+            "balanced",
+            "suspicious_only",
+        ):
+            self.diagnostic_mode = "off"
+        if self.export_under_split_diagnostics is False and self.diagnostic_mode in (
+            "balanced",
+            "suspicious_only",
+        ):
+            self.diagnostic_mode = "summary"
+
+    @property
+    def expected_single_spot_area(self) -> float:
+        radius = self.expected_single_spot_diameter / 2.0
+        return float(3.141592653589793 * radius * radius)

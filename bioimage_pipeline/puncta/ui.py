@@ -68,6 +68,18 @@ def load_mask_plane(
     return mask, metadata
 
 
+def parse_diagnostic_object_ids(value: str | None) -> tuple[int, ...]:
+    """Parse comma-separated object IDs from CLI."""
+    if not value:
+        return ()
+    ids: list[int] = []
+    for part in value.split(","):
+        part = part.strip()
+        if part:
+            ids.append(int(part))
+    return tuple(ids)
+
+
 def build_config_from_args(args: argparse.Namespace) -> PunctaDeclumpConfig:
     """Construct config from parsed CLI arguments."""
     return PunctaDeclumpConfig(
@@ -92,6 +104,12 @@ def build_config_from_args(args: argparse.Namespace) -> PunctaDeclumpConfig:
         max_fit_residual=args.max_fit_residual,
         max_fit_residual_relative=args.max_fit_residual_relative,
         min_center_separation=args.min_center_separation,
+        diagnostic_mode=args.diagnostic_mode,
+        max_diagnostic_objects=args.max_diagnostic_objects,
+        diagnostic_object_ids=parse_diagnostic_object_ids(args.diagnostic_objects),
+        include_fallback_in_centers=args.include_fallback_centers,
+        export_fiji_tiffs=not args.no_fiji_tiffs,
+        log_progress=not args.no_progress,
     )
 
 
@@ -171,6 +189,41 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Include rejected candidates as red crosses in the overlay.",
     )
+    parser.add_argument(
+        "--diagnostic-mode",
+        choices=("off", "summary", "balanced", "suspicious_only", "selected_objects", "all"),
+        default="balanced",
+        help=(
+            "Diagnostic PNG mode: off (none), summary (CSV/JSON only), "
+            "balanced (default), suspicious_only (alias), selected_objects, or all."
+        ),
+    )
+    parser.add_argument(
+        "--diagnostic-objects",
+        default=None,
+        help="Comma-separated mask object IDs to always include in diagnostics (e.g. 126,159,713).",
+    )
+    parser.add_argument(
+        "--max-diagnostic-objects",
+        type=int,
+        default=50,
+        help="Maximum number of diagnostic PNGs to export (default: 50).",
+    )
+    parser.add_argument(
+        "--include-fallback-centers",
+        action="store_true",
+        help="Include fallback (non-Gaussian) centers in puncta_fit_ok_centers.tif.",
+    )
+    parser.add_argument(
+        "--no-fiji-tiffs",
+        action="store_true",
+        help="Skip Fiji TIFF exports (fit_ok_centers, component_labels, overlay.tif, gmm_labels).",
+    )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable progress and runtime summary logs on stderr.",
+    )
     return parser
 
 
@@ -208,7 +261,16 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
     config = build_config_from_args(args)
     config.threshold_method = threshold_method
 
-    result = run_puncta_declump(image, config, external_mask=external_mask)
+    diagnostics_dir: str | None = None
+    if config.diagnostic_mode not in ("off", "summary"):
+        diagnostics_dir = str(args.output_dir / "diagnostics")
+
+    result = run_puncta_declump(
+        image,
+        config,
+        external_mask=external_mask,
+        diagnostics_dir=diagnostics_dir,
+    )
     result.threshold_metadata["image_plane"] = image_plane_metadata
     if mask_plane_metadata is not None:
         result.threshold_metadata["mask_plane"] = mask_plane_metadata
@@ -219,6 +281,9 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
         result,
         stem=args.stem,
         image_shape=image.shape,
+        image=image,
+        config=config,
+        show_rejected=args.show_rejected,
     )
 
     overlay_renderer = OverlayRenderer(cross_half_size=max(2, config.fit_roi_radius // 2))
@@ -230,12 +295,13 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
     )
     paths["overlay"] = overlay_path
 
-    gaussian_count = sum(1 for c in result.accepted if c.sigma is not None)
-    fallback_count = sum(1 for c in result.accepted if c.sigma is None)
+    gaussian_count = sum(1 for c in result.accepted if c.fit_status == "fit_ok")
+    fallback_count = sum(1 for c in result.accepted if c.fit_status == "fit_failed_fallback")
     result.threshold_metadata["overlay_legend"] = {
-        "green_cross_and_circle": "Gaussian fit accepted",
+        "green_cross_and_circle": "fit_ok (Gaussian fit accepted)",
         "cyan_line": "Seed-to-fit center shift (>0.25 px)",
-        "yellow_cross": "Brightest-pixel fallback (no Gaussian fit)",
+        "yellow_cross": "fit_failed_fallback (integer seed only, no fitted coords)",
+        "red_cross": "Rejected candidate (--show-rejected)",
         "gaussian_fit_count": gaussian_count,
         "fallback_count": fallback_count,
     }

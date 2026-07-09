@@ -1,42 +1,50 @@
-"""Orchestrator for size-gated puncta declumping."""
+"""Orchestrator for size-gated puncta declumping with GMM support."""
 
 from __future__ import annotations
 
+import sys
+import time
+from pathlib import Path
+
 import numpy as np
 
-from bioimage_pipeline.puncta.candidate_filter import CandidateFilter
 from bioimage_pipeline.puncta.config import PunctaDeclumpConfig
 from bioimage_pipeline.puncta.connected_objects import ConnectedObjectAnalyzer
-from bioimage_pipeline.puncta.gaussian_fitter import GaussianFitter2D
-from bioimage_pipeline.puncta.maxima_detector import MaximaDetector
+from bioimage_pipeline.puncta.diagnostic_policy import (
+    classify_object_for_diagnostics,
+    select_objects_for_diagnostics,
+)
+from bioimage_pipeline.puncta.diagnostics import (
+    export_object_diagnostic,
+    export_under_split_diagnostic,
+)
+from bioimage_pipeline.puncta.object_processor import ObjectProcessResult, ObjectProcessor
 from bioimage_pipeline.puncta.threshold_mask import ThresholdMaskGenerator
 from bioimage_pipeline.puncta.types import (
     DeclumpResult,
     DeclumpSummary,
     ObjectInfo,
-    PeakCandidate,
     PunctumCandidate,
 )
+from bioimage_pipeline.puncta.under_split_report import build_under_split_report
 
 
 class PunctaDeclumpPipeline:
-    """Run size-gated local maxima detection and Gaussian fitting."""
+    """Run background-corrected Gaussian / GMM puncta declumping."""
 
     def __init__(self, config: PunctaDeclumpConfig | None = None) -> None:
         self.config = config or PunctaDeclumpConfig()
         self.mask_generator = ThresholdMaskGenerator(self.config)
         self.object_analyzer = ConnectedObjectAnalyzer()
-        self.maxima_detector = MaximaDetector(self.config)
-        self.fitter = GaussianFitter2D(self.config)
-        self.filter = CandidateFilter(self.config)
+        self.processor = ObjectProcessor(self.config)
 
     def run(
         self,
         image: np.ndarray,
         *,
         external_mask: np.ndarray | None = None,
+        diagnostics_dir: str | None = None,
     ) -> DeclumpResult:
-        """Execute the full puncta declumping pipeline."""
         image_arr = np.asarray(image)
         if image_arr.ndim != 2:
             raise ValueError("Only 2D grayscale images are supported")
@@ -47,113 +55,232 @@ class PunctaDeclumpPipeline:
         )
         labels, objects = self.object_analyzer.analyze(mask, image_arr)
 
-        self.filter.reset()
+        self.processor.filter.reset()
         candidates: list[PunctumCandidate] = []
+        diagnostic_artifacts: list[str] = []
+        object_results: list[tuple[ObjectInfo, ObjectProcessResult]] = []
         candidate_counter = 0
-        small_count = 0
-        large_count = 0
+        single_count = 0
+        gmm_count = 0
         fallback_count = 0
+        fit_ok_count = 0
+        fallback_status_count = 0
+        under_split_objects = 0
+        gmm_triggered_count = 0
+        gmm_accepted_count = 0
 
-        for obj in objects:
+        total_objects = len(objects)
+        run_start = time.perf_counter()
+        object_times: list[float] = []
+
+        for index, obj in enumerate(objects, start=1):
+            object_start = time.perf_counter()
             object_mask = labels == obj.label
-            if obj.equivalent_diameter <= self.config.single_spot_max_diameter:
-                small_count += 1
-                candidate_counter += 1
-                peak = PeakCandidate(
-                    row=obj.brightest_row,
-                    col=obj.brightest_col,
-                    intensity=obj.brightest_intensity,
-                )
-                fit = self.fitter.fit(image_arr, peak)
-                candidate = self.filter.evaluate(
-                    obj,
-                    peak,
-                    fit,
-                    candidate_id=candidate_counter,
-                    path="single",
-                    object_mask=object_mask,
-                )
-                if (
-                    not candidate.accepted
-                    and self.config.accept_brightest_on_fit_failure
-                ):
-                    candidate = self.filter.accept_without_fit(
-                        obj,
-                        peak,
-                        candidate_id=candidate_counter,
-                        path="single",
-                        warning="fit_failed_used_brightest_pixel",
-                    )
-                candidates.append(candidate)
+            candidate_counter += 1
+            result = self.processor.process(
+                image_arr,
+                object_mask,
+                obj,
+                candidate_id_start=candidate_counter,
+            )
+            object_times.append(time.perf_counter() - object_start)
+            candidate_counter += max(0, len(result.candidates) - 1)
+            object_results.append((obj, result))
+
+            if result.debug.tried_gmm:
+                gmm_triggered_count += 1
+            if result.path == "gmm":
+                gmm_count += 1
+                gmm_accepted_count += 1
+            elif result.path == "fallback":
+                fallback_count += 1
             else:
-                large_count += 1
-                peaks = self.maxima_detector.find_in_full_image(
-                    image_arr,
-                    mask,
-                    obj.bbox,
+                single_count += 1
+
+            if result.debug.under_split_suspect:
+                under_split_objects += 1
+
+            for candidate in result.candidates:
+                if candidate.fit_status == "fit_ok":
+                    fit_ok_count += 1
+                if candidate.fit_status == "fit_failed_fallback":
+                    fallback_status_count += 1
+
+            candidates.extend(result.candidates)
+
+            if self.config.log_progress and (
+                index == 1
+                or index == total_objects
+                or index % self.config.progress_log_interval == 0
+            ):
+                self._log_progress(
+                    index,
+                    total_objects,
+                    gmm_triggered_count,
+                    run_start,
+                    object_times,
                 )
-                object_candidates: list[PunctumCandidate] = []
-                for peak in peaks:
-                    candidate_counter += 1
-                    fit = self.fitter.fit(image_arr, peak)
-                    candidate = self.filter.evaluate(
-                        obj,
-                        peak,
-                        fit,
-                        candidate_id=candidate_counter,
-                        path="declump",
-                        object_mask=object_mask,
-                    )
-                    object_candidates.append(candidate)
 
-                accepted_for_object = [c for c in object_candidates if c.accepted]
-                if not accepted_for_object:
-                    fallback_count += 1
-                    candidate_counter += 1
-                    peak = PeakCandidate(
-                        row=obj.brightest_row,
-                        col=obj.brightest_col,
-                        intensity=obj.brightest_intensity,
-                    )
-                    fit = self.fitter.fit(image_arr, peak)
-                    fallback_candidate = self.filter.evaluate(
-                        obj,
-                        peak,
-                        fit,
-                        candidate_id=candidate_counter,
-                        path="fallback",
-                        object_mask=object_mask,
-                    )
-                    if not fallback_candidate.accepted:
-                        fallback_candidate = self.filter.accept_without_fit(
-                            obj,
-                            peak,
-                            candidate_id=candidate_counter,
-                            path="fallback",
-                            warning="no_maxima_survived_used_brightest_pixel",
-                        )
-                    object_candidates.append(fallback_candidate)
-
-                candidates.extend(object_candidates)
+        total_runtime = time.perf_counter() - run_start
 
         summary = DeclumpSummary(
-            total_mask_objects=len(objects),
-            small_single_objects=small_count,
-            large_clumped_objects=large_count,
-            total_candidates=len(candidates),
-            total_accepted=len(self.filter.accepted),
-            total_rejected=len(candidates) - len(self.filter.accepted),
+            total_mask_objects=total_objects,
+            single_path_objects=single_count,
+            gmm_path_objects=gmm_count,
             fallback_objects=fallback_count,
+            total_candidates=len(candidates),
+            total_accepted=len(self.processor.filter.accepted),
+            total_rejected=len(candidates) - len(self.processor.filter.accepted),
+            fit_ok_count=fit_ok_count,
+            fit_failed_fallback_count=fallback_status_count,
+            under_split_suspect_objects=under_split_objects,
+            gmm_triggered_objects=gmm_triggered_count,
+            gmm_accepted_objects=gmm_accepted_count,
         )
 
-        return DeclumpResult(
+        declump_result = DeclumpResult(
             candidates=candidates,
             summary=summary,
             mask=mask,
             labels=labels,
             objects=objects,
             threshold_metadata=threshold_metadata,
+            diagnostic_artifacts=diagnostic_artifacts,
         )
+        declump_result.under_split_report = build_under_split_report(
+            declump_result,
+            top_n=self.config.under_split_report_top_n,
+        )
+
+        diagnostics_exported = 0
+        if diagnostics_dir is not None and self.config.diagnostic_mode not in ("off", "summary"):
+            diagnostic_artifacts.extend(
+                self._export_selected_diagnostics(diagnostics_dir, object_results)
+            )
+            diagnostics_exported = len(diagnostic_artifacts)
+            declump_result.diagnostic_artifacts = diagnostic_artifacts
+
+        summary.diagnostics_exported = diagnostics_exported
+        summary.total_runtime_seconds = total_runtime
+        declump_result.summary = summary
+
+        threshold_metadata["runtime"] = {
+            "total_objects": total_objects,
+            "total_seconds": round(total_runtime, 3),
+            "average_seconds_per_object": round(
+                total_runtime / max(total_objects, 1),
+                4,
+            ),
+            "single_gaussian_objects": single_count,
+            "gmm_triggered_objects": gmm_triggered_count,
+            "gmm_accepted_objects": gmm_accepted_count,
+            "fallback_objects": fallback_count,
+            "rejected_candidates": summary.total_rejected,
+            "diagnostics_exported": diagnostics_exported,
+        }
+        threshold_metadata["diagnostics"] = {
+            "mode": self.config.diagnostic_mode,
+            "max_objects": self.config.max_diagnostic_objects,
+            "exported_count": diagnostics_exported,
+            "manual_object_ids": list(self.config.diagnostic_object_ids),
+        }
+        declump_result.threshold_metadata = threshold_metadata
+
+        if self.config.log_progress:
+            self._log_runtime_summary(summary)
+
+        return declump_result
+
+    def _log_progress(
+        self,
+        processed: int,
+        total: int,
+        gmm_triggered: int,
+        run_start: float,
+        object_times: list[float],
+    ) -> None:
+        elapsed = time.perf_counter() - run_start
+        avg = elapsed / max(processed, 1)
+        remaining = avg * max(total - processed, 0)
+        print(
+            f"[puncta] processed {processed}/{total} objects | "
+            f"GMM tried: {gmm_triggered} | "
+            f"elapsed: {elapsed:.1f}s | "
+            f"avg: {avg * 1000:.0f} ms/obj | "
+            f"ETA: {remaining:.1f}s",
+            flush=True,
+            file=sys.stderr,
+        )
+
+    def _log_runtime_summary(self, summary: DeclumpSummary) -> None:
+        print(
+            f"[puncta] done — objects={summary.total_mask_objects} "
+            f"time={summary.total_runtime_seconds:.1f}s "
+            f"single={summary.single_path_objects} "
+            f"gmm_triggered={summary.gmm_triggered_objects} "
+            f"gmm_accepted={summary.gmm_accepted_objects} "
+            f"fallback={summary.fallback_objects} "
+            f"rejected={summary.total_rejected} "
+            f"diagnostics={summary.diagnostics_exported}",
+            flush=True,
+            file=sys.stderr,
+        )
+
+    def _export_selected_diagnostics(
+        self,
+        diagnostics_dir: str,
+        object_results: list[tuple[ObjectInfo, ObjectProcessResult]],
+    ) -> list[str]:
+        records = []
+        for obj, result in object_results:
+            record = classify_object_for_diagnostics(obj, result, self.config)
+            if record is not None:
+                records.append(record)
+
+        selected = select_objects_for_diagnostics(records, self.config)
+        artifacts: list[str] = []
+
+        for record in selected:
+            obj = record.obj
+            result = record.result
+            if result.patch is None:
+                continue
+
+            # Under-split multi-panel PNG (preferred for debugging clumps).
+            use_undersplit = (
+                "undersplit" in record.categories
+                or "gmm" in record.categories
+                or "gmm_rejected" in record.categories
+                or record.result.debug.tried_gmm
+            )
+            if use_undersplit:
+                mixture_for_diag = result.mixture
+                if mixture_for_diag is None and result.comparison is not None:
+                    mixture_for_diag = result.comparison.best_mixture
+                path = export_under_split_diagnostic(
+                    Path(diagnostics_dir) / "undersplit",
+                    object_id=obj.label,
+                    patch=result.patch,
+                    peak_detection=result.peak_detection,
+                    single=result.single_component,
+                    mixture=mixture_for_diag,
+                    debug=result.debug,
+                )
+                artifacts.append(str(path))
+            else:
+                # Simple 3-panel for fallback / low-r2 / high-residual singles.
+                primary = result.candidates[0] if result.candidates else None
+                if primary is not None:
+                    path = export_object_diagnostic(
+                        diagnostics_dir,
+                        object_id=obj.label,
+                        patch=result.patch,
+                        candidate=primary,
+                        mixture=result.mixture,
+                    )
+                    artifacts.append(str(path))
+
+        return artifacts
 
 
 def run_puncta_declump(
@@ -161,7 +288,11 @@ def run_puncta_declump(
     config: PunctaDeclumpConfig | None = None,
     *,
     external_mask: np.ndarray | None = None,
+    diagnostics_dir: str | None = None,
 ) -> DeclumpResult:
-    """Convenience entry point for puncta declumping."""
     pipeline = PunctaDeclumpPipeline(config)
-    return pipeline.run(image, external_mask=external_mask)
+    return pipeline.run(
+        image,
+        external_mask=external_mask,
+        diagnostics_dir=diagnostics_dir,
+    )

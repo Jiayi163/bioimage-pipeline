@@ -9,8 +9,10 @@ import numpy as np
 from bioimage_pipeline.puncta.config import PunctaDeclumpConfig
 from bioimage_pipeline.puncta.types import (
     DetectionPath,
-    GaussianFitResult,
+    FitStatus,
+    GaussianComponent,
     ObjectInfo,
+    ObjectPatch,
     PeakCandidate,
     PunctumCandidate,
 )
@@ -24,76 +26,94 @@ class CandidateFilter:
         self._accepted: list[PunctumCandidate] = []
 
     def reset(self) -> None:
-        """Clear accepted candidates for a new run."""
         self._accepted.clear()
 
     @property
     def accepted(self) -> list[PunctumCandidate]:
         return list(self._accepted)
 
-    def evaluate(
+    def evaluate_component(
         self,
         obj: ObjectInfo,
         peak: PeakCandidate,
-        fit: GaussianFitResult,
+        component: GaussianComponent,
         *,
         candidate_id: int,
+        component_id: int,
         path: DetectionPath,
-        object_mask: np.ndarray | None = None,
+        object_mask: np.ndarray,
+        patch: ObjectPatch,
     ) -> PunctumCandidate:
-        """Evaluate one candidate and optionally accept it."""
-        center_shift = self._center_shift(peak, fit)
         candidate = PunctumCandidate(
             object_id=obj.label,
             candidate_id=candidate_id,
+            component_id=component_id,
             path=path,
+            fit_status="fit_ok",
             initial_row=peak.row,
             initial_col=peak.col,
-            fitted_row=fit.fitted_row if fit.fit_succeeded else None,
-            fitted_col=fit.fitted_col if fit.fit_succeeded else None,
-            center_shift=center_shift,
-            sigma=fit.sigma if fit.fit_succeeded else None,
-            width_fwhm=fit.width_fwhm if fit.fit_succeeded else None,
-            amplitude=fit.amplitude if fit.fit_succeeded else None,
-            background=fit.background if fit.fit_succeeded else None,
-            residual_rmse=fit.residual_rmse if fit.fit_succeeded else None,
+            fitted_row=component.fitted_row if component.fit_succeeded else None,
+            fitted_col=component.fitted_col if component.fit_succeeded else None,
+            center_shift=component.center_shift if component.fit_succeeded else None,
+            sigma=component.sigma if component.fit_succeeded else None,
+            sigma_row=component.sigma_row if component.fit_succeeded else None,
+            sigma_col=component.sigma_col if component.fit_succeeded else None,
+            width_fwhm=(component.width_fwhm_row + component.width_fwhm_col) / 2.0
+            if component.fit_succeeded
+            else None,
+            amplitude=component.amplitude if component.fit_succeeded else None,
+            background=component.background if component.fit_succeeded else None,
+            residual_rmse=component.residual_rmse if component.fit_succeeded else None,
+            residual_relative=component.residual_relative if component.fit_succeeded else None,
+            r_squared=component.r_squared if component.fit_succeeded else None,
+            model_score=component.model_score if component.fit_succeeded else None,
+            n_components_in_model=component.n_components_in_model,
         )
 
-        rejection = self._rejection_reason(candidate, fit, object_mask)
+        rejection = self._rejection_reason(candidate, component, object_mask, patch)
         if rejection is None:
             duplicate_reason = self._duplicate_reason(candidate)
             if duplicate_reason is None:
                 candidate.accepted = True
+                candidate.fit_status = "fit_ok"
                 self._accepted.append(candidate)
             else:
                 candidate.rejection_reason = duplicate_reason
+                candidate.fit_status = "rejected_duplicate"
         else:
             candidate.rejection_reason = rejection
+            candidate.fit_status = self._status_from_rejection(rejection)
 
         return candidate
 
-    def accept_without_fit(
+    def accept_fallback(
         self,
         obj: ObjectInfo,
         peak: PeakCandidate,
         *,
         candidate_id: int,
+        component_id: int,
         path: DetectionPath,
-        warning: str | None = None,
+        prior_rejection: str | None = None,
     ) -> PunctumCandidate:
-        """Accept a brightest-pixel fallback when fitting is unavailable."""
         candidate = PunctumCandidate(
             object_id=obj.label,
             candidate_id=candidate_id,
+            component_id=component_id,
             path=path,
+            fit_status="fit_failed_fallback",
             initial_row=peak.row,
             initial_col=peak.col,
+            fitted_row=None,
+            fitted_col=None,
             accepted=True,
-            warning=warning,
+            warning="fit_failed_used_brightest_pixel",
+            rejection_reason=prior_rejection,
         )
         duplicate_reason = self._duplicate_reason(candidate)
         if duplicate_reason is not None:
             candidate.accepted = False
+            candidate.fit_status = "rejected_duplicate"
             candidate.rejection_reason = duplicate_reason
         else:
             self._accepted.append(candidate)
@@ -102,22 +122,25 @@ class CandidateFilter:
     def _rejection_reason(
         self,
         candidate: PunctumCandidate,
-        fit: GaussianFitResult,
-        object_mask: np.ndarray | None,
+        component: GaussianComponent,
+        object_mask: np.ndarray,
+        patch: ObjectPatch,
     ) -> str | None:
-        if fit.roi_touches_edge:
-            return "roi_touches_image_edge"
-        if not fit.fit_succeeded:
-            return fit.fit_error or "fit_failed"
+        if not component.fit_succeeded:
+            return component.fit_error or "fit_failed"
         if (
             candidate.center_shift is not None
             and candidate.center_shift > self.config.max_center_shift + 0.15
         ):
             return "center_shift_too_large"
-        if candidate.sigma is None or candidate.sigma < self.config.min_sigma:
+        if candidate.sigma_row is None or candidate.sigma_row < self.config.min_sigma:
             return "sigma_too_small"
-        if candidate.sigma is None or candidate.sigma > self.config.max_sigma:
+        if candidate.sigma_col is None or candidate.sigma_col > self.config.max_sigma:
             return "sigma_too_large"
+        if candidate.sigma_row is None or candidate.sigma_row > self.config.max_sigma:
+            return "sigma_too_large"
+        if candidate.sigma_col is None or candidate.sigma_col < self.config.min_sigma:
+            return "sigma_too_small"
         if candidate.amplitude is None or candidate.amplitude < self.config.min_amplitude:
             return "amplitude_too_low"
         if candidate.residual_rmse is not None and candidate.amplitude is not None:
@@ -130,30 +153,44 @@ class CandidateFilter:
             and candidate.residual_rmse > self.config.max_fit_residual
         ):
             return "residual_too_high_absolute"
-        if object_mask is not None and not self._center_inside_mask(candidate, object_mask):
+        if candidate.r_squared is not None and candidate.r_squared < self.config.min_r_squared:
+            return "r_squared_too_low"
+        if not self._center_inside_mask(candidate, object_mask, patch):
             return "center_outside_object_mask"
         return None
+
+    @staticmethod
+    def _status_from_rejection(rejection: str) -> FitStatus:
+        if rejection == "amplitude_too_low":
+            return "rejected_low_amplitude"
+        if rejection == "center_outside_object_mask":
+            return "rejected_outside_mask"
+        if rejection == "duplicate_center_too_close":
+            return "rejected_duplicate"
+        return "rejected_bad_fit"
 
     def _center_inside_mask(
         self,
         candidate: PunctumCandidate,
         object_mask: np.ndarray,
+        patch: ObjectPatch,
     ) -> bool:
-        row = int(round(candidate.final_row))
-        col = int(round(candidate.final_col))
+        patch_row = candidate.fitted_row - patch.row_offset if candidate.fitted_row is not None else None
+        patch_col = candidate.fitted_col - patch.col_offset if candidate.fitted_col is not None else None
+        if patch_row is None or patch_col is None:
+            return False
+        row = int(round(patch_row))
+        col = int(round(patch_col))
         if row < 0 or col < 0 or row >= object_mask.shape[0] or col >= object_mask.shape[1]:
             return False
         if object_mask[row, col]:
             return True
-
-        # Allow sub-pixel shifts to fall on pixels immediately adjacent to tiny mask blobs.
         radius = max(1, int(round(self.config.max_center_shift)))
         min_row = max(0, row - radius)
         max_row = min(object_mask.shape[0], row + radius + 1)
         min_col = max(0, col - radius)
         max_col = min(object_mask.shape[1], col + radius + 1)
-        neighborhood = object_mask[min_row:max_row, min_col:max_col]
-        return bool(neighborhood.any())
+        return bool(object_mask[min_row:max_row, min_col:max_col].any())
 
     def _duplicate_reason(self, candidate: PunctumCandidate) -> str | None:
         for accepted in self._accepted:
@@ -173,7 +210,10 @@ class CandidateFilter:
         existing: PunctumCandidate,
         challenger: PunctumCandidate,
     ) -> bool:
-        """Prefer higher amplitude, then lower residual."""
+        if existing.fit_status == "fit_ok" and challenger.fit_status != "fit_ok":
+            return False
+        if challenger.fit_status == "fit_ok" and existing.fit_status != "fit_ok":
+            return True
         existing_amp = existing.amplitude or 0.0
         challenger_amp = challenger.amplitude or 0.0
         if challenger_amp > existing_amp:
@@ -183,9 +223,3 @@ class CandidateFilter:
         existing_res = existing.residual_rmse if existing.residual_rmse is not None else float("inf")
         challenger_res = challenger.residual_rmse if challenger.residual_rmse is not None else float("inf")
         return challenger_res < existing_res
-
-    @staticmethod
-    def _center_shift(peak: PeakCandidate, fit: GaussianFitResult) -> float | None:
-        if not fit.fit_succeeded:
-            return None
-        return math.hypot(fit.fitted_row - peak.row, fit.fitted_col - peak.col)
