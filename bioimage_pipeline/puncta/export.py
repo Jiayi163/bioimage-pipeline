@@ -134,6 +134,13 @@ class ResultExporter:
                 "top_report_n": len(result.under_split_report),
                 "top_failure_categories": _count_failure_categories(result.under_split_report),
             },
+            "timing": result.timing,
+            "detector": {
+                "name": result.peak_table.detector_name if result.peak_table else None,
+                "method": result.peak_table.method if result.peak_table else None,
+                "peak_count": len(result.peak_table.peaks) if result.peak_table else 0,
+                "cache_hit": result.peak_table.cache_hit if result.peak_table else False,
+            },
         }
         output_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         return output_path

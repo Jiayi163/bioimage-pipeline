@@ -14,6 +14,8 @@ DiagnosticMode = Literal[
     "selected_objects",
     "all",
 ]
+CandidateDetectorMode = Literal["python_log", "fiji_find_maxima", "trackmate", "comparison"]
+FijiBatchMode = Literal["per_image", "batch"]
 
 
 @dataclass
@@ -38,7 +40,7 @@ class PunctaDeclumpConfig:
     expected_single_spot_area_factor: float = 1.8
     elongation_gmm_threshold: float = 1.6
     eccentricity_gmm_threshold: float = 0.65
-    solidity_gmm_threshold: float = 0.85
+    solidity_gmm_threshold: float = 0.80
 
     # Local background correction
     background_ring_width: int = 3
@@ -54,6 +56,7 @@ class PunctaDeclumpConfig:
     dog_sigma_small: float = 0.6
     dog_sigma_large: float = 1.4
     min_reliable_peaks_for_gmm: int = 2
+    min_reliable_peaks_for_routing: int = 3
 
     # Single-component elliptical fitting
     fit_roi_radius: int = 5
@@ -77,11 +80,24 @@ class PunctaDeclumpConfig:
     residual_gmm_sigma_factor: float = 1.4
 
     # GMM / mixture fitting
-    gmm_max_components: int = 5
+    gmm_max_components: int = 3
+    gmm_max_components_large: int = 5
     gmm_try_component_delta: int = 1
     gmm_min_component_separation: float = 1.5
     gmm_merge_amplitude_ratio: float = 0.12
-    gmm_bic_improvement_margin: float = 0.0
+    gmm_bic_improvement_margin: float = 2.0
+    gmm_aic_improvement_margin: float = 2.0
+    large_object_diameter_threshold: float = 10.0
+
+    # Selective routing / detectors
+    enable_selective_routing: bool = True
+    candidate_detector: CandidateDetectorMode = "python_log"
+    fiji_batch_mode: FijiBatchMode = "batch"
+    detector_cache_dir: str | None = None
+    force_redetect: bool = False
+    ordinary_area_factor: float = 2.0
+    enable_watershed_declump: bool = True
+    enable_gmm: bool = True
 
     # Deduplication
     min_center_separation: float = 2.5
@@ -134,6 +150,21 @@ class PunctaDeclumpConfig:
             raise ValueError(f"Invalid diagnostic_mode: {self.diagnostic_mode}")
         if self.progress_log_interval < 1:
             raise ValueError("progress_log_interval must be at least 1")
+        if self.candidate_detector not in (
+            "python_log",
+            "fiji_find_maxima",
+            "trackmate",
+            "comparison",
+        ):
+            raise ValueError(f"Invalid candidate_detector: {self.candidate_detector}")
+        if self.fiji_batch_mode not in ("per_image", "batch"):
+            raise ValueError(f"Invalid fiji_batch_mode: {self.fiji_batch_mode}")
+        if self.ordinary_area_factor <= 0:
+            raise ValueError("ordinary_area_factor must be positive")
+        if self.min_reliable_peaks_for_routing < 2:
+            raise ValueError("min_reliable_peaks_for_routing must be at least 2")
+        if self.gmm_max_components_large < self.gmm_max_components:
+            raise ValueError("gmm_max_components_large must be >= gmm_max_components")
 
         # Backward compatibility for legacy boolean flags.
         if self.export_diagnostics is False and self.diagnostic_mode in (

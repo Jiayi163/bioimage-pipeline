@@ -7,7 +7,7 @@ from typing import Literal
 
 import numpy as np
 
-DetectionPath = Literal["single", "declump", "gmm", "fallback"]
+DetectionPath = Literal["single", "fast_single", "declump", "gmm", "fallback"]
 FitStatus = Literal[
     "fit_ok",
     "fit_failed_fallback",
@@ -59,6 +59,16 @@ class PeakCandidate:
     row: float
     col: float
     intensity: float
+
+
+@dataclass
+class ImagePeakTable:
+    """Image-level candidate coordinates from one detector run."""
+
+    peaks: list[PeakCandidate]
+    detector_name: str = "python_log"
+    method: str = ""
+    cache_hit: bool = False
 
 
 @dataclass
@@ -259,6 +269,9 @@ class DeclumpSummary:
     under_split_suspect_objects: int = 0
     gmm_triggered_objects: int = 0
     gmm_accepted_objects: int = 0
+    fast_path_objects: int = 0
+    suspicious_objects: int = 0
+    fitted_objects: int = 0
     diagnostics_exported: int = 0
     total_runtime_seconds: float = 0.0
 
@@ -283,6 +296,8 @@ class DeclumpResult:
     threshold_metadata: dict[str, object] = field(default_factory=dict)
     diagnostic_artifacts: list[str] = field(default_factory=list)
     under_split_report: list[dict[str, object]] = field(default_factory=list)
+    timing: dict[str, object] = field(default_factory=dict)
+    peak_table: ImagePeakTable | None = None
 
     @property
     def accepted(self) -> list[PunctumCandidate]:

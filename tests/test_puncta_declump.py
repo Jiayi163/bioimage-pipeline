@@ -75,7 +75,7 @@ def test_single_gaussian_spot_detects_one_punctum() -> None:
     assert result.summary.total_mask_objects == 1
     assert len(result.accepted) == 1
     accepted = result.accepted[0]
-    assert accepted.path == "single"
+    assert accepted.path == "fast_single"
     assert accepted.fit_status == "fit_ok"
     assert accepted.tried_gmm is False
     assert abs(accepted.final_row - 32.0) < 2.0
@@ -121,7 +121,7 @@ def test_size_gate_routes_small_vs_large_object() -> None:
         default_config(single_spot_max_diameter=3.0),
     )
 
-    assert small_result.candidates[0].path == "single"
+    assert small_result.candidates[0].path == "fast_single"
     # Large diameter threshold forces GMM consideration even for a true single spot.
     assert large_result.candidates[0].tried_gmm is True
     assert large_result.candidates[0].gmm_trigger_reasons is not None
@@ -289,6 +289,7 @@ def test_fallback_has_no_fitted_coordinates() -> None:
 
 
 def test_small_object_with_two_peaks_uses_gmm() -> None:
+    """Oversized blob with two separated peaks routes suspicious and uses GMM."""
     image = np.full((48, 48), 40.0, dtype=np.float64)
     spot_a = make_gaussian_spot((48, 48), (24.0, 20.0), sigma=1.2, amplitude=400.0)
     spot_b = make_gaussian_spot((48, 48), (24.0, 28.0), sigma=1.2, amplitude=400.0)
@@ -297,7 +298,7 @@ def test_small_object_with_two_peaks_uses_gmm() -> None:
 
     mask = make_binary_disk((48, 48), (24.0, 24.0), radius=5.0)
     config = default_config(
-        single_spot_max_diameter=20.0,
+        single_spot_max_diameter=7.0,
         min_peak_distance=2,
         min_center_separation=2.5,
         gmm_min_component_separation=1.5,
@@ -328,6 +329,7 @@ def test_residual_driven_gmm_retry_on_poor_single_fit() -> None:
         gmm_min_component_separation=1.2,
         gmm_trigger_r_squared=0.95,
         gmm_trigger_residual_relative=0.05,
+        enable_selective_routing=False,
     )
     result = run_puncta_declump(image, config, external_mask=mask)
     assert any(c.tried_gmm for c in result.candidates)
@@ -586,6 +588,7 @@ def test_balanced_mode_exports_diagnostics_for_suspicious_only(tmp_path: Path) -
 
     config = default_config(
         diagnostic_mode="balanced",
+        single_spot_max_diameter=7.0,
         log_progress=False,
     )
     result = run_puncta_declump(

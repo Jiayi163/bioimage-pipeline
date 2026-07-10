@@ -14,6 +14,9 @@ def main() -> None:
 
     summary = result.summary
     print(f"Mask objects: {summary.total_mask_objects}")
+    print(f"Fast path: {summary.fast_path_objects}")
+    print(f"Suspicious: {summary.suspicious_objects}")
+    print(f"Fitted: {summary.fitted_objects}")
     print(f"Single Gaussian objects: {summary.single_path_objects}")
     print(f"GMM triggered: {summary.gmm_triggered_objects}")
     print(f"GMM accepted: {summary.gmm_accepted_objects}")
@@ -24,6 +27,24 @@ def main() -> None:
     print(f"Rejected candidates: {summary.total_rejected}")
     print(f"Fallback objects: {summary.fallback_objects}")
     print(f"Total runtime: {summary.total_runtime_seconds:.1f}s")
+    if result.timing:
+        print("Timing breakdown:")
+        for key in (
+            "preprocessing_time",
+            "connected_component_time",
+            "candidate_detection_time",
+            "gaussian_fit_time",
+            "watershed_time",
+            "diagnostic_export_time",
+        ):
+            if key in result.timing:
+                print(f"  {key}: {result.timing[key]:.3f}s")
+    if result.peak_table is not None:
+        print(
+            f"Detector: {result.peak_table.detector_name} "
+            f"peaks={len(result.peak_table.peaks)} "
+            f"cache_hit={result.peak_table.cache_hit}"
+        )
     if summary.total_mask_objects:
         avg_ms = summary.total_runtime_seconds / summary.total_mask_objects * 1000
         print(f"Average per object: {avg_ms:.0f} ms")

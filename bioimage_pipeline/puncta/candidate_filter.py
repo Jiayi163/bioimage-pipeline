@@ -86,6 +86,38 @@ class CandidateFilter:
 
         return candidate
 
+    def accept_fast_peak(
+        self,
+        obj: ObjectInfo,
+        peak: PeakCandidate,
+        *,
+        candidate_id: int,
+        route_reason: str = "",
+    ) -> PunctumCandidate:
+        """Accept an image-level peak on the fast path without Gaussian fitting."""
+        candidate = PunctumCandidate(
+            object_id=obj.label,
+            candidate_id=candidate_id,
+            component_id=1,
+            path="fast_single",
+            fit_status="fit_ok",
+            initial_row=peak.row,
+            initial_col=peak.col,
+            fitted_row=peak.row,
+            fitted_col=peak.col,
+            center_shift=0.0,
+            amplitude=peak.intensity,
+            accepted=True,
+        )
+        duplicate_reason = self._duplicate_reason(candidate)
+        if duplicate_reason is not None:
+            candidate.accepted = False
+            candidate.fit_status = "rejected_duplicate"
+            candidate.rejection_reason = duplicate_reason
+        else:
+            self._accepted.append(candidate)
+        return candidate
+
     def accept_fallback(
         self,
         obj: ObjectInfo,

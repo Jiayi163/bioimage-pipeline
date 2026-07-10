@@ -50,8 +50,8 @@ def _gmm_tried_rejected(result: ObjectProcessResult) -> bool:
 
 
 def _is_ordinary_single_fit_ok(result: ObjectProcessResult) -> bool:
-    """True when this is a normal single-spot Gaussian fit with no suspicion flags."""
-    if result.path != "single":
+    """True when this is a normal single-spot fit with no suspicion flags."""
+    if result.path not in ("single", "fast_single"):
         return False
     if result.debug.under_split_suspect:
         return False

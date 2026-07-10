@@ -110,6 +110,17 @@ def build_config_from_args(args: argparse.Namespace) -> PunctaDeclumpConfig:
         include_fallback_in_centers=args.include_fallback_centers,
         export_fiji_tiffs=not args.no_fiji_tiffs,
         log_progress=not args.no_progress,
+        candidate_detector=getattr(args, "candidate_detector", "python_log"),
+        fiji_batch_mode=getattr(args, "fiji_batch_mode", "batch"),
+        force_redetect=getattr(args, "force_redetect", False),
+        enable_watershed_declump=not getattr(args, "no_watershed", False),
+        enable_selective_routing=not getattr(args, "no_selective_routing", False),
+        ordinary_area_factor=getattr(args, "ordinary_area_factor", 2.0),
+        min_reliable_peaks_for_routing=getattr(args, "min_reliable_peaks_for_routing", 3),
+        enable_gmm=not getattr(args, "no_gmm", False),
+        large_object_diameter_threshold=getattr(args, "large_object_diameter_threshold", 10.0),
+        gmm_bic_improvement_margin=getattr(args, "gmm_bic_improvement_margin", 2.0),
+        gmm_aic_improvement_margin=getattr(args, "gmm_aic_improvement_margin", 2.0),
     )
 
 
@@ -118,7 +129,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Detect and declump tiny fluorescent puncta using local maxima and Gaussian fitting.",
     )
-    parser.add_argument("--input", type=Path, required=True, help="Input grayscale TIFF image.")
+    parser.add_argument("--input", type=Path, default=None, help="Input grayscale TIFF image.")
+    parser.add_argument(
+        "--input-dir",
+        type=Path,
+        default=None,
+        help="Process every TIFF in this folder (batch mode).",
+    )
+    parser.add_argument(
+        "--mask-dir",
+        type=Path,
+        default=None,
+        help="Optional folder of external mask TIFFs for batch mode (matched by stem).",
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -224,11 +247,73 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable progress and runtime summary logs on stderr.",
     )
+    parser.add_argument(
+        "--candidate-detector",
+        choices=("python_log", "fiji_find_maxima", "trackmate", "comparison"),
+        default="python_log",
+        help="Image-level candidate detector (default: python_log).",
+    )
+    parser.add_argument(
+        "--fiji-batch-mode",
+        choices=("per_image", "batch"),
+        default="batch",
+        help="Fiji subprocess grouping for external detectors.",
+    )
+    parser.add_argument(
+        "--force-redetect",
+        action="store_true",
+        help="Bypass cached candidate coordinate tables.",
+    )
+    parser.add_argument(
+        "--no-watershed",
+        action="store_true",
+        help="Disable post-fit watershed splitting for multi-center objects.",
+    )
+    parser.add_argument(
+        "--no-selective-routing",
+        action="store_true",
+        help="Disable fast-path routing; fit every object (legacy behavior).",
+    )
+    parser.add_argument("--ordinary-area-factor", type=float, default=2.0)
+    parser.add_argument(
+        "--min-reliable-peaks-for-routing",
+        type=int,
+        default=3,
+        help="Separated peak count that marks an object suspicious (default: 3).",
+    )
+    parser.add_argument(
+        "--no-gmm",
+        action="store_true",
+        help="Disable GMM mixture fitting on suspicious objects (single Gaussian only).",
+    )
+    parser.add_argument("--large-object-diameter-threshold", type=float, default=10.0)
+    parser.add_argument("--gmm-bic-improvement-margin", type=float, default=2.0)
+    parser.add_argument("--gmm-aic-improvement-margin", type=float, default=2.0)
     return parser
 
 
 def run_cli(args: argparse.Namespace) -> dict[str, object]:
     """Execute puncta declumping from CLI arguments."""
+    if getattr(args, "input_dir", None) is not None:
+        from bioimage_pipeline.puncta.batch import run_puncta_batch
+
+        config = build_config_from_args(args)
+        batch_result = run_puncta_batch(
+            args.input_dir,
+            args.output_dir,
+            config,
+            frame_index=args.frame_index,
+            mask_dir=args.mask_dir,
+        )
+        return {
+            "batch_result": batch_result,
+            "processed": batch_result.processed,
+            "failed": batch_result.failed,
+        }
+
+    if args.input is None:
+        raise ValueError("Either --input or --input-dir is required.")
+
     raw_image = read_tiff(args.input)
     image, image_plane_metadata = load_grayscale_plane(
         raw_image,
@@ -270,6 +355,9 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
         config,
         external_mask=external_mask,
         diagnostics_dir=diagnostics_dir,
+        source_path=str(args.input),
+        output_dir=str(args.output_dir),
+        stem=args.stem,
     )
     result.threshold_metadata["image_plane"] = image_plane_metadata
     if mask_plane_metadata is not None:

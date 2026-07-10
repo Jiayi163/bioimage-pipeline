@@ -10,7 +10,13 @@ from scipy.optimize import least_squares
 
 from bioimage_pipeline.puncta.config import PunctaDeclumpConfig
 from bioimage_pipeline.puncta.fit_metrics import compute_aic_bic, compute_r_squared, compute_rmse
-from bioimage_pipeline.puncta.types import GaussianComponent, MixtureFitResult, ObjectPatch, PeakCandidate
+from bioimage_pipeline.puncta.types import (
+    GaussianComponent,
+    MixtureFitResult,
+    ObjectInfo,
+    ObjectPatch,
+    PeakCandidate,
+)
 
 FWHM_FACTOR = 2.355
 
@@ -141,7 +147,7 @@ class EllipticalGaussianFitter:
                 residuals,
                 initial,
                 bounds=(lower, upper),
-                max_nfev=5000,
+                max_nfev=2000,
             )
             amplitude, row_center, col_center, sigma_row, sigma_col = result.x
             predicted = _elliptical_component(
@@ -313,7 +319,7 @@ class GaussianMixtureFitter:
                 residuals,
                 np.array(params, dtype=np.float64),
                 bounds=(np.array(lower), np.array(upper)),
-                max_nfev=10000,
+                max_nfev=3000,
             )
             component_params = [
                 (
@@ -639,25 +645,41 @@ class GaussianModelSelector:
         single_component: GaussianComponent,
         n_filtered_peaks: int,
         n_raw_peaks: int,
+        obj: ObjectInfo | None = None,
     ) -> ModelComparisonResult:
         """Two-stage GMM: try 2 components first; 3 only when warranted."""
         single = single_component
         single_bic = self._single_component_bic(patch, single)
+        single_aic = self._single_component_aic(patch, single)
         candidate_counts: list[int] = []
 
+        max_components = self._max_components_for_object(obj)
         fit_two: MixtureFitResult | None = None
         fit_three: MixtureFitResult | None = None
 
-        fit_two = self.mixture_fitter.fit_patch(patch, peaks, n_components=2)
-        candidate_counts.append(2)
+        if max_components >= 2:
+            fit_two = self.mixture_fitter.fit_patch(patch, peaks, n_components=2)
+            candidate_counts.append(2)
 
-        try_three = n_filtered_peaks >= 3 or n_raw_peaks >= 3
-        if not try_three and fit_two.fit_succeeded and self._mixture_still_poor(single, fit_two):
-            try_three = True
+        try_three = max_components >= 3 and (n_filtered_peaks >= 3 or n_raw_peaks >= 3)
+        if not try_three and fit_two is not None and fit_two.fit_succeeded:
+            if self._mixture_still_poor(single, fit_two):
+                try_three = True
+            elif not self._score_improved(
+                single_bic,
+                single_aic,
+                fit_two.bic,
+                fit_two.aic,
+            ):
+                try_three = False
 
-        if try_three:
+        if try_three and max_components >= 3:
             fit_three = self.mixture_fitter.fit_patch(patch, peaks, n_components=3)
             candidate_counts.append(3)
+            if fit_two is not None and fit_three is not None and fit_three.fit_succeeded:
+                if not self._score_improved(fit_two.bic, fit_two.aic, fit_three.bic, fit_three.aic):
+                    fit_three = None
+                    candidate_counts = [count for count in candidate_counts if count != 3]
 
         best_mixture = self._pick_best_mixture(fit_two, fit_three)
         return self._compare_single_vs_mixture(
@@ -666,7 +688,36 @@ class GaussianModelSelector:
             single_bic,
             best_mixture,
             candidate_counts,
+            single_aic=single_aic,
         )
+
+    def _max_components_for_object(self, obj: ObjectInfo | None) -> int:
+        if obj is None:
+            return self.config.gmm_max_components
+        if obj.equivalent_diameter > self.config.large_object_diameter_threshold:
+            return self.config.gmm_max_components_large
+        return self.config.gmm_max_components
+
+    def _score_improved(
+        self,
+        baseline_bic: float,
+        baseline_aic: float,
+        candidate_bic: float,
+        candidate_aic: float,
+    ) -> bool:
+        bic_margin = self.config.gmm_bic_improvement_margin
+        aic_margin = self.config.gmm_aic_improvement_margin
+        bic_ok = candidate_bic + bic_margin < baseline_bic
+        aic_ok = candidate_aic + aic_margin < baseline_aic
+        return bic_ok or aic_ok
+
+    def _single_component_aic(self, patch: ObjectPatch, single: GaussianComponent) -> float:
+        if not single.fit_succeeded:
+            return float("inf")
+        n_points = max(int(patch.object_mask.sum()), 1)
+        k = 6
+        rss = single.residual_rmse**2 * n_points
+        return n_points * np.log(max(rss / n_points, 1e-12)) + 2 * k
 
     def _mixture_still_poor(
         self,
@@ -705,6 +756,8 @@ class GaussianModelSelector:
         single_bic: float,
         best_mixture: MixtureFitResult | None,
         candidate_counts: list[int],
+        *,
+        single_aic: float | None = None,
     ) -> ModelComparisonResult:
         if best_mixture is None:
             reason = "no_successful_multi_component_fit"
@@ -729,7 +782,11 @@ class GaussianModelSelector:
             )
 
         bic_margin = self.config.gmm_bic_improvement_margin
-        if best_mixture.bic + bic_margin < single_bic:
+        aic_margin = self.config.gmm_aic_improvement_margin
+        single_aic_val = single_aic if single_aic is not None else float("inf")
+        bic_improved = best_mixture.bic + bic_margin < single_bic
+        aic_improved = best_mixture.aic + aic_margin < single_aic_val
+        if bic_improved or aic_improved:
             reason = (
                 f"selected_gmm_n={best_mixture.n_components}_bic={best_mixture.bic:.1f}"
                 f"_vs_single_bic={single_bic:.1f}"

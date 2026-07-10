@@ -11,6 +11,7 @@ from bioimage_pipeline.puncta.candidate_filter import CandidateFilter
 from bioimage_pipeline.puncta.config import PunctaDeclumpConfig
 from bioimage_pipeline.puncta.gaussian_fitter import GaussianModelSelector, ModelComparisonResult
 from bioimage_pipeline.puncta.maxima_detector import MaximaDetector
+from bioimage_pipeline.puncta.object_router import RouteDecision
 from bioimage_pipeline.puncta.types import (
     DetectionPath,
     GaussianComponent,
@@ -52,10 +53,104 @@ class ObjectProcessor:
         obj: ObjectInfo,
         *,
         candidate_id_start: int,
+        assigned_peaks: list[PeakCandidate] | None = None,
+    ) -> ObjectProcessResult:
+        """Legacy entry: full suspicious-path processing."""
+        return self.process_suspicious(
+            image,
+            object_mask,
+            obj,
+            assigned_peaks=assigned_peaks or [],
+            candidate_id_start=candidate_id_start,
+        )
+
+    def process_fast(
+        self,
+        obj: ObjectInfo,
+        assigned_peaks: list[PeakCandidate],
+        *,
+        candidate_id_start: int,
+        route: RouteDecision,
+    ) -> ObjectProcessResult:
+        """Fast path: no patch extraction, no Gaussian fitting."""
+        debug = ModelSelectionDebug(
+            n_raw_local_maxima=len(assigned_peaks),
+            n_filtered_local_maxima=len(assigned_peaks),
+            model_selection_reason=f"fast_path:{','.join(route.reasons)}",
+            single_path_reason="fast_path_no_fit",
+        )
+
+        if len(assigned_peaks) == 1:
+            candidate = self.filter.accept_fast_peak(
+                obj,
+                assigned_peaks[0],
+                candidate_id=candidate_id_start,
+                route_reason=",".join(route.reasons),
+            )
+            path: DetectionPath = "fast_single" if candidate.accepted else "fallback"
+            if not candidate.accepted and self.config.accept_brightest_on_fit_failure:
+                candidate = self.filter.accept_fallback(
+                    obj,
+                    PeakCandidate(
+                        row=obj.brightest_row,
+                        col=obj.brightest_col,
+                        intensity=obj.brightest_intensity,
+                    ),
+                    candidate_id=candidate_id_start,
+                    component_id=1,
+                    path="fallback",
+                    prior_rejection=candidate.rejection_reason,
+                )
+                path = "fallback"
+        else:
+            peak = PeakCandidate(
+                row=obj.brightest_row,
+                col=obj.brightest_col,
+                intensity=obj.brightest_intensity,
+            )
+            candidate = self.filter.accept_fallback(
+                obj,
+                peak,
+                candidate_id=candidate_id_start,
+                component_id=1,
+                path="fallback",
+                prior_rejection="fast_path_no_assigned_peak",
+            )
+            path = "fallback"
+            debug.model_selection_reason = "fast_path_brightest_fallback"
+
+        self._attach_debug(candidate, obj, debug)
+        return ObjectProcessResult(
+            candidates=[candidate],
+            path=path,
+            debug=debug,
+            peak_detection=PeakDetectionResult(
+                raw_peaks=assigned_peaks,
+                filtered_peaks=assigned_peaks,
+                method="image_level_assigned",
+            ),
+        )
+
+    def process_suspicious(
+        self,
+        image: np.ndarray,
+        object_mask: np.ndarray,
+        obj: ObjectInfo,
+        *,
+        assigned_peaks: list[PeakCandidate],
+        candidate_id_start: int,
     ) -> ObjectProcessResult:
         patch = build_object_patch(image, object_mask, obj, self.config)
-        peak_detection = self._detect_peaks(patch, obj)
-        peaks = peak_detection.filtered_peaks
+        if assigned_peaks:
+            peak_detection = PeakDetectionResult(
+                raw_peaks=list(assigned_peaks),
+                filtered_peaks=list(assigned_peaks),
+                method="image_level_assigned",
+            )
+            peaks = list(assigned_peaks)
+        else:
+            peak_detection = self._detect_peaks(patch, obj)
+            peaks = peak_detection.filtered_peaks
         if not peaks:
             peaks = [
                 PeakCandidate(
@@ -70,7 +165,7 @@ class ObjectProcessor:
             n_filtered_local_maxima=len(peak_detection.filtered_peaks),
         )
 
-        # Always fit one Gaussian first.
+        # Fit one Gaussian initialized from assigned peaks.
         primary = peaks[0]
         single = self.model_selector.single_fitter.fit_peak(
             patch,
@@ -78,6 +173,13 @@ class ObjectProcessor:
             component_id=1,
             n_components_in_model=1,
         )
+        if not single.fit_succeeded and len(peaks) > 1:
+            single = self.model_selector.single_fitter.fit_peak(
+                patch,
+                peaks[1],
+                component_id=1,
+                n_components_in_model=1,
+            )
         debug.one_gaussian_r_squared = single.r_squared if single.fit_succeeded else None
         debug.one_gaussian_residual_relative = (
             single.residual_relative if single.fit_succeeded else None
@@ -94,7 +196,7 @@ class ObjectProcessor:
             single,
         )
         debug.gmm_trigger_reasons = trigger_reasons
-        use_gmm = bool(trigger_reasons)
+        use_gmm = bool(trigger_reasons) and self.config.enable_gmm
 
         if not peak_detection.filtered_peaks and not peak_detection.raw_peaks:
             # No maxima at all — still try single fit; fallback if it fails.
@@ -142,6 +244,7 @@ class ObjectProcessor:
             single_component=single,
             n_filtered_peaks=len(peak_detection.filtered_peaks),
             n_raw_peaks=len(peak_detection.raw_peaks),
+            obj=obj,
         )
         debug.gmm_candidate_components = max(comparison.candidate_component_counts or [0])
         debug.model_selection_reason = comparison.selection_reason
@@ -242,14 +345,24 @@ class ObjectProcessor:
         if obj.area > expected_area:
             reasons.append(f"large_area={obj.area:.1f}>{expected_area:.1f}")
 
-        if obj.elongation >= cfg.elongation_gmm_threshold:
-            reasons.append(
-                f"elongated={obj.elongation:.2f}>={cfg.elongation_gmm_threshold}"
-            )
-        if obj.eccentricity >= cfg.eccentricity_gmm_threshold:
-            reasons.append(
-                f"eccentric={obj.eccentricity:.2f}>={cfg.eccentricity_gmm_threshold}"
-            )
+        # Elongation/eccentricity only matter when multi-peak or truly oversized — not alone.
+        shape_suspicious = (
+            obj.elongation >= cfg.elongation_gmm_threshold
+            or obj.eccentricity >= cfg.eccentricity_gmm_threshold
+        )
+        if shape_suspicious and (
+            n_filtered >= cfg.min_reliable_peaks_for_gmm
+            or n_raw >= cfg.min_reliable_peaks_for_gmm
+            or obj.equivalent_diameter > cfg.single_spot_max_diameter
+        ):
+            if obj.elongation >= cfg.elongation_gmm_threshold:
+                reasons.append(
+                    f"elongated={obj.elongation:.2f}>={cfg.elongation_gmm_threshold}"
+                )
+            if obj.eccentricity >= cfg.eccentricity_gmm_threshold:
+                reasons.append(
+                    f"eccentric={obj.eccentricity:.2f}>={cfg.eccentricity_gmm_threshold}"
+                )
 
         if not single.fit_succeeded:
             reasons.append("one_gaussian_fit_failed")
