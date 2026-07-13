@@ -22,7 +22,10 @@ output/
 validation_output/
 reports/
 test_output/
-synthetic_test_data/results/
+
+# Synthetic puncta validation (generated locally; see synthetic_test_data/README.md)
+synthetic_test_data/*
+!synthetic_test_data/README.md
 
 # CellProfiler / workflow run folders (often created beside the repo)
 cellprofiler_raw/
