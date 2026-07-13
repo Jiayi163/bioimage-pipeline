@@ -88,6 +88,12 @@ class PunctaDeclumpConfig:
     gmm_bic_improvement_margin: float = 2.0
     gmm_aic_improvement_margin: float = 2.0
     large_object_diameter_threshold: float = 10.0
+    gmm_multi_start_enabled: bool = True
+    gmm_max_multi_starts: int = 20
+    gmm_multi_start_max_nfev: int = 3000
+    gmm_multi_start_separations: tuple[float, ...] = (1.0, 2.0, 3.0, 4.0)
+    gmm_acceptance_min_separation: float = 1.5
+    gmm_use_mixture_acceptance_separation: bool = True
 
     # Selective routing / detectors
     enable_selective_routing: bool = True
@@ -165,6 +171,14 @@ class PunctaDeclumpConfig:
             raise ValueError("min_reliable_peaks_for_routing must be at least 2")
         if self.gmm_max_components_large < self.gmm_max_components:
             raise ValueError("gmm_max_components_large must be >= gmm_max_components")
+        if self.gmm_max_multi_starts < 0:
+            raise ValueError("gmm_max_multi_starts must be non-negative")
+        if self.gmm_multi_start_max_nfev < 100:
+            raise ValueError("gmm_multi_start_max_nfev must be at least 100")
+        if self.gmm_acceptance_min_separation < 0:
+            raise ValueError("gmm_acceptance_min_separation must be non-negative")
+        if not self.gmm_multi_start_separations:
+            raise ValueError("gmm_multi_start_separations must not be empty")
 
         # Backward compatibility for legacy boolean flags.
         if self.export_diagnostics is False and self.diagnostic_mode in (

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -259,6 +260,26 @@ class ObjectProcessor:
                 )
             )
             debug.best_gmm_n_components = comparison.best_mixture.n_components
+            debug.gmm_winning_init_strategy = comparison.best_mixture.winning_init_strategy
+            debug.gmm_multi_start_attempts = comparison.best_mixture.multi_start_attempts
+            debug.gmm_multi_start_converged = comparison.best_mixture.multi_start_converged
+            debug.gmm_acceptance_min_separation_px = (
+                self.config.gmm_acceptance_min_separation
+                if self.config.gmm_use_mixture_acceptance_separation
+                else self.config.min_center_separation
+            )
+            if len(comparison.best_mixture.components) >= 2:
+                c0 = comparison.best_mixture.components[0]
+                c1 = comparison.best_mixture.components[1]
+                debug.gmm_fitted_center_distance_px = math.hypot(
+                    c0.fitted_col - c1.fitted_col,
+                    c0.fitted_row - c1.fitted_row,
+                )
+            single_bic = self.model_selector._single_component_bic(patch, single)
+            debug.gmm_bic_delta_vs_single = comparison.best_mixture.bic - single_bic
+            debug.gmm_aic_delta_vs_single = comparison.best_mixture.aic - self.model_selector._single_component_aic(
+                patch, single
+            )
 
         selected = comparison.selected
         if isinstance(selected, MixtureFitResult):
@@ -523,10 +544,14 @@ class ObjectProcessor:
         candidate.one_gaussian_residual_relative = debug.one_gaussian_residual_relative
         candidate.best_gmm_r_squared = debug.best_gmm_r_squared
         candidate.best_gmm_residual_relative = debug.best_gmm_residual_relative
+        candidate.best_gmm_n_components = debug.best_gmm_n_components
+        candidate.gmm_bic_delta_vs_single = debug.gmm_bic_delta_vs_single
+        candidate.gmm_aic_delta_vs_single = debug.gmm_aic_delta_vs_single
         candidate.model_selection_reason = debug.model_selection_reason or None
         candidate.rejected_component_reason = debug.rejected_component_reason
         candidate.under_split_suspect = debug.under_split_suspect
         candidate.under_split_reasons = ";".join(debug.under_split_reasons) or None
+        candidate.gmm_winning_init_strategy = debug.gmm_winning_init_strategy
         return candidate
 
     def _from_mixture(
@@ -552,21 +577,17 @@ class ObjectProcessor:
                 peak_detection=peak_detection,
             )
 
-        candidates: list[PunctumCandidate] = []
-        for offset, component in enumerate(mixture.components):
-            peak = peaks[min(offset, len(peaks) - 1)]
-            candidate = self.filter.evaluate_component(
-                obj,
-                peak,
-                component,
-                candidate_id=candidate_id_start + offset,
-                component_id=component.component_id,
-                path="gmm",
-                object_mask=patch.object_mask,
-                patch=patch,
-            )
+        candidates = self.filter.evaluate_mixture_components(
+            obj,
+            peaks,
+            mixture,
+            candidate_id_start=candidate_id_start,
+            object_mask=patch.object_mask,
+            patch=patch,
+        )
+        for candidate in candidates:
+            candidate.gmm_winning_init_strategy = mixture.winning_init_strategy
             self._attach_debug(candidate, obj, debug)
-            candidates.append(candidate)
         return ObjectProcessResult(
             candidates=candidates,
             path="gmm",

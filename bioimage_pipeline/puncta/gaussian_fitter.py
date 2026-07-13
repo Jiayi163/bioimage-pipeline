@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import math
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.optimize import least_squares
 
 from bioimage_pipeline.puncta.config import PunctaDeclumpConfig
+from bioimage_pipeline.puncta.gmm_multi_start import (
+    fit_mixture_from_init_peaks,
+    fit_two_component_multi_start,
+)
 from bioimage_pipeline.puncta.fit_metrics import compute_aic_bic, compute_r_squared, compute_rmse
 from bioimage_pipeline.puncta.types import (
     GaussianComponent,
@@ -247,152 +252,31 @@ class GaussianMixtureFitter:
         peaks: list[PeakCandidate],
         *,
         n_components: int,
+        obj: ObjectInfo | None = None,
+        single_component: GaussianComponent | None = None,
     ) -> MixtureFitResult:
-        arrays = self._extract_weighted_patch(patch)
-        if arrays.values.size < 5:
-            return MixtureFitResult(
-                components=[],
-                n_components=n_components,
-                background=patch.background_level,
-                residual_rmse=float("inf"),
-                r_squared=0.0,
-                aic=float("inf"),
-                bic=float("inf"),
-                model_score=float("inf"),
-                fit_succeeded=False,
-                fit_error="insufficient_pixels",
+        if (
+            n_components == 2
+            and self.config.gmm_multi_start_enabled
+        ):
+            multi = fit_two_component_multi_start(
+                self,
+                patch,
+                peaks,
+                obj=obj,
+                single_component=single_component,
             )
+            return multi.fit
 
         init_peaks = self._initial_peaks(peaks, n_components, patch)
-        sigma_guess = max(
-            self.config.expected_single_spot_diameter / FWHM_FACTOR,
-            self.config.min_sigma,
+        return fit_mixture_from_init_peaks(
+            self,
+            patch,
+            init_peaks,
+            n_components=n_components,
+            initialization_method="detector_based",
+            max_nfev=self.config.gmm_multi_start_max_nfev,
         )
-        params: list[float] = []
-        lower: list[float] = []
-        upper: list[float] = []
-        for peak in init_peaks:
-            patch_row = peak.row - patch.row_offset
-            patch_col = peak.col - patch.col_offset
-            amp = max(float(peak.intensity - patch.background_level), self.config.min_amplitude)
-            params.extend([amp, patch_row, patch_col, sigma_guess, sigma_guess])
-            lower.extend(
-                [
-                    0.0,
-                    patch_row - self.config.max_center_shift,
-                    patch_col - self.config.max_center_shift,
-                    self.config.min_sigma,
-                    self.config.min_sigma,
-                ]
-            )
-            upper.extend(
-                [
-                    amp * 3.0,
-                    patch_row + self.config.max_center_shift,
-                    patch_col + self.config.max_center_shift,
-                    self.config.max_sigma,
-                    self.config.max_sigma,
-                ]
-            )
-
-        def residuals(param_vec: np.ndarray) -> np.ndarray:
-            component_params = [
-                (
-                    param_vec[i * 5 + 0],
-                    param_vec[i * 5 + 1],
-                    param_vec[i * 5 + 2],
-                    param_vec[i * 5 + 3],
-                    param_vec[i * 5 + 4],
-                )
-                for i in range(n_components)
-            ]
-            predicted = _predict_mixture(
-                arrays.rows,
-                arrays.cols,
-                0.0,
-                component_params,
-            )
-            return (arrays.values - predicted) * arrays.weights
-
-        try:
-            result = least_squares(
-                residuals,
-                np.array(params, dtype=np.float64),
-                bounds=(np.array(lower), np.array(upper)),
-                max_nfev=3000,
-            )
-            component_params = [
-                (
-                    float(result.x[i * 5 + 0]),
-                    float(result.x[i * 5 + 1]),
-                    float(result.x[i * 5 + 2]),
-                    float(result.x[i * 5 + 3]),
-                    float(result.x[i * 5 + 4]),
-                )
-                for i in range(n_components)
-            ]
-            predicted = _predict_mixture(arrays.rows, arrays.cols, 0.0, component_params)
-            rmse = compute_rmse(arrays.values, predicted)
-            r2 = compute_r_squared(arrays.values, predicted)
-            rss = float(np.sum((arrays.values - predicted) ** 2))
-            n_params = 5 * n_components
-            aic, bic = compute_aic_bic(rss, arrays.values.size, n_params)
-
-            components: list[GaussianComponent] = []
-            for index, peak in enumerate(init_peaks, start=1):
-                amplitude, row_center, col_center, sigma_row, sigma_col = component_params[index - 1]
-                comp_rmse = rmse
-                components.append(
-                    GaussianComponent(
-                        component_id=index,
-                        initial_row=peak.row,
-                        initial_col=peak.col,
-                        fitted_row=row_center + patch.row_offset,
-                        fitted_col=col_center + patch.col_offset,
-                        sigma_row=sigma_row,
-                        sigma_col=sigma_col,
-                        amplitude=amplitude,
-                        background=patch.background_level,
-                        residual_rmse=comp_rmse,
-                        residual_relative=comp_rmse / max(amplitude, 1.0),
-                        r_squared=r2,
-                        model_score=bic,
-                        n_components_in_model=n_components,
-                        fit_succeeded=True,
-                    )
-                )
-
-            components, merge_notes = self._merge_close_components(components)
-            residual_patch = self._build_residual_patch(patch, component_params)
-            predicted_patch = self._build_predicted_patch(patch, component_params)
-
-            return MixtureFitResult(
-                components=components,
-                n_components=len(components),
-                background=patch.background_level,
-                residual_rmse=rmse,
-                r_squared=r2,
-                aic=aic,
-                bic=bic,
-                model_score=bic,
-                fit_succeeded=True,
-                predicted_patch=predicted_patch,
-                residual_patch=residual_patch,
-                merge_notes=merge_notes,
-            )
-        except Exception as exc:
-            return MixtureFitResult(
-                components=[],
-                n_components=n_components,
-                background=patch.background_level,
-                residual_rmse=float("inf"),
-                r_squared=0.0,
-                aic=float("inf"),
-                bic=float("inf"),
-                model_score=float("inf"),
-                fit_succeeded=False,
-                fit_error=str(exc),
-            )
 
     def _extract_weighted_patch(self, patch: ObjectPatch) -> _PatchArrays:
         rows, cols = np.indices(patch.corrected.shape)
@@ -658,7 +542,13 @@ class GaussianModelSelector:
         fit_three: MixtureFitResult | None = None
 
         if max_components >= 2:
-            fit_two = self.mixture_fitter.fit_patch(patch, peaks, n_components=2)
+            fit_two = self.mixture_fitter.fit_patch(
+                patch,
+                peaks,
+                n_components=2,
+                obj=obj,
+                single_component=single,
+            )
             candidate_counts.append(2)
 
         try_three = max_components >= 3 and (n_filtered_peaks >= 3 or n_raw_peaks >= 3)
@@ -674,7 +564,13 @@ class GaussianModelSelector:
                 try_three = False
 
         if try_three and max_components >= 3:
-            fit_three = self.mixture_fitter.fit_patch(patch, peaks, n_components=3)
+            fit_three = self.mixture_fitter.fit_patch(
+                patch,
+                peaks,
+                n_components=3,
+                obj=obj,
+                single_component=single,
+            )
             candidate_counts.append(3)
             if fit_two is not None and fit_three is not None and fit_three.fit_succeeded:
                 if not self._score_improved(fit_two.bic, fit_two.aic, fit_three.bic, fit_three.aic):
@@ -749,6 +645,26 @@ class GaussianModelSelector:
             return None
         return min(candidates, key=lambda fit: fit.bic)
 
+    def _mixture_spurious_split(
+        self,
+        single: GaussianComponent,
+        mixture: MixtureFitResult,
+    ) -> bool:
+        """Reject tight multi-component splits when the single fit is already good."""
+        if mixture.n_components < 2 or not single.fit_succeeded:
+            return False
+        if single.r_squared < self.config.gmm_weak_fit_r_squared:
+            return False
+        centers = [(component.fitted_row, component.fitted_col) for component in mixture.components]
+        min_distance = float("inf")
+        for i in range(len(centers)):
+            for j in range(i + 1, len(centers)):
+                min_distance = min(
+                    min_distance,
+                    math.hypot(centers[i][0] - centers[j][0], centers[i][1] - centers[j][1]),
+                )
+        return min_distance < self.config.min_center_separation
+
     def _compare_single_vs_mixture(
         self,
         patch: ObjectPatch,
@@ -787,6 +703,19 @@ class GaussianModelSelector:
         bic_improved = best_mixture.bic + bic_margin < single_bic
         aic_improved = best_mixture.aic + aic_margin < single_aic_val
         if bic_improved or aic_improved:
+            if self._mixture_spurious_split(single, best_mixture):
+                reason = (
+                    "kept_single_rejected_spurious_tight_split_"
+                    f"r2={single.r_squared:.3f}_min_dist<{self.config.min_center_separation}"
+                )
+                return ModelComparisonResult(
+                    selected=single,
+                    single=single,
+                    best_mixture=best_mixture,
+                    selection_reason=reason,
+                    rejected_component_reason=reason,
+                    candidate_component_counts=candidate_counts,
+                )
             reason = (
                 f"selected_gmm_n={best_mixture.n_components}_bic={best_mixture.bic:.1f}"
                 f"_vs_single_bic={single_bic:.1f}"
@@ -805,6 +734,19 @@ class GaussianModelSelector:
             and best_mixture.r_squared > single.r_squared + 0.05
             and best_mixture.residual_rmse < single.residual_rmse * 0.85
         ):
+            if self._mixture_spurious_split(single, best_mixture):
+                reason = (
+                    "kept_single_rejected_spurious_tight_split_"
+                    f"r2={single.r_squared:.3f}_min_dist<{self.config.min_center_separation}"
+                )
+                return ModelComparisonResult(
+                    selected=single,
+                    single=single,
+                    best_mixture=best_mixture,
+                    selection_reason=reason,
+                    rejected_component_reason=reason,
+                    candidate_component_counts=candidate_counts,
+                )
             reason = (
                 f"selected_gmm_by_residual_r2_gain_"
                 f"r2={best_mixture.r_squared:.3f}_vs_{single.r_squared:.3f}"

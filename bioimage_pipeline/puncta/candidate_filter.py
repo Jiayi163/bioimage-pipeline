@@ -11,6 +11,7 @@ from bioimage_pipeline.puncta.types import (
     DetectionPath,
     FitStatus,
     GaussianComponent,
+    MixtureFitResult,
     ObjectInfo,
     ObjectPatch,
     PeakCandidate,
@@ -32,7 +33,74 @@ class CandidateFilter:
     def accepted(self) -> list[PunctumCandidate]:
         return list(self._accepted)
 
-    def evaluate_component(
+    def evaluate_mixture_components(
+        self,
+        obj: ObjectInfo,
+        peaks: list[PeakCandidate],
+        mixture: MixtureFitResult,
+        *,
+        candidate_id_start: int,
+        object_mask: np.ndarray,
+        patch: ObjectPatch,
+    ) -> list[PunctumCandidate]:
+        """Accept GMM components with mixture-specific duplicate threshold."""
+        candidates: list[PunctumCandidate] = []
+        mixture_accepted: list[PunctumCandidate] = []
+        prior_global_accepted = list(self._accepted)
+        within_threshold = (
+            self.config.gmm_acceptance_min_separation
+            if self.config.gmm_use_mixture_acceptance_separation
+            else self.config.min_center_separation
+        )
+
+        for offset, component in enumerate(mixture.components):
+            peak = peaks[min(offset, len(peaks) - 1)]
+            candidate = self._build_component_candidate(
+                obj,
+                peak,
+                component,
+                candidate_id=candidate_id_start + offset,
+                component_id=component.component_id,
+                path="gmm",
+            )
+            candidate.gmm_duplicate_threshold_px = within_threshold
+
+            rejection = self._rejection_reason(candidate, component, object_mask, patch)
+            if rejection is None:
+                within_dup, within_distance = self._duplicate_against_list(
+                    candidate,
+                    mixture_accepted,
+                    within_threshold,
+                )
+                if within_dup is None:
+                    global_dup, global_distance = self._duplicate_against_list(
+                        candidate,
+                        prior_global_accepted,
+                        self.config.min_center_separation,
+                    )
+                    if global_dup is None:
+                        candidate.accepted = True
+                        candidate.fit_status = "fit_ok"
+                        mixture_accepted.append(candidate)
+                    else:
+                        candidate.rejection_reason = global_dup
+                        candidate.fit_status = "rejected_duplicate"
+                        candidate.gmm_duplicate_distance_px = global_distance
+                else:
+                    candidate.rejection_reason = within_dup
+                    candidate.fit_status = "rejected_duplicate"
+                    candidate.gmm_duplicate_distance_px = within_distance
+            else:
+                candidate.rejection_reason = rejection
+                candidate.fit_status = self._status_from_rejection(rejection)
+
+            candidates.append(candidate)
+
+        for candidate in mixture_accepted:
+            self._accepted.append(candidate)
+        return candidates
+
+    def _build_component_candidate(
         self,
         obj: ObjectInfo,
         peak: PeakCandidate,
@@ -41,10 +109,8 @@ class CandidateFilter:
         candidate_id: int,
         component_id: int,
         path: DetectionPath,
-        object_mask: np.ndarray,
-        patch: ObjectPatch,
     ) -> PunctumCandidate:
-        candidate = PunctumCandidate(
+        return PunctumCandidate(
             object_id=obj.label,
             candidate_id=candidate_id,
             component_id=component_id,
@@ -68,6 +134,27 @@ class CandidateFilter:
             r_squared=component.r_squared if component.fit_succeeded else None,
             model_score=component.model_score if component.fit_succeeded else None,
             n_components_in_model=component.n_components_in_model,
+        )
+
+    def evaluate_component(
+        self,
+        obj: ObjectInfo,
+        peak: PeakCandidate,
+        component: GaussianComponent,
+        *,
+        candidate_id: int,
+        component_id: int,
+        path: DetectionPath,
+        object_mask: np.ndarray,
+        patch: ObjectPatch,
+    ) -> PunctumCandidate:
+        candidate = self._build_component_candidate(
+            obj,
+            peak,
+            component,
+            candidate_id=candidate_id,
+            component_id=component_id,
+            path=path,
         )
 
         rejection = self._rejection_reason(candidate, component, object_mask, patch)
@@ -225,17 +312,33 @@ class CandidateFilter:
         return bool(object_mask[min_row:max_row, min_col:max_col].any())
 
     def _duplicate_reason(self, candidate: PunctumCandidate) -> str | None:
-        for accepted in self._accepted:
+        reason, _ = self._duplicate_against_list(
+            candidate,
+            self._accepted,
+            self.config.min_center_separation,
+        )
+        return reason
+
+    def _duplicate_against_list(
+        self,
+        candidate: PunctumCandidate,
+        accepted: list[PunctumCandidate],
+        min_separation: float,
+    ) -> tuple[str | None, float | None]:
+        closest_distance: float | None = None
+        for existing in accepted:
             distance = math.hypot(
-                candidate.final_row - accepted.final_row,
-                candidate.final_col - accepted.final_col,
+                candidate.final_row - existing.final_row,
+                candidate.final_col - existing.final_col,
             )
-            if distance < self.config.min_center_separation:
-                if self._should_replace_accepted(accepted, candidate):
-                    self._accepted.remove(accepted)
-                    return None
-                return "duplicate_center_too_close"
-        return None
+            if closest_distance is None or distance < closest_distance:
+                closest_distance = distance
+            if distance < min_separation:
+                if self._should_replace_accepted(existing, candidate):
+                    accepted.remove(existing)
+                    return None, distance
+                return "duplicate_center_too_close", distance
+        return None, closest_distance
 
     def _should_replace_accepted(
         self,

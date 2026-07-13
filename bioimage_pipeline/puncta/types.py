@@ -123,6 +123,24 @@ class GaussianComponent:
 
 
 @dataclass
+class GmmInitAttemptDiagnostics:
+    """One multi-start initialization attempt for production diagnostics."""
+
+    strategy: str
+    converged: bool
+    post_merge_component_count: int
+    merge_collapsed: bool
+    merge_notes: list[str]
+    fitted_centers: list[tuple[float, float]]
+    fitted_amplitudes: list[float]
+    fitted_sigma_x: list[float]
+    fitted_sigma_y: list[float]
+    rss: float | None
+    bic: float | None
+    selected: bool = False
+
+
+@dataclass
 class MixtureFitResult:
     """Joint Gaussian mixture fit for one object ROI."""
 
@@ -139,6 +157,10 @@ class MixtureFitResult:
     predicted_patch: np.ndarray | None = None
     residual_patch: np.ndarray | None = None
     merge_notes: list[str] = field(default_factory=list)
+    winning_init_strategy: str | None = None
+    multi_start_attempts: int | None = None
+    multi_start_converged: int | None = None
+    init_attempts: list[GmmInitAttemptDiagnostics] = field(default_factory=list)
 
 
 @dataclass
@@ -160,6 +182,13 @@ class ModelSelectionDebug:
     best_gmm_r_squared: float | None = None
     best_gmm_residual_relative: float | None = None
     best_gmm_n_components: int | None = None
+    gmm_winning_init_strategy: str | None = None
+    gmm_multi_start_attempts: int | None = None
+    gmm_multi_start_converged: int | None = None
+    gmm_fitted_center_distance_px: float | None = None
+    gmm_bic_delta_vs_single: float | None = None
+    gmm_aic_delta_vs_single: float | None = None
+    gmm_acceptance_min_separation_px: float | None = None
     model_selection_reason: str = ""
     rejected_component_reason: str | None = None
     single_path_reason: str | None = None
@@ -231,10 +260,16 @@ class PunctumCandidate:
     one_gaussian_residual_relative: float | None = None
     best_gmm_r_squared: float | None = None
     best_gmm_residual_relative: float | None = None
+    best_gmm_n_components: int | None = None
     model_selection_reason: str | None = None
     rejected_component_reason: str | None = None
     under_split_suspect: bool | None = None
     under_split_reasons: str | None = None
+    gmm_winning_init_strategy: str | None = None
+    gmm_duplicate_threshold_px: float | None = None
+    gmm_duplicate_distance_px: float | None = None
+    gmm_bic_delta_vs_single: float | None = None
+    gmm_aic_delta_vs_single: float | None = None
 
     @property
     def has_gaussian_fit(self) -> bool:

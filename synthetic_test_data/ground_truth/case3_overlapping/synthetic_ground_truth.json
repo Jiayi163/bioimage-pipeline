@@ -1,0 +1,58 @@
+{
+  "case_name": "case3_overlapping",
+  "true_spot_count": 2,
+  "image_shape": [
+    128,
+    128
+  ],
+  "coordinate_system": {
+    "x": "column",
+    "y": "row"
+  },
+  "background": {
+    "constant": 40.0,
+    "gradient": null
+  },
+  "noise": {
+    "poisson": true,
+    "read_noise_sigma": 5.0,
+    "extra_blur_sigma": 0.0
+  },
+  "mask": {
+    "threshold_fraction": 0.12,
+    "closing_radius": 2,
+    "merged_single_object": true,
+    "connected_components": 1
+  },
+  "spots": [
+    {
+      "id": 1,
+      "x": 63.0,
+      "y": 64.0,
+      "amplitude": 1800.0,
+      "sigma_x": 2.2,
+      "sigma_y": 2.2
+    },
+    {
+      "id": 2,
+      "x": 65.0,
+      "y": 64.0,
+      "amplitude": 1800.0,
+      "sigma_x": 2.2,
+      "sigma_y": 2.2
+    }
+  ],
+  "expected": {
+    "true_count": 2,
+    "notes": "Two overlapping puncta (2 px separation) in one merged mask object; tests GMM declumping. Predicted count should be 2."
+  },
+  "generation": {
+    "random_seed": 42,
+    "generator_version": "0.1.0"
+  },
+  "signal_stats": {
+    "clean_min": 40.0,
+    "clean_max": 3286.6641711230177,
+    "clean_mean": 46.68202031202985
+  }
+}

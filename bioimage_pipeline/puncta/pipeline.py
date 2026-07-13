@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -237,6 +238,25 @@ class PunctaDeclumpPipeline:
             suspicious_objects=suspicious_count,
             fitted_objects=fitted_count,
         )
+
+        gmm_init_diagnostics: list[dict[str, object]] = []
+        for obj, result in object_results:
+            mixture = result.mixture
+            if mixture is None and result.comparison is not None:
+                mixture = result.comparison.best_mixture
+            if mixture is None or not mixture.init_attempts:
+                continue
+            gmm_init_diagnostics.append(
+                {
+                    "object_id": obj.label,
+                    "winning_strategy": mixture.winning_init_strategy,
+                    "multi_start_attempts": mixture.multi_start_attempts,
+                    "multi_start_converged": mixture.multi_start_converged,
+                    "attempts": [asdict(attempt) for attempt in mixture.init_attempts],
+                }
+            )
+        if gmm_init_diagnostics:
+            threshold_metadata["gmm_init_diagnostics"] = gmm_init_diagnostics
 
         declump_result = DeclumpResult(
             candidates=candidates,
