@@ -252,11 +252,22 @@ class PunctaDeclumpPipeline:
                     "winning_strategy": mixture.winning_init_strategy,
                     "multi_start_attempts": mixture.multi_start_attempts,
                     "multi_start_converged": mixture.multi_start_converged,
+                    "search_mode": mixture.search_mode,
+                    "early_stopped": mixture.early_stopped,
                     "attempts": [asdict(attempt) for attempt in mixture.init_attempts],
                 }
             )
         if gmm_init_diagnostics:
             threshold_metadata["gmm_init_diagnostics"] = gmm_init_diagnostics
+
+        threshold_metadata["gmm_config"] = {
+            "gmm_multi_start_enabled": self.config.gmm_multi_start_enabled,
+            "gmm_max_multi_starts": self.config.gmm_max_multi_starts,
+            "gmm_multi_start_max_nfev": self.config.gmm_multi_start_max_nfev,
+            "gmm_multi_start_separations": list(self.config.gmm_multi_start_separations),
+            "gmm_acceptance_min_separation": self.config.gmm_acceptance_min_separation,
+            "gmm_multi_start_mode": self.config.gmm_multi_start_mode,
+        }
 
         declump_result = DeclumpResult(
             candidates=candidates,

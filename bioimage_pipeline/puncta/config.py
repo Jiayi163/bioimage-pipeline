@@ -94,6 +94,10 @@ class PunctaDeclumpConfig:
     gmm_multi_start_separations: tuple[float, ...] = (1.0, 2.0, 3.0, 4.0)
     gmm_acceptance_min_separation: float = 1.5
     gmm_use_mixture_acceptance_separation: bool = True
+    gmm_multi_start_mode: Literal["full", "staged_early_stop"] = "full"
+    gmm_multi_start_early_stop_bic_margin: float | None = None
+    gmm_multi_start_early_stop_min_converged: int = 2
+    gmm_multi_start_early_stop_bic_agreement: float = 15.0
 
     # Selective routing / detectors
     enable_selective_routing: bool = True

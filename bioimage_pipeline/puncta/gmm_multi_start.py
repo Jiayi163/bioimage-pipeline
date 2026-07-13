@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -65,6 +66,9 @@ class MultiStartFitResult:
     winning_strategy: str
     n_starts_attempted: int
     n_starts_converged: int
+    early_stopped: bool = False
+    search_mode: str = "full"
+    profiling: dict[str, float] = field(default_factory=dict)
 
 
 def generate_two_component_init_sets(
@@ -151,12 +155,35 @@ def generate_two_component_init_sets(
     return strategies
 
 
+def ordered_multi_start_strategies(
+    init_sets: dict[str, list[PeakCandidate]],
+    *,
+    config: PunctaDeclumpConfig,
+) -> list[str]:
+    """Return strategy execution order: staged priority, then symmetric, then offset."""
+    available = set(init_sets.keys())
+    ordered: list[str] = []
+    for key in ("detector_based", "residual_peak", "major_axis"):
+        if key in available:
+            ordered.append(key)
+    ordered.extend(sorted(name for name in available if name.startswith("symmetric_")))
+    ordered.extend(sorted(name for name in available if name.startswith("offset_")))
+    for name in sorted(available):
+        if name not in ordered:
+            ordered.append(name)
+    if config.gmm_max_multi_starts > 0:
+        ordered = ordered[: config.gmm_max_multi_starts]
+    return ordered
+
+
 def _attempt_diagnostics(
     strategy: str,
     fit: MixtureFitResult,
     *,
     pre_merge_count: int | None = None,
     selected: bool = False,
+    optimizer_runtime_s: float | None = None,
+    n_optimizer_evaluations: int | None = None,
 ) -> GmmInitAttemptDiagnostics:
     centers = [(component.fitted_col, component.fitted_row) for component in fit.components]
     merge_collapsed = bool(
@@ -178,6 +205,8 @@ def _attempt_diagnostics(
         rss=rss,
         bic=fit.bic if fit.fit_succeeded else None,
         selected=selected,
+        optimizer_runtime_s=optimizer_runtime_s,
+        n_optimizer_evaluations=n_optimizer_evaluations,
     )
 
 
@@ -253,12 +282,15 @@ def fit_mixture_from_init_peaks(
         return (arrays.values - predicted) * arrays.weights
 
     try:
+        optimizer_start = time.perf_counter()
         result: OptimizeResult = least_squares(
             residuals,
             np.array(params, dtype=np.float64),
             bounds=(np.array(lower), np.array(upper)),
             max_nfev=max_nfev or config.gmm_multi_start_max_nfev,
         )
+        optimizer_runtime_s = time.perf_counter() - optimizer_start
+        n_optimizer_evaluations = int(getattr(result, "nfev", 0) or 0)
         component_params = [
             (
                 float(result.x[i * 5 + 0]),
@@ -320,6 +352,8 @@ def fit_mixture_from_init_peaks(
             fit_error=fit_error,
             winning_init_strategy=initialization_method,
             multi_start_attempts=1,
+            optimizer_runtime_s=optimizer_runtime_s,
+            optimizer_nfev=n_optimizer_evaluations,
         )
     except Exception as exc:
         return MixtureFitResult(
@@ -337,6 +371,56 @@ def fit_mixture_from_init_peaks(
         )
 
 
+def _component_center_distance(fit: MixtureFitResult) -> float | None:
+    if len(fit.components) < 2:
+        return None
+    c0, c1 = fit.components[0], fit.components[1]
+    return math.hypot(c0.fitted_col - c1.fitted_col, c0.fitted_row - c1.fitted_row)
+
+
+def _early_stop_candidate_ok(
+    fit: MixtureFitResult,
+    *,
+    single_bic: float | None,
+    config: PunctaDeclumpConfig,
+) -> bool:
+    if not fit.fit_succeeded or fit.n_components < 2:
+        return False
+    if single_bic is None:
+        return False
+    margin = (
+        config.gmm_multi_start_early_stop_bic_margin
+        if config.gmm_multi_start_early_stop_bic_margin is not None
+        else config.gmm_bic_improvement_margin
+    )
+    if fit.bic + margin >= single_bic:
+        return False
+    distance = _component_center_distance(fit)
+    if distance is not None and distance < config.gmm_min_component_separation:
+        return False
+    return True
+
+
+def _has_independent_confirmation(
+    converged_fits: list[tuple[str, MixtureFitResult]],
+    best_strategy: str,
+    best_fit: MixtureFitResult,
+    *,
+    config: PunctaDeclumpConfig,
+) -> bool:
+    if len(converged_fits) < config.gmm_multi_start_early_stop_min_converged:
+        return False
+    agreement = config.gmm_multi_start_early_stop_bic_agreement
+    for strategy, fit in converged_fits:
+        if strategy == best_strategy:
+            continue
+        if fit.n_components < 2:
+            continue
+        if abs(fit.bic - best_fit.bic) <= agreement:
+            return True
+    return False
+
+
 def fit_two_component_multi_start(
     mixture_fitter: GaussianMixtureFitter,
     patch: ObjectPatch,
@@ -347,6 +431,7 @@ def fit_two_component_multi_start(
 ) -> MultiStartFitResult:
     """Run bounded multi-start search and return the best BIC mixture fit."""
     config = mixture_fitter.config
+    search_mode = config.gmm_multi_start_mode
     init_sets = generate_two_component_init_sets(
         peaks,
         patch,
@@ -355,16 +440,25 @@ def fit_two_component_multi_start(
         single_component=single_component,
     )
 
-    ordered_names = sorted(init_sets.keys())
-    if config.gmm_max_multi_starts > 0:
-        ordered_names = ordered_names[: config.gmm_max_multi_starts]
+    ordered_names = ordered_multi_start_strategies(init_sets, config=config)
+    single_bic: float | None = None
+    if single_component is not None:
+        from bioimage_pipeline.puncta.gaussian_fitter import GaussianModelSelector
+
+        selector = GaussianModelSelector(config)
+        single_bic = selector._single_component_bic(patch, single_component)
 
     best_fit: MixtureFitResult | None = None
     winning_strategy = "none"
     n_converged = 0
     attempt_records: list[GmmInitAttemptDiagnostics] = []
+    converged_fits: list[tuple[str, MixtureFitResult]] = []
+    profiling: dict[str, float] = {"optimizer_total_s": 0.0}
+    early_stopped = False
+    strategies_attempted = 0
 
     for name in ordered_names:
+        strategies_attempted += 1
         fit = fit_mixture_from_init_peaks(
             mixture_fitter,
             patch,
@@ -373,13 +467,38 @@ def fit_two_component_multi_start(
             initialization_method=name,
             max_nfev=config.gmm_multi_start_max_nfev,
         )
-        attempt_records.append(_attempt_diagnostics(name, fit))
+        if fit.optimizer_runtime_s is not None:
+            profiling["optimizer_total_s"] += fit.optimizer_runtime_s
+            profiling[f"strategy_{name}_s"] = fit.optimizer_runtime_s
+        attempt_records.append(
+            _attempt_diagnostics(
+                name,
+                fit,
+                optimizer_runtime_s=fit.optimizer_runtime_s,
+                n_optimizer_evaluations=fit.optimizer_nfev,
+            )
+        )
         if not fit.fit_succeeded or fit.n_components < 2:
             continue
         n_converged += 1
+        converged_fits.append((name, fit))
         if best_fit is None or fit.bic < best_fit.bic:
             best_fit = fit
             winning_strategy = name
+
+        if (
+            search_mode == "staged_early_stop"
+            and best_fit is not None
+            and _early_stop_candidate_ok(best_fit, single_bic=single_bic, config=config)
+            and _has_independent_confirmation(
+                converged_fits,
+                winning_strategy,
+                best_fit,
+                config=config,
+            )
+        ):
+            early_stopped = True
+            break
 
     if best_fit is None:
         fallback = fit_mixture_from_init_peaks(
@@ -391,24 +510,43 @@ def fit_two_component_multi_start(
             max_nfev=config.gmm_multi_start_max_nfev,
         )
         if not any(record.strategy == "detector_based" for record in attempt_records):
-            attempt_records.append(_attempt_diagnostics("detector_based", fallback))
+            attempt_records.append(
+                _attempt_diagnostics(
+                    "detector_based",
+                    fallback,
+                    optimizer_runtime_s=fallback.optimizer_runtime_s,
+                    n_optimizer_evaluations=fallback.optimizer_nfev,
+                )
+            )
         fallback.init_attempts = attempt_records
+        fallback.search_mode = search_mode
         return MultiStartFitResult(
             fit=fallback,
             winning_strategy=fallback.winning_init_strategy or "detector_based",
-            n_starts_attempted=len(ordered_names),
+            n_starts_attempted=strategies_attempted,
             n_starts_converged=0,
+            early_stopped=early_stopped,
+            search_mode=search_mode,
+            profiling=profiling,
         )
 
     for record in attempt_records:
         record.selected = record.strategy == winning_strategy
     best_fit.winning_init_strategy = winning_strategy
-    best_fit.multi_start_attempts = len(ordered_names)
+    best_fit.multi_start_attempts = strategies_attempted
     best_fit.multi_start_converged = n_converged
     best_fit.init_attempts = attempt_records
+    best_fit.early_stopped = early_stopped
+    best_fit.search_mode = search_mode
+    profiling["post_merge_s"] = 0.0
+    profiling["strategies_attempted"] = float(strategies_attempted)
+    profiling["strategies_converged"] = float(n_converged)
     return MultiStartFitResult(
         fit=best_fit,
         winning_strategy=winning_strategy,
-        n_starts_attempted=len(ordered_names),
+        n_starts_attempted=strategies_attempted,
         n_starts_converged=n_converged,
+        early_stopped=early_stopped,
+        search_mode=search_mode,
+        profiling=profiling,
     )

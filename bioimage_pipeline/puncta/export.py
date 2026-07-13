@@ -109,6 +109,7 @@ class ResultExporter:
         payload = {
             "summary": asdict(result.summary),
             "threshold_metadata": result.threshold_metadata,
+            "gmm_config": result.threshold_metadata.get("gmm_config"),
             "fit_quality": {
                 "gaussian_fit_count": len(gaussian_fitted),
                 "fallback_count": sum(
@@ -220,4 +221,8 @@ class ResultExporter:
             "gmm_duplicate_distance_px": candidate.gmm_duplicate_distance_px,
             "gmm_bic_delta_vs_single": candidate.gmm_bic_delta_vs_single,
             "gmm_aic_delta_vs_single": candidate.gmm_aic_delta_vs_single,
+            "gmm_search_mode": candidate.gmm_search_mode,
+            "gmm_spurious_split_rejected": candidate.gmm_spurious_split_rejected,
+            "gmm_multi_start_attempts": candidate.gmm_multi_start_attempts,
+            "gmm_multi_start_converged": candidate.gmm_multi_start_converged,
         }

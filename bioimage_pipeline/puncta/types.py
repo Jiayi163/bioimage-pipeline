@@ -138,6 +138,8 @@ class GmmInitAttemptDiagnostics:
     rss: float | None
     bic: float | None
     selected: bool = False
+    optimizer_runtime_s: float | None = None
+    n_optimizer_evaluations: int | None = None
 
 
 @dataclass
@@ -161,6 +163,10 @@ class MixtureFitResult:
     multi_start_attempts: int | None = None
     multi_start_converged: int | None = None
     init_attempts: list[GmmInitAttemptDiagnostics] = field(default_factory=list)
+    optimizer_runtime_s: float | None = None
+    optimizer_nfev: int | None = None
+    early_stopped: bool = False
+    search_mode: str | None = None
 
 
 @dataclass
@@ -189,6 +195,8 @@ class ModelSelectionDebug:
     gmm_bic_delta_vs_single: float | None = None
     gmm_aic_delta_vs_single: float | None = None
     gmm_acceptance_min_separation_px: float | None = None
+    gmm_search_mode: str | None = None
+    gmm_spurious_split_rejected: bool = False
     model_selection_reason: str = ""
     rejected_component_reason: str | None = None
     single_path_reason: str | None = None
@@ -270,6 +278,10 @@ class PunctumCandidate:
     gmm_duplicate_distance_px: float | None = None
     gmm_bic_delta_vs_single: float | None = None
     gmm_aic_delta_vs_single: float | None = None
+    gmm_search_mode: str | None = None
+    gmm_spurious_split_rejected: bool | None = None
+    gmm_multi_start_attempts: int | None = None
+    gmm_multi_start_converged: int | None = None
 
     @property
     def has_gaussian_fit(self) -> bool:

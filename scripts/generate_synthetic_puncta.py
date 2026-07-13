@@ -543,9 +543,29 @@ def condition_to_case(condition: dict[str, Any], base_config: GenerationConfig) 
 # ---------------------------------------------------------------------------
 
 SEPARATION_BENCHMARK_SEPARATIONS = [1, 2, 3, 4, 5, 6]
-SEPARATION_BENCHMARK_SEEDS = [101, 202, 303]
 SEPARATION_BENCHMARK_SIGMA = 2.2
 SEPARATION_BENCHMARK_AMPLITUDE = 1800.0
+
+BRIGHTNESS_RATIO_BENCHMARK_RATIOS = ["1:1", "1:1.5", "1:2", "1:3", "1:5"]
+BRIGHTNESS_RATIO_BENCHMARK_SEPARATIONS = [2, 3, 4, 5]
+SIGMA_BENCHMARK_SIGMAS = [1.5, 2.0, 2.5, 3.0]
+SIGMA_BENCHMARK_SEPARATIONS = [2, 3, 4, 5]
+
+FALSE_SPLIT_SIGMAS = [1.5, 2.0, 2.5, 3.0]
+FALSE_SPLIT_NOISE_LEVELS: list[NoiseLevel] = ["low", "medium", "high"]
+FALSE_SPLIT_AMPLITUDE_LEVELS = ["low", "medium", "high"]
+FALSE_SPLIT_AMP_VALUES = {"low": 600.0, "medium": 1200.0, "high": 1800.0}
+FALSE_SPLIT_ELLIPTICITY = ["circular", "elongated"]
+
+
+def generate_seed_list(num_seeds: int, *, base: int = 101, step: int = 101) -> list[int]:
+    """Return deterministic seed list: base, base+step, base+2*step, ..."""
+    if num_seeds <= 0:
+        return []
+    return [base + index * step for index in range(num_seeds)]
+
+
+SEPARATION_BENCHMARK_SEEDS = generate_seed_list(3)
 
 
 def separation_benchmark_case_name(separation_px: int, seed: int) -> str:
@@ -613,6 +633,238 @@ def generate_separation_benchmark(
             )
             write_case_outputs(case, output_root)
             generated.append(case.name)
+    return generated
+
+
+def false_split_benchmark_case_name(
+    *,
+    sigma: float,
+    noise_level: str,
+    amplitude_level: str,
+    gradient_on: bool,
+    ellipticity: str,
+    seed: int,
+) -> str:
+    grad = "on" if gradient_on else "off"
+    sig_tag = str(sigma).replace(".", "p")
+    return (
+        f"false_split_sig{sig_tag}_noise{noise_level}_amp{amplitude_level}_"
+        f"grad{grad}_ellip{ellipticity}_seed{seed}"
+    )
+
+
+def build_false_split_benchmark_case(
+    *,
+    sigma: float,
+    noise_level: NoiseLevel,
+    amplitude_level: str,
+    gradient_on: bool,
+    ellipticity: str,
+    seed: int,
+    base_config: GenerationConfig | None = None,
+) -> CaseSpec:
+    """Single punctum in a merged mask large enough to trigger GMM."""
+    noise = NOISE_PRESETS[noise_level]
+    config = base_config or GenerationConfig(random_seed=seed)
+    config.random_seed = seed
+    config.read_noise_sigma = noise["read_noise_sigma"]
+    config.extra_blur_sigma = noise["extra_blur_sigma"]
+    config.gradient = (
+        BackgroundGradient(row_slope=0.08, col_slope=0.05) if gradient_on else None
+    )
+    amp = FALSE_SPLIT_AMP_VALUES[amplitude_level]
+    sigma_y = sigma if ellipticity == "circular" else sigma * 0.68
+    spot = SpotSpec(
+        x=config.width / 2.0,
+        y=config.height / 2.0,
+        amplitude=amp,
+        sigma_x=sigma,
+        sigma_y=sigma_y,
+    )
+    return CaseSpec(
+        name=false_split_benchmark_case_name(
+            sigma=sigma,
+            noise_level=noise_level,
+            amplitude_level=amplitude_level,
+            gradient_on=gradient_on,
+            ellipticity=ellipticity,
+            seed=seed,
+        ),
+        spots=[spot],
+        config=config,
+        expected_count=1,
+        merge_mask=True,
+        notes=(
+            f"Single-punctum false-split benchmark: sigma={sigma}, noise={noise_level}, "
+            f"amplitude={amplitude_level}, gradient={gradient_on}, ellipticity={ellipticity}, seed={seed}."
+        ),
+    )
+
+
+def generate_false_split_benchmark(
+    output_root: Path,
+    *,
+    base_config: GenerationConfig | None = None,
+    seeds: list[int] | None = None,
+) -> list[str]:
+    seeds = seeds or SEPARATION_BENCHMARK_SEEDS
+    generated: list[str] = []
+    for sigma in FALSE_SPLIT_SIGMAS:
+        for noise_level in FALSE_SPLIT_NOISE_LEVELS:
+            for amplitude_level in FALSE_SPLIT_AMPLITUDE_LEVELS:
+                for gradient_on in (False, True):
+                    for ellipticity in FALSE_SPLIT_ELLIPTICITY:
+                        for seed in seeds:
+                            case = build_false_split_benchmark_case(
+                                sigma=sigma,
+                                noise_level=noise_level,
+                                amplitude_level=amplitude_level,
+                                gradient_on=gradient_on,
+                                ellipticity=ellipticity,
+                                seed=seed,
+                                base_config=base_config,
+                            )
+                            write_case_outputs(case, output_root)
+                            generated.append(case.name)
+    return generated
+
+
+def brightness_ratio_benchmark_case_name(ratio: str, separation_px: int, seed: int) -> str:
+    br = ratio.replace(":", "-")
+    return f"ratio_benchmark_br{br}_sep{separation_px}_seed{seed}"
+
+
+def build_brightness_ratio_benchmark_case(
+    ratio: str,
+    separation_px: int,
+    seed: int,
+    *,
+    base_config: GenerationConfig | None = None,
+) -> CaseSpec:
+    config = base_config or GenerationConfig(random_seed=seed)
+    config.random_seed = seed
+    center_x = config.width / 2.0
+    center_y = config.height / 2.0
+    half = separation_px / 2.0
+    parts = ratio.split(":")
+    amp_a = SEPARATION_BENCHMARK_AMPLITUDE
+    amp_b = amp_a * float(parts[1]) / float(parts[0])
+    spots = [
+        SpotSpec(
+            x=center_x - half,
+            y=center_y,
+            amplitude=amp_a,
+            sigma_x=SEPARATION_BENCHMARK_SIGMA,
+            sigma_y=SEPARATION_BENCHMARK_SIGMA,
+        ),
+        SpotSpec(
+            x=center_x + half,
+            y=center_y,
+            amplitude=amp_b,
+            sigma_x=SEPARATION_BENCHMARK_SIGMA,
+            sigma_y=SEPARATION_BENCHMARK_SIGMA,
+        ),
+    ]
+    return CaseSpec(
+        name=brightness_ratio_benchmark_case_name(ratio, separation_px, seed),
+        spots=spots,
+        config=config,
+        expected_count=2,
+        merge_mask=True,
+        notes=f"Brightness ratio benchmark: ratio={ratio}, separation={separation_px}px, seed={seed}.",
+    )
+
+
+def generate_brightness_ratio_benchmark(
+    output_root: Path,
+    *,
+    base_config: GenerationConfig | None = None,
+    seeds: list[int] | None = None,
+    separations: list[int] | None = None,
+) -> list[str]:
+    seeds = seeds or SEPARATION_BENCHMARK_SEEDS
+    separations = separations or BRIGHTNESS_RATIO_BENCHMARK_SEPARATIONS
+    generated: list[str] = []
+    for ratio in BRIGHTNESS_RATIO_BENCHMARK_RATIOS:
+        for separation in separations:
+            for seed in seeds:
+                case = build_brightness_ratio_benchmark_case(
+                    ratio,
+                    separation,
+                    seed,
+                    base_config=base_config,
+                )
+                write_case_outputs(case, output_root)
+                generated.append(case.name)
+    return generated
+
+
+def sigma_benchmark_case_name(sigma: float, separation_px: int, seed: int) -> str:
+    sig_tag = str(sigma).replace(".", "p")
+    return f"sigma_benchmark_sig{sig_tag}_sep{separation_px}_seed{seed}"
+
+
+def build_sigma_benchmark_case(
+    sigma: float,
+    separation_px: int,
+    seed: int,
+    *,
+    base_config: GenerationConfig | None = None,
+) -> CaseSpec:
+    config = base_config or GenerationConfig(random_seed=seed)
+    config.random_seed = seed
+    center_x = config.width / 2.0
+    center_y = config.height / 2.0
+    half = separation_px / 2.0
+    spots = [
+        SpotSpec(
+            x=center_x - half,
+            y=center_y,
+            amplitude=SEPARATION_BENCHMARK_AMPLITUDE,
+            sigma_x=sigma,
+            sigma_y=sigma,
+        ),
+        SpotSpec(
+            x=center_x + half,
+            y=center_y,
+            amplitude=SEPARATION_BENCHMARK_AMPLITUDE,
+            sigma_x=sigma,
+            sigma_y=sigma,
+        ),
+    ]
+    return CaseSpec(
+        name=sigma_benchmark_case_name(sigma, separation_px, seed),
+        spots=spots,
+        config=config,
+        expected_count=2,
+        merge_mask=True,
+        notes=f"Sigma benchmark: sigma={sigma}, separation={separation_px}px, seed={seed}.",
+    )
+
+
+def generate_sigma_benchmark(
+    output_root: Path,
+    *,
+    base_config: GenerationConfig | None = None,
+    seeds: list[int] | None = None,
+    sigmas: list[float] | None = None,
+    separations: list[int] | None = None,
+) -> list[str]:
+    seeds = seeds or SEPARATION_BENCHMARK_SEEDS
+    sigmas = sigmas or SIGMA_BENCHMARK_SIGMAS
+    separations = separations or SIGMA_BENCHMARK_SEPARATIONS
+    generated: list[str] = []
+    for sigma in sigmas:
+        for separation in separations:
+            for seed in seeds:
+                case = build_sigma_benchmark_case(
+                    sigma,
+                    separation,
+                    seed,
+                    base_config=base_config,
+                )
+                write_case_outputs(case, output_root)
+                generated.append(case.name)
     return generated
 
 
@@ -730,6 +982,27 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Generate 2-spot merged-mask separation benchmark cases.",
     )
+    parser.add_argument(
+        "--false-split-benchmark",
+        action="store_true",
+        help="Generate single-punctum false-split benchmark cases.",
+    )
+    parser.add_argument(
+        "--brightness-ratio-benchmark",
+        action="store_true",
+        help="Generate doublet brightness-ratio benchmark cases.",
+    )
+    parser.add_argument(
+        "--sigma-benchmark",
+        action="store_true",
+        help="Generate doublet sigma benchmark cases.",
+    )
+    parser.add_argument(
+        "--num-seeds",
+        type=int,
+        default=3,
+        help="Number of random seeds per benchmark condition (default: 3).",
+    )
     parser.add_argument("--height", type=int, default=128)
     parser.add_argument("--width", type=int, default=128)
     parser.add_argument("--background", type=float, default=40.0)
@@ -755,12 +1028,46 @@ def main() -> None:
 
     output_root = args.output_root.resolve()
     base_config = apply_cli_overrides(GenerationConfig(), args)
+    seed_list = generate_seed_list(args.num_seeds)
 
     if args.separation_benchmark:
-        names = generate_separation_benchmark(output_root, base_config=base_config)
-        print(f"Generated {len(names)} separation benchmark case(s).")
-        for name in names:
+        names = generate_separation_benchmark(
+            output_root,
+            base_config=base_config,
+            seeds=seed_list,
+        )
+        print(f"Generated {len(names)} separation benchmark case(s) with {len(seed_list)} seed(s) each.")
+        for name in names[:5]:
             print(f"  {name}")
+        if len(names) > 5:
+            print(f"  ... and {len(names) - 5} more")
+        return
+
+    if args.false_split_benchmark:
+        names = generate_false_split_benchmark(
+            output_root,
+            base_config=base_config,
+            seeds=seed_list,
+        )
+        print(f"Generated {len(names)} false-split benchmark case(s).")
+        return
+
+    if args.brightness_ratio_benchmark:
+        names = generate_brightness_ratio_benchmark(
+            output_root,
+            base_config=base_config,
+            seeds=seed_list,
+        )
+        print(f"Generated {len(names)} brightness-ratio benchmark case(s).")
+        return
+
+    if args.sigma_benchmark:
+        names = generate_sigma_benchmark(
+            output_root,
+            base_config=base_config,
+            seeds=seed_list,
+        )
+        print(f"Generated {len(names)} sigma benchmark case(s).")
         return
 
     if args.batch:

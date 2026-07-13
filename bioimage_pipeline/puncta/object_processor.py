@@ -250,6 +250,10 @@ class ObjectProcessor:
         debug.gmm_candidate_components = max(comparison.candidate_component_counts or [0])
         debug.model_selection_reason = comparison.selection_reason
         debug.rejected_component_reason = comparison.rejected_component_reason
+        debug.gmm_search_mode = self.config.gmm_multi_start_mode
+        debug.gmm_spurious_split_rejected = "spurious_tight_split" in (
+            comparison.selection_reason or ""
+        )
         if comparison.best_mixture is not None and comparison.best_mixture.fit_succeeded:
             debug.best_gmm_r_squared = comparison.best_mixture.r_squared
             debug.best_gmm_residual_relative = (
@@ -552,6 +556,10 @@ class ObjectProcessor:
         candidate.under_split_suspect = debug.under_split_suspect
         candidate.under_split_reasons = ";".join(debug.under_split_reasons) or None
         candidate.gmm_winning_init_strategy = debug.gmm_winning_init_strategy
+        candidate.gmm_search_mode = debug.gmm_search_mode
+        candidate.gmm_spurious_split_rejected = debug.gmm_spurious_split_rejected
+        candidate.gmm_multi_start_attempts = debug.gmm_multi_start_attempts
+        candidate.gmm_multi_start_converged = debug.gmm_multi_start_converged
         return candidate
 
     def _from_mixture(
