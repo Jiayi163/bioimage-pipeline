@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,33 @@ from bioimage_pipeline.puncta.types import ImagePeakTable, PeakCandidate
 CACHE_MTIME_TOLERANCE_SECONDS = 2.0
 META_SUFFIX = ".candidates.meta.json"
 CSV_SUFFIX = "_candidates.csv"
+
+
+def _cache_path(path: Path | str) -> Path:
+    """Normalize cache paths; use extended-length paths on Windows when needed."""
+    value = Path(path).expanduser()
+    if sys.platform != "win32":
+        return value
+    resolved = value.resolve(strict=False)
+    text = str(resolved)
+    if text.startswith("\\\\?\\"):
+        return resolved
+    if text.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + text[2:])
+    return Path("\\\\?\\" + text)
+
+
+def _ensure_directory(path: Path) -> Path:
+    """Create ``path`` and all parents; return the normalized directory path."""
+    directory = _cache_path(path)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _write_text(path: Path, text: str) -> None:
+    target = _cache_path(path)
+    _ensure_directory(target.parent)
+    target.write_text(text, encoding="utf-8")
 
 
 def detector_settings_hash(config: PunctaDeclumpConfig) -> str:
@@ -37,16 +65,17 @@ def detector_settings_hash(config: PunctaDeclumpConfig) -> str:
     return hashlib.sha256(encoded).hexdigest()[:16]
 
 
-def cache_paths(cache_dir: Path, stem: str) -> tuple[Path, Path]:
-    csv_path = cache_dir / f"{stem}{CSV_SUFFIX}"
-    meta_path = cache_dir / f"{stem}{META_SUFFIX}"
+def cache_paths(cache_dir: Path | str, stem: str) -> tuple[Path, Path]:
+    root = _cache_path(cache_dir)
+    csv_path = _cache_path(root / f"{stem}{CSV_SUFFIX}")
+    meta_path = _cache_path(root / f"{stem}{META_SUFFIX}")
     return csv_path, meta_path
 
 
 def evaluate_detector_cache(
     *,
     source_path: Path | None,
-    cache_dir: Path,
+    cache_dir: Path | str,
     stem: str,
     config: PunctaDeclumpConfig,
 ) -> tuple[bool, Path, Path]:
@@ -88,11 +117,10 @@ def write_peak_table_cache(
     config: PunctaDeclumpConfig,
     source_path: Path | None = None,
 ) -> Path:
-    cache_root = Path(cache_dir)
-    cache_root.mkdir(parents=True, exist_ok=True)
+    cache_root = _ensure_directory(Path(cache_dir))
     csv_path, meta_path = cache_paths(cache_root, stem)
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_directory(csv_path.parent)
+    _ensure_directory(meta_path.parent)
     _write_csv(csv_path, peak_table)
     meta: dict[str, Any] = {
         "detector_name": peak_table.detector_name,
@@ -102,13 +130,13 @@ def write_peak_table_cache(
         "peak_count": len(peak_table.peaks),
         "written_at": time.time(),
     }
-    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    _write_text(meta_path, json.dumps(meta, indent=2))
     return csv_path
 
 
 def load_peak_table_cache(csv_path: Path, detector_name: str) -> ImagePeakTable:
     peaks: list[PeakCandidate] = []
-    with csv_path.open(newline="", encoding="utf-8") as handle:
+    with _cache_path(csv_path).open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
             peaks.append(
@@ -122,7 +150,9 @@ def load_peak_table_cache(csv_path: Path, detector_name: str) -> ImagePeakTable:
 
 
 def _write_csv(csv_path: Path, peak_table: ImagePeakTable) -> None:
-    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+    target = _cache_path(csv_path)
+    _ensure_directory(target.parent)
+    with target.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=["row", "col", "intensity", "quality", "radius"])
         writer.writeheader()
         for peak in peak_table.peaks:
