@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -107,16 +108,86 @@ def _resolve_executable_candidate(value: str) -> Path | None:
     return None
 
 
+def _cellprofiler_env_path() -> Path | None:
+    env_value = os.environ.get("CELLPROFILER_EXECUTABLE")
+    if not env_value or not env_value.strip():
+        return None
+    return _resolve_executable_candidate(env_value.strip())
+
+
+def _fiji_env_path() -> Path | None:
+    for env_name in ("FIJI_EXECUTABLE", "IMAGEJ_EXECUTABLE", "FIJI_PATH"):
+        env_value = os.environ.get(env_name)
+        if not env_value or not env_value.strip():
+            continue
+        resolved = _resolve_executable_candidate(env_value.strip())
+        if resolved is not None:
+            return resolved
+    return None
+
+
+def _warn_when_saved_differs_from_preferred(
+    warnings: list[str],
+    *,
+    saved_path: Path | None,
+    preferred_path: Path,
+    preferred_label: str,
+    tool_label: str,
+) -> None:
+    if saved_path is not None and saved_path != preferred_path:
+        warnings.append(
+            f"Using {preferred_label} ({preferred_path}) instead of saved "
+            f"{tool_label} path ({saved_path})"
+        )
+
+
 def resolve_cellprofiler_executable(
     saved_setting: str | None = None,
+    *,
+    explicit_override: str | None = None,
 ) -> ResolvedExecutable:
-    """Resolve CellProfiler using saved setting, env, PATH, then common paths."""
+    """Resolve CellProfiler for the GUI run panel.
+
+    Priority: explicit GUI input > environment variable > saved settings >
+    auto-discovery.
+    """
     warnings: list[str] = []
     saved_path, saved_warnings = _resolve_saved_executable(
         saved_setting,
         label="CellProfiler",
     )
     warnings.extend(saved_warnings)
+
+    if explicit_override and explicit_override.strip():
+        explicit_path = _resolve_executable_candidate(explicit_override.strip())
+        if explicit_path is not None:
+            return ResolvedExecutable(
+                display_value=str(explicit_path),
+                resolved_path=explicit_path,
+                source="explicit",
+                warnings=tuple(warnings),
+            )
+        warnings.append(
+            f"Ignoring invalid explicit CellProfiler executable path: "
+            f"{explicit_override.strip()}"
+        )
+
+    env_path = _cellprofiler_env_path()
+    if env_path is not None:
+        _warn_when_saved_differs_from_preferred(
+            warnings,
+            saved_path=saved_path,
+            preferred_path=env_path,
+            preferred_label="CELLPROFILER_EXECUTABLE",
+            tool_label="CellProfiler",
+        )
+        return ResolvedExecutable(
+            display_value=str(env_path),
+            resolved_path=env_path,
+            source="environment",
+            warnings=tuple(warnings),
+        )
+
     if saved_path is not None:
         return ResolvedExecutable(
             display_value=str(saved_path),
@@ -143,14 +214,52 @@ def resolve_cellprofiler_executable(
     )
 
 
-def resolve_fiji_executable(saved_setting: str | None = None) -> ResolvedExecutable:
-    """Resolve Fiji using saved setting, then standard Fiji discovery."""
+def resolve_fiji_executable(
+    saved_setting: str | None = None,
+    *,
+    explicit_override: str | None = None,
+) -> ResolvedExecutable:
+    """Resolve Fiji for the GUI run panel.
+
+    Priority: explicit GUI input > environment variables (FIJI_EXECUTABLE,
+    IMAGEJ_EXECUTABLE, FIJI_PATH) > saved settings > auto-discovery.
+    """
     warnings: list[str] = []
     saved_path, saved_warnings = _resolve_saved_executable(
         saved_setting,
         label="Fiji",
     )
     warnings.extend(saved_warnings)
+
+    if explicit_override and explicit_override.strip():
+        explicit_path = _resolve_executable_candidate(explicit_override.strip())
+        if explicit_path is not None:
+            return ResolvedExecutable(
+                display_value=str(explicit_path),
+                resolved_path=explicit_path,
+                source="explicit",
+                warnings=tuple(warnings),
+            )
+        warnings.append(
+            f"Ignoring invalid explicit Fiji executable path: {explicit_override.strip()}"
+        )
+
+    env_path = _fiji_env_path()
+    if env_path is not None:
+        _warn_when_saved_differs_from_preferred(
+            warnings,
+            saved_path=saved_path,
+            preferred_path=env_path,
+            preferred_label="FIJI/IMAGEJ environment variable",
+            tool_label="Fiji",
+        )
+        return ResolvedExecutable(
+            display_value=str(env_path),
+            resolved_path=env_path,
+            source="environment",
+            warnings=tuple(warnings),
+        )
+
     if saved_path is not None:
         return ResolvedExecutable(
             display_value=str(saved_path),
@@ -177,19 +286,44 @@ def resolve_fiji_executable(saved_setting: str | None = None) -> ResolvedExecuta
     )
 
 
+def _should_persist_discovered_executable(
+    *,
+    env_path: Path | None,
+    saved_setting: str | None,
+) -> bool:
+    """Return True when a discovered path may be written to GUI settings."""
+    if env_path is not None:
+        return False
+    saved_path, _ = _resolve_saved_executable(saved_setting, label="executable")
+    return saved_path is None
+
+
 def sync_discovered_executables_to_settings(
     cached: CachedRunExecutables,
     *,
     settings_path: str | Path | None = None,
 ) -> dict[str, str]:
-    """Persist auto-discovered executables when no valid saved path exists."""
+    """Persist resolved executables without clobbering env or valid saved paths."""
     loaded = load_gui_run_settings(settings_path)
     updates: dict[str, str] = {}
 
-    if cached.cellprofiler.source == "discovered":
-        updates[CELLPROFILER_SETTINGS_KEY] = cached.cellprofiler.display_value
-    if cached.fiji.source == "discovered":
-        updates[FIJI_SETTINGS_KEY] = cached.fiji.display_value
+    if cached.cellprofiler.resolved_path is not None:
+        if cached.cellprofiler.source == "environment":
+            updates[CELLPROFILER_SETTINGS_KEY] = cached.cellprofiler.display_value
+        elif cached.cellprofiler.source == "discovered" and _should_persist_discovered_executable(
+            env_path=_cellprofiler_env_path(),
+            saved_setting=loaded.get(CELLPROFILER_SETTINGS_KEY),
+        ):
+            updates[CELLPROFILER_SETTINGS_KEY] = cached.cellprofiler.display_value
+
+    if cached.fiji.resolved_path is not None:
+        if cached.fiji.source == "environment":
+            updates[FIJI_SETTINGS_KEY] = cached.fiji.display_value
+        elif cached.fiji.source == "discovered" and _should_persist_discovered_executable(
+            env_path=_fiji_env_path(),
+            saved_setting=loaded.get(FIJI_SETTINGS_KEY),
+        ):
+            updates[FIJI_SETTINGS_KEY] = cached.fiji.display_value
 
     if not updates:
         return loaded

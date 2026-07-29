@@ -94,41 +94,114 @@ def test_find_cellprofiler_executable_explicit_path(tmp_path: Path) -> None:
     assert find_cellprofiler_executable(executable) == executable.resolve()
 
 
-def test_resolve_cellprofiler_executable_prefers_saved_setting(
+def test_resolve_cellprofiler_executable_prefers_environment_over_saved_setting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved = tmp_path / "old_install" / "CellProfiler.exe"
+    env_install = tmp_path / "new_install" / "CellProfiler.exe"
+    saved.parent.mkdir(parents=True)
+    env_install.parent.mkdir(parents=True)
+    saved.write_text("saved", encoding="utf-8")
+    env_install.write_text("env", encoding="utf-8")
+    monkeypatch.setenv("CELLPROFILER_EXECUTABLE", str(env_install))
+
+    resolved = resolve_cellprofiler_executable(str(saved))
+
+    assert resolved.source == "environment"
+    assert resolved.resolved_path == env_install.resolve()
+    assert resolved.display_value == str(env_install.resolve())
+    assert any("instead of saved" in warning for warning in resolved.warnings)
+
+
+def test_resolve_cellprofiler_executable_uses_saved_when_no_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     saved = tmp_path / "saved" / "CellProfiler.exe"
-    discovered = tmp_path / "discovered" / "CellProfiler.exe"
     saved.parent.mkdir(parents=True)
-    discovered.parent.mkdir(parents=True)
     saved.write_text("saved", encoding="utf-8")
-    discovered.write_text("discovered", encoding="utf-8")
-    monkeypatch.setenv("CELLPROFILER_EXECUTABLE", str(discovered))
+    monkeypatch.delenv("CELLPROFILER_EXECUTABLE", raising=False)
 
     resolved = resolve_cellprofiler_executable(str(saved))
 
     assert resolved.source == "saved"
     assert resolved.resolved_path == saved.resolve()
-    assert resolved.display_value == str(saved.resolve())
+
+
+def test_resolve_cellprofiler_executable_explicit_override_beats_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    explicit = tmp_path / "explicit" / "CellProfiler.exe"
+    env_install = tmp_path / "env" / "CellProfiler.exe"
+    explicit.parent.mkdir(parents=True)
+    env_install.parent.mkdir(parents=True)
+    explicit.write_text("explicit", encoding="utf-8")
+    env_install.write_text("env", encoding="utf-8")
+    monkeypatch.setenv("CELLPROFILER_EXECUTABLE", str(env_install))
+
+    resolved = resolve_cellprofiler_executable(
+        str(tmp_path / "stale" / "CellProfiler.exe"),
+        explicit_override=str(explicit),
+    )
+
+    assert resolved.source == "explicit"
+    assert resolved.resolved_path == explicit.resolve()
 
 
 def test_resolve_cellprofiler_executable_ignores_invalid_saved_setting(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    discovered = tmp_path / "CellProfiler.exe"
-    discovered.write_text("stub", encoding="utf-8")
-    monkeypatch.setenv("CELLPROFILER_EXECUTABLE", str(discovered))
+    env_install = tmp_path / "CellProfiler.exe"
+    env_install.write_text("stub", encoding="utf-8")
+    monkeypatch.setenv("CELLPROFILER_EXECUTABLE", str(env_install))
 
     resolved = resolve_cellprofiler_executable(str(tmp_path / "missing.exe"))
 
-    assert resolved.source == "discovered"
-    assert resolved.resolved_path == discovered.resolve()
+    assert resolved.source == "environment"
+    assert resolved.resolved_path == env_install.resolve()
     assert any("Ignoring invalid saved CellProfiler" in warning for warning in resolved.warnings)
 
 
-def test_build_cached_run_executables_restores_saved_settings(tmp_path: Path) -> None:
+def test_build_cached_run_executables_prefers_environment_over_stale_saved_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved_cp = tmp_path / "old_drive" / "CellProfiler.exe"
+    env_cp = tmp_path / "new_drive" / "CellProfiler.exe"
+    saved_fiji = tmp_path / "old_fiji" / "ImageJ-win64.exe"
+    env_fiji = tmp_path / "new_fiji" / "ImageJ-win64.exe"
+    for path in (saved_cp, env_cp, saved_fiji, env_fiji):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("stub", encoding="utf-8")
+
+    settings_path = tmp_path / "gui_run_settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                CELLPROFILER_SETTINGS_KEY: str(saved_cp),
+                FIJI_SETTINGS_KEY: str(saved_fiji),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CELLPROFILER_EXECUTABLE", str(env_cp))
+    monkeypatch.setenv("FIJI_EXECUTABLE", str(env_fiji))
+
+    cached = build_cached_run_executables(settings_path=settings_path)
+
+    assert cached.cellprofiler.source == "environment"
+    assert cached.cellprofiler.resolved_path == env_cp.resolve()
+    assert cached.fiji.source == "environment"
+    assert cached.fiji.resolved_path == env_fiji.resolve()
+
+
+def test_build_cached_run_executables_restores_saved_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     saved_cp = tmp_path / "CellProfiler.exe"
     saved_fiji = tmp_path / "ImageJ-win64.exe"
     saved_cp.write_text("cp", encoding="utf-8")
@@ -143,10 +216,16 @@ def test_build_cached_run_executables_restores_saved_settings(tmp_path: Path) ->
         ),
         encoding="utf-8",
     )
+    monkeypatch.delenv("CELLPROFILER_EXECUTABLE", raising=False)
+    monkeypatch.delenv("FIJI_EXECUTABLE", raising=False)
+    monkeypatch.delenv("IMAGEJ_EXECUTABLE", raising=False)
+    monkeypatch.delenv("FIJI_PATH", raising=False)
 
     cached = build_cached_run_executables(settings_path=settings_path)
 
+    assert cached.cellprofiler.source == "saved"
     assert cached.cellprofiler.resolved_path == saved_cp.resolve()
+    assert cached.fiji.source == "saved"
     assert cached.fiji.resolved_path == saved_fiji.resolve()
 
 
@@ -194,15 +273,34 @@ def test_validate_workflow_config_reports_missing_cellprofiler(
     assert any("CellProfiler not found" in error for error in errors)
 
 
-def test_resolve_fiji_executable_prefers_saved_setting(
+def test_resolve_fiji_executable_prefers_environment_over_saved_setting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved = tmp_path / "old_install" / "ImageJ-win64.exe"
+    env_install = tmp_path / "new_install" / "ImageJ-win64.exe"
+    saved.parent.mkdir(parents=True)
+    env_install.parent.mkdir(parents=True)
+    saved.write_text("saved", encoding="utf-8")
+    env_install.write_text("env", encoding="utf-8")
+    monkeypatch.setenv("FIJI_EXECUTABLE", str(env_install))
+
+    resolved = resolve_fiji_executable(str(saved))
+
+    assert resolved.source == "environment"
+    assert resolved.resolved_path == env_install.resolve()
+    assert any("instead of saved" in warning for warning in resolved.warnings)
+
+
+def test_resolve_fiji_executable_uses_saved_when_no_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     saved = tmp_path / "saved-fiji.exe"
-    discovered = tmp_path / "discovered-fiji.exe"
     saved.write_text("saved", encoding="utf-8")
-    discovered.write_text("discovered", encoding="utf-8")
-    monkeypatch.setenv("FIJI_EXECUTABLE", str(discovered))
+    monkeypatch.delenv("FIJI_EXECUTABLE", raising=False)
+    monkeypatch.delenv("IMAGEJ_EXECUTABLE", raising=False)
+    monkeypatch.delenv("FIJI_PATH", raising=False)
 
     resolved = resolve_fiji_executable(str(saved))
 
@@ -250,6 +348,76 @@ def test_sync_discovered_executables_to_settings(tmp_path: Path) -> None:
 
     assert merged[FIJI_SETTINGS_KEY] == str(fiji_path)
     assert load_gui_run_settings(settings_path)[FIJI_SETTINGS_KEY] == str(fiji_path)
+
+
+def test_sync_discovered_does_not_overwrite_valid_saved_or_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bioimage_pipeline.gui.run_settings import (
+        CachedRunExecutables,
+        ResolvedExecutable,
+        sync_discovered_executables_to_settings,
+    )
+
+    saved_fiji = tmp_path / "saved" / "ImageJ-win64.exe"
+    discovered_fiji = tmp_path / "discovered" / "ImageJ-win64.exe"
+    env_fiji = tmp_path / "env" / "ImageJ-win64.exe"
+    for path in (saved_fiji, discovered_fiji, env_fiji):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("stub", encoding="utf-8")
+
+    settings_path = tmp_path / "settings.json"
+    save_gui_run_settings(
+        {FIJI_SETTINGS_KEY: str(saved_fiji)},
+        settings_path=settings_path,
+    )
+    monkeypatch.setenv("FIJI_EXECUTABLE", str(env_fiji))
+
+    cached = CachedRunExecutables(
+        cellprofiler=ResolvedExecutable("cellprofiler", None, "default"),
+        fiji=ResolvedExecutable(
+            str(discovered_fiji),
+            discovered_fiji.resolve(),
+            "discovered",
+        ),
+    )
+
+    merged = sync_discovered_executables_to_settings(cached, settings_path=settings_path)
+
+    assert merged[FIJI_SETTINGS_KEY] == str(saved_fiji)
+
+
+def test_sync_environment_path_replaces_stale_saved_setting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bioimage_pipeline.gui.run_settings import (
+        CachedRunExecutables,
+        ResolvedExecutable,
+        sync_discovered_executables_to_settings,
+    )
+
+    stale_cp = tmp_path / "old_drive" / "CellProfiler.exe"
+    env_cp = tmp_path / "new_drive" / "CellProfiler.exe"
+    for path in (stale_cp, env_cp):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("stub", encoding="utf-8")
+
+    settings_path = tmp_path / "settings.json"
+    save_gui_run_settings(
+        {CELLPROFILER_SETTINGS_KEY: str(stale_cp)},
+        settings_path=settings_path,
+    )
+    monkeypatch.setenv("CELLPROFILER_EXECUTABLE", str(env_cp))
+
+    cached = build_cached_run_executables(settings_path=settings_path)
+    merged = sync_discovered_executables_to_settings(cached, settings_path=settings_path)
+
+    assert merged[CELLPROFILER_SETTINGS_KEY] == str(env_cp.resolve())
+    assert load_gui_run_settings(settings_path)[CELLPROFILER_SETTINGS_KEY] == str(
+        env_cp.resolve()
+    )
 
 
 def test_find_fiji_executable_still_honors_env(
