@@ -83,13 +83,16 @@ def evaluate_detector_cache(
 def write_peak_table_cache(
     peak_table: ImagePeakTable,
     *,
-    cache_dir: Path,
+    cache_dir: Path | str,
     stem: str,
     config: PunctaDeclumpConfig,
     source_path: Path | None = None,
 ) -> Path:
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    csv_path, meta_path = cache_paths(cache_dir, stem)
+    cache_root = Path(cache_dir)
+    cache_root.mkdir(parents=True, exist_ok=True)
+    csv_path, meta_path = cache_paths(cache_root, stem)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
     _write_csv(csv_path, peak_table)
     meta: dict[str, Any] = {
         "detector_name": peak_table.detector_name,
