@@ -93,6 +93,21 @@ def _ensure_case_exists(
     return case.name
 
 
+def _ensure_result_out_dir(out_dir: Path) -> None:
+    """Create result directory before benchmark exports (cache hits may skip pipeline mkdir)."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _select_target_cases(cases: list[str], case: str | None) -> list[str]:
+    """Return one case or the full list; exit with guidance when --case is unknown."""
+    if case is None:
+        return cases
+    if case in cases:
+        return [case]
+    available = ", ".join(sorted(cases))
+    raise SystemExit(f"Unknown --case {case!r}. Available cases: {available}")
+
+
 def _run_pipeline_case(
     data_root: Path,
     case_name: str,
@@ -104,7 +119,7 @@ def _run_pipeline_case(
     mask = tifffile.imread(data_root / "masks" / case_name / "synthetic_mask.tif") > 0
     run_name = f"{case_name}_{run_suffix}"
     out_dir = data_root / "results" / run_name
-    out_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_result_out_dir(out_dir)
     start = time.perf_counter()
     result = run_puncta_declump(
         image,
@@ -114,6 +129,7 @@ def _run_pipeline_case(
         stem=case_name,
     )
     runtime = time.perf_counter() - start
+    _ensure_result_out_dir(out_dir)
     exporter = ResultExporter()
     exporter.export_csv(out_dir / f"{case_name}_measurements.csv", result)
     exporter.export_summary_json(out_dir / f"{case_name}_summary.json", result)
@@ -451,6 +467,12 @@ def main() -> None:
     parser.add_argument("--search-mode", choices=["full", "staged_early_stop"], default="full")
     parser.add_argument("--evaluate-only", action="store_true", help="Summarize existing result CSVs without rerunning pipeline.")
     parser.add_argument("--max-cases", type=int, default=0, help="Limit number of cases run/evaluated (0 = all).")
+    parser.add_argument(
+        "--case",
+        type=str,
+        default=None,
+        help="Run/evaluate one case by exact name (overrides stage2 seed subset).",
+    )
     args = parser.parse_args()
 
     data_root = args.data_root.resolve()
@@ -480,6 +502,7 @@ def main() -> None:
                 for name in case_names
                 if any(name.endswith(f"_seed{seed}") for seed in generate_seed_list(3))
             ]
+        target_cases = _select_target_cases(target_cases, args.case)
         completeness = verify_seed_completeness(
             target_cases,
             generate_seed_list(3) if args.benchmark == "stage2_separation" else seeds,
