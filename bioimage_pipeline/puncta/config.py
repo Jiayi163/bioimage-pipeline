@@ -104,9 +104,21 @@ class PunctaDeclumpConfig:
     # Phase C (optional): iterative dynamic model order up to K=4 for dense overlap.
     residual_split_enabled: bool = True
     dynamic_model_order_enabled: bool = False
+    dynamic_model_order_fallback_enabled: bool = True
     residual_split_max_iterations: int = 1
     dynamic_model_order_max_iterations: int = 3
     residual_split_max_components: int = 4
+
+    # Phase D: mixture component validity (local residual, mask tolerance, saturation).
+    component_validity_enabled: bool = True
+    component_local_residual_radius_sigma: float = 1.25
+    component_local_min_support_fraction: float = 0.15
+    component_min_local_r_squared: float = 0.15
+    component_mask_support_radius_sigma: float = 1.0
+    component_min_mask_support_fraction: float = 0.08
+    saturation_near_clip_fraction: float = 0.005
+    saturation_near_clip_margin: float = 0.02
+    saturation_exclude_from_local_residual: bool = True
 
     # Selective routing / detectors
     enable_selective_routing: bool = True
@@ -200,6 +212,20 @@ class PunctaDeclumpConfig:
             raise ValueError("dynamic_model_order_max_iterations must be at least 1")
         if self.residual_split_max_components < 2:
             raise ValueError("residual_split_max_components must be at least 2")
+        if self.component_local_residual_radius_sigma <= 0:
+            raise ValueError("component_local_residual_radius_sigma must be positive")
+        if not 0.0 <= self.component_local_min_support_fraction <= 1.0:
+            raise ValueError("component_local_min_support_fraction must be in [0, 1]")
+        if not 0.0 <= self.component_min_local_r_squared <= 1.0:
+            raise ValueError("component_min_local_r_squared must be in [0, 1]")
+        if self.component_mask_support_radius_sigma <= 0:
+            raise ValueError("component_mask_support_radius_sigma must be positive")
+        if not 0.0 <= self.component_min_mask_support_fraction <= 1.0:
+            raise ValueError("component_min_mask_support_fraction must be in [0, 1]")
+        if not 0.0 <= self.saturation_near_clip_fraction <= 1.0:
+            raise ValueError("saturation_near_clip_fraction must be in [0, 1]")
+        if not 0.0 <= self.saturation_near_clip_margin < 1.0:
+            raise ValueError("saturation_near_clip_margin must be in [0, 1)")
         if self.dynamic_model_order_enabled and (
             self.residual_split_max_components < self.gmm_max_components
         ):

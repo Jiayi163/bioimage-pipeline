@@ -78,6 +78,20 @@ class ResidualSplitConfig:
             max_split_iterations=config.effective_residual_split_max_iterations,
         )
 
+    @classmethod
+    def for_phase_c_fallback(cls, config: PunctaDeclumpConfig) -> ResidualSplitConfig:
+        """Phase C limits for selective post-Phase-B fallback refinement."""
+        base = cls.from_puncta_config(config)
+        return cls(
+            bic_improvement_margin=base.bic_improvement_margin,
+            min_sigma=base.min_sigma,
+            max_sigma=base.max_sigma,
+            min_amplitude=base.min_amplitude,
+            max_components=config.residual_split_max_components,
+            exclusion_radius_px=base.exclusion_radius_px,
+            max_split_iterations=config.dynamic_model_order_max_iterations,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Result types

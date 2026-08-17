@@ -593,6 +593,65 @@ class GaussianModelSelector:
         
         return result
 
+    def apply_phase_c_fallback_refinement(
+        self,
+        comparison: ModelComparisonResult,
+        patch: ObjectPatch,
+        peaks: list[PeakCandidate],
+        *,
+        trigger_reason: str,
+    ) -> ModelComparisonResult:
+        """Run iterative Phase C residual growth on the post-Phase-B selected model."""
+        from bioimage_pipeline.puncta.residual_refiner import ResidualSplitRefiner
+        from bioimage_pipeline.puncta.residual_split import ResidualSplitConfig
+
+        split_config = ResidualSplitConfig.for_phase_c_fallback(self.config)
+        refiner = ResidualSplitRefiner(
+            mixture_fitter=self.mixture_fitter,
+            config=self.config,
+            split_config=split_config,
+        )
+        refinement = refiner.refine(
+            initial_model=comparison.selected,
+            patch=patch,
+            peaks=peaks,
+        )
+
+        selection_reason = (
+            f"{comparison.selection_reason}; "
+            f"phase_c_fallback={trigger_reason}; "
+            f"residual_split_applied_n={refinement.initial_n}->{refinement.final_n}_"
+            f"attempts={len(refinement.split_attempts)}"
+        )
+        if refinement.ambiguous:
+            selection_reason += f"_ambiguous={refinement.stop_reason}"
+        elif refinement.stop_reason:
+            selection_reason += f"_stop={refinement.stop_reason}"
+
+        if not refinement.split_triggered or refinement.final_n == refinement.initial_n:
+            return ModelComparisonResult(
+                selected=comparison.selected,
+                single=comparison.single,
+                best_mixture=comparison.best_mixture,
+                selection_reason=selection_reason,
+                rejected_component_reason=comparison.rejected_component_reason,
+                candidate_component_counts=list(comparison.candidate_component_counts),
+            )
+
+        refined_model = refinement.final_model
+        return ModelComparisonResult(
+            selected=refined_model,
+            single=comparison.single,
+            best_mixture=(
+                refined_model
+                if isinstance(refined_model, MixtureFitResult)
+                else comparison.best_mixture
+            ),
+            selection_reason=selection_reason,
+            rejected_component_reason=comparison.rejected_component_reason,
+            candidate_component_counts=list(comparison.candidate_component_counts) + [refinement.final_n],
+        )
+
     def _apply_residual_refinement(
         self,
         initial_result: ModelComparisonResult,

@@ -13,6 +13,7 @@ from bioimage_pipeline.puncta.config import PunctaDeclumpConfig
 from bioimage_pipeline.puncta.gaussian_fitter import GaussianModelSelector, ModelComparisonResult
 from bioimage_pipeline.puncta.maxima_detector import MaximaDetector
 from bioimage_pipeline.puncta.object_router import RouteDecision
+from bioimage_pipeline.puncta.phase_c_fallback import evaluate_phase_c_fallback
 from bioimage_pipeline.puncta.types import (
     DetectionPath,
     GaussianComponent,
@@ -247,6 +248,66 @@ class ObjectProcessor:
             n_raw_peaks=len(peak_detection.raw_peaks),
             obj=obj,
         )
+        result = self._result_from_comparison(
+            obj,
+            patch,
+            peaks,
+            peak_detection,
+            single,
+            comparison,
+            candidate_id_start=candidate_id_start,
+            debug=debug,
+        )
+        self._finalize_under_split(debug, result.candidates)
+
+        fallback_decision = evaluate_phase_c_fallback(
+            config=self.config,
+            obj=obj,
+            single=single,
+            selected=comparison.selected,
+            patch=patch,
+            n_filtered_peaks=len(peak_detection.filtered_peaks),
+            n_accepted=sum(
+                1 for candidate in result.candidates if candidate.accepted and candidate.fit_status == "fit_ok"
+            ),
+            under_split_suspect=debug.under_split_suspect,
+        )
+        if fallback_decision.trigger:
+            debug.under_split_reasons = []
+            debug.under_split_suspect = False
+            comparison = self.model_selector.apply_phase_c_fallback_refinement(
+                comparison,
+                patch,
+                peaks,
+                trigger_reason=fallback_decision.reason,
+            )
+            self._populate_debug_from_comparison(debug, comparison, patch, single)
+            result = self._result_from_comparison(
+                obj,
+                patch,
+                peaks,
+                peak_detection,
+                single,
+                comparison,
+                candidate_id_start=candidate_id_start,
+                debug=debug,
+            )
+            self._finalize_under_split(debug, result.candidates)
+
+        result.single_component = single
+        result.comparison = comparison
+        for candidate in result.candidates:
+            self._attach_debug(candidate, obj, debug)
+        result.debug = debug
+        return result
+
+    def _populate_debug_from_comparison(
+        self,
+        debug: ModelSelectionDebug,
+        comparison: ModelComparisonResult,
+        patch: ObjectPatch,
+        single: GaussianComponent,
+    ) -> None:
         debug.gmm_candidate_components = max(comparison.candidate_component_counts or [0])
         debug.model_selection_reason = comparison.selection_reason
         debug.rejected_component_reason = comparison.rejected_component_reason
@@ -255,39 +316,50 @@ class ObjectProcessor:
             comparison.selection_reason or ""
         )
         if comparison.best_mixture is not None and comparison.best_mixture.fit_succeeded:
-            debug.best_gmm_r_squared = comparison.best_mixture.r_squared
-            debug.best_gmm_residual_relative = (
-                comparison.best_mixture.residual_rmse
-                / max(
-                    max((c.amplitude for c in comparison.best_mixture.components), default=1.0),
-                    1.0,
-                )
+            mixture = comparison.best_mixture
+            debug.best_gmm_r_squared = mixture.r_squared
+            debug.best_gmm_residual_relative = mixture.residual_rmse / max(
+                max((component.amplitude for component in mixture.components), default=1.0),
+                1.0,
             )
-            debug.best_gmm_n_components = comparison.best_mixture.n_components
-            debug.gmm_winning_init_strategy = comparison.best_mixture.winning_init_strategy
-            debug.gmm_multi_start_attempts = comparison.best_mixture.multi_start_attempts
-            debug.gmm_multi_start_converged = comparison.best_mixture.multi_start_converged
+            debug.best_gmm_n_components = mixture.n_components
+            debug.gmm_winning_init_strategy = mixture.winning_init_strategy
+            debug.gmm_multi_start_attempts = mixture.multi_start_attempts
+            debug.gmm_multi_start_converged = mixture.multi_start_converged
             debug.gmm_acceptance_min_separation_px = (
                 self.config.gmm_acceptance_min_separation
                 if self.config.gmm_use_mixture_acceptance_separation
                 else self.config.min_center_separation
             )
-            if len(comparison.best_mixture.components) >= 2:
-                c0 = comparison.best_mixture.components[0]
-                c1 = comparison.best_mixture.components[1]
+            if len(mixture.components) >= 2:
+                c0 = mixture.components[0]
+                c1 = mixture.components[1]
                 debug.gmm_fitted_center_distance_px = math.hypot(
                     c0.fitted_col - c1.fitted_col,
                     c0.fitted_row - c1.fitted_row,
                 )
             single_bic = self.model_selector._single_component_bic(patch, single)
-            debug.gmm_bic_delta_vs_single = comparison.best_mixture.bic - single_bic
-            debug.gmm_aic_delta_vs_single = comparison.best_mixture.aic - self.model_selector._single_component_aic(
+            debug.gmm_bic_delta_vs_single = mixture.bic - single_bic
+            debug.gmm_aic_delta_vs_single = mixture.aic - self.model_selector._single_component_aic(
                 patch, single
             )
 
+    def _result_from_comparison(
+        self,
+        obj: ObjectInfo,
+        patch: ObjectPatch,
+        peaks: list[PeakCandidate],
+        peak_detection: PeakDetectionResult,
+        single: GaussianComponent,
+        comparison: ModelComparisonResult,
+        *,
+        candidate_id_start: int,
+        debug: ModelSelectionDebug,
+    ) -> ObjectProcessResult:
+        self._populate_debug_from_comparison(debug, comparison, patch, single)
         selected = comparison.selected
         if isinstance(selected, MixtureFitResult):
-            result = self._from_mixture(
+            return self._from_mixture(
                 obj,
                 patch,
                 selected,
@@ -297,31 +369,20 @@ class ObjectProcessor:
                 peak_detection=peak_detection,
                 comparison=comparison,
             )
-        else:
-            # GMM was considered but one-Gaussian won model selection.
-            # Keep path="single" when the final model is one component, so CSV
-            # path reflects the accepted model; tried_gmm remains True.
-            result = self._from_single_component(
-                obj,
-                patch,
-                selected,
-                path="single",
-                candidate_id_start=candidate_id_start,
-                debug=debug,
-                peak_detection=peak_detection,
-                comparison=comparison,
+        result = self._from_single_component(
+            obj,
+            patch,
+            selected,
+            path="single",
+            candidate_id_start=candidate_id_start,
+            debug=debug,
+            peak_detection=peak_detection,
+            comparison=comparison,
+        )
+        if debug.rejected_component_reason:
+            debug.under_split_reasons.append(
+                f"gmm_tried_but_rejected:{debug.rejected_component_reason}"
             )
-            if debug.rejected_component_reason:
-                debug.under_split_reasons.append(
-                    f"gmm_tried_but_rejected:{debug.rejected_component_reason}"
-                )
-
-        result.single_component = single
-        result.comparison = comparison
-        self._finalize_under_split(debug, result.candidates)
-        for candidate in result.candidates:
-            self._attach_debug(candidate, obj, debug)
-        result.debug = debug
         return result
 
     def _detect_peaks(self, patch: ObjectPatch, obj: ObjectInfo) -> PeakDetectionResult:

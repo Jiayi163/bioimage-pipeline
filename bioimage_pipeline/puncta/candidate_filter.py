@@ -6,6 +6,7 @@ import math
 
 import numpy as np
 
+from bioimage_pipeline.puncta.component_validity import evaluate_component_validity
 from bioimage_pipeline.puncta.config import PunctaDeclumpConfig
 from bioimage_pipeline.puncta.types import (
     DetectionPath,
@@ -65,7 +66,13 @@ class CandidateFilter:
             )
             candidate.gmm_duplicate_threshold_px = within_threshold
 
-            rejection = self._rejection_reason(candidate, component, object_mask, patch)
+            rejection = self._rejection_reason(
+                candidate,
+                component,
+                object_mask,
+                patch,
+                mixture=mixture,
+            )
             if rejection is None:
                 within_dup, within_distance = self._duplicate_against_list(
                     candidate,
@@ -244,6 +251,8 @@ class CandidateFilter:
         component: GaussianComponent,
         object_mask: np.ndarray,
         patch: ObjectPatch,
+        *,
+        mixture: MixtureFitResult | None = None,
     ) -> str | None:
         if not component.fit_succeeded:
             return component.fit_error or "fit_failed"
@@ -262,6 +271,26 @@ class CandidateFilter:
             return "sigma_too_small"
         if candidate.amplitude is None or candidate.amplitude < self.config.min_amplitude:
             return "amplitude_too_low"
+
+        use_phase_d = (
+            self.config.component_validity_enabled
+            and component.n_components_in_model > 1
+            and mixture is not None
+            and mixture.predicted_patch is not None
+        )
+        if use_phase_d:
+            reason, metrics = evaluate_component_validity(
+                component,
+                mixture,
+                patch,
+                object_mask,
+                self.config,
+            )
+            candidate.residual_rmse = metrics.local_rmse
+            candidate.residual_relative = metrics.local_residual_relative
+            candidate.r_squared = metrics.local_r_squared
+            return reason
+
         if candidate.residual_rmse is not None and candidate.amplitude is not None:
             relative_residual = candidate.residual_rmse / max(candidate.amplitude, 1.0)
             if relative_residual > self.config.max_fit_residual_relative:
