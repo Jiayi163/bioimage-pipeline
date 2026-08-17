@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import math
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -404,6 +403,7 @@ class GaussianModelSelector:
         self.config = config
         self.mixture_fitter = GaussianMixtureFitter(config)
         self.single_fitter = EllipticalGaussianFitter(config)
+        self._residual_refiner = None
 
     def select_best_model(
         self,
@@ -578,13 +578,61 @@ class GaussianModelSelector:
                     candidate_counts = [count for count in candidate_counts if count != 3]
 
         best_mixture = self._pick_best_mixture(fit_two, fit_three)
-        return self._compare_single_vs_mixture(
+        result = self._compare_single_vs_mixture(
             patch,
             single,
             single_bic,
             best_mixture,
             candidate_counts,
             single_aic=single_aic,
+        )
+        
+        # Phase B: residual-guided refinement
+        if self.config.residual_split_enabled:
+            result = self._apply_residual_refinement(result, patch, peaks)
+        
+        return result
+
+    def _apply_residual_refinement(
+        self,
+        initial_result: ModelComparisonResult,
+        patch: ObjectPatch,
+        peaks: list[PeakCandidate],
+    ) -> ModelComparisonResult:
+        """Apply Phase B residual-guided refinement to the initial selection."""
+        from bioimage_pipeline.puncta.residual_refiner import ResidualSplitRefiner
+        
+        if self._residual_refiner is None:
+            self._residual_refiner = ResidualSplitRefiner(
+                mixture_fitter=self.mixture_fitter,
+                config=self.config,
+            )
+        
+        refinement = self._residual_refiner.refine(
+            initial_model=initial_result.selected,
+            patch=patch,
+            peaks=peaks,
+        )
+        
+        # If no split occurred or split was rejected, return original result
+        if not refinement.split_triggered or refinement.final_n == refinement.initial_n:
+            return initial_result
+        
+        # Update result with refined model
+        refined_model = refinement.final_model
+        selection_reason = (
+            f"{initial_result.selection_reason}; "
+            f"residual_split_applied_n={refinement.initial_n}->{refinement.final_n}_"
+            f"attempts={len(refinement.split_attempts)}"
+        )
+        
+        return ModelComparisonResult(
+            selected=refined_model,
+            single=initial_result.single,
+            best_mixture=refined_model if isinstance(refined_model, MixtureFitResult) else initial_result.best_mixture,
+            selection_reason=selection_reason,
+            rejected_component_reason=initial_result.rejected_component_reason,
+            candidate_component_counts=initial_result.candidate_component_counts + [refinement.final_n],
         )
 
     def _max_components_for_object(self, obj: ObjectInfo | None) -> int:

@@ -98,6 +98,11 @@ class PunctaDeclumpConfig:
     gmm_multi_start_early_stop_bic_margin: float | None = None
     gmm_multi_start_early_stop_min_converged: int = 2
     gmm_multi_start_early_stop_bic_agreement: float = 15.0
+    gmm_peak_combination_max: int = 6
+
+    # Phase B: Residual-guided splitting
+    residual_split_enabled: bool = False
+    residual_split_max_iterations: int = 2
 
     # Selective routing / detectors
     enable_selective_routing: bool = True
@@ -183,6 +188,8 @@ class PunctaDeclumpConfig:
             raise ValueError("gmm_acceptance_min_separation must be non-negative")
         if not self.gmm_multi_start_separations:
             raise ValueError("gmm_multi_start_separations must not be empty")
+        if self.gmm_peak_combination_max < 0:
+            raise ValueError("gmm_peak_combination_max must be non-negative")
 
         # Backward compatibility for legacy boolean flags.
         if self.export_diagnostics is False and self.diagnostic_mode in (

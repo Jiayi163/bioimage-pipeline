@@ -2,7 +2,40 @@
 
 This document summarizes the current state of the puncta declumping pipeline, confirmed limitations, and a phased roadmap for improving robustness on complex overlapping puncta and dense cloud-like objects.
 
-**Status:** Planning only. No production behavior changes are authorized until Phase 1 is reviewed and approved.
+**Status:** Phase A (peak-pair init) implemented. **Next priority: Phase B — residual-guided splitting + dynamic N.** Do not add more initialization strategies until Phases B–E are evaluated.
+
+---
+
+# Strategic pivot (2026-08-17)
+
+## What changed
+
+The pipeline already has sufficient initialization diversity:
+
+| Strategy | Role |
+|----------|------|
+| `detector_based` | Top peaks by intensity |
+| `peak_pair_{i}_{j}` | Phase 1A — ranked detected peak combinations |
+| `residual_peak` | Single-fit residual argmax (profiling shows this is often strong) |
+| `major_axis` | Object geometry |
+| `symmetric_*`, `offset_*` | Geometric fallbacks at fixed separations |
+
+**Stop adding init strategies.** Profiling shows residual-based init is already competitive; the remaining gaps are not "missing one more start template" but:
+
+1. **Component count is fixed** (essentially 1 → try 2 → maybe 3) instead of evidence-driven N
+2. **Residual map is underused** — only seeds one init, not used to decide split / N+1
+3. **Merge is post-hoc cleanup**, not part of model refinement
+4. **Acceptance relies too heavily on fixed separation** (1.5 px) instead of multi-criterion validity
+5. **Runtime is unacceptable** on hard objects (7–14+ s) because all 15–20 starts run even when a good solution exists early
+
+## New core thesis
+
+> Upgrade from **"try many initializations for a mostly fixed 2/3-component GMM"** to **"fit → inspect residual → selectively split → dynamically change N → reject physically implausible components → early stop"**.
+
+Inspired by:
+
+- **Pan et al. 2010** — split/merge driven by fitting error; component count ≠ initial maxima count
+- **G5M 2026** — BIC + σ constraints + local support + likelihood + resolvability for component validity
 
 ---
 
@@ -88,51 +121,214 @@ Synthetic benchmarks and oracle tooling exist, but there is no committed real RO
 
 ---
 
-# Development phases
+# Development phases (revised roadmap)
 
-## Phase 1 — GMM initialization / search robustness
+## Phase A — Stabilize current code ✅ (in progress)
 
-**Goal:** Improve basin selection without threshold tuning as the primary fix.
+**Goal:** Lock in Phase 1A peak-pair init; fix benchmark/control-flow issues; **do not add more init strategies.**
 
-Planned work:
+| Item | Status |
+|------|--------|
+| Peak-pair initialization (`gmm_peak_combination_max`, `_rank_peak_pairs`) | ✅ Implemented |
+| Strategy ordering (detector → peak_pair → residual → geometry) | ✅ Implemented |
+| GMM init diagnostics on failure | ✅ Implemented |
+| Under-split categorization fix | ✅ Implemented |
+| Phase 1A tests (`tests/test_phase1a_peak_combination_init.py`) | ⏳ Awaiting full run |
+| Aggregate benchmark before/after | ⏳ Pending |
+| Benchmark runtime / control-flow fixes | ⏳ Pending |
 
-- Peak-combination initialization from filtered local maxima
-- Stronger residual-based initialization (mixture residual, not only single-fit residual)
-- Collapse-aware bounded retry after merge collapse
-- Optional coarse combination search for hard 2-component cases (runtime-gated)
-- Benchmark before/after on separation + false-split controls
-- Oracle-gap metric (normal init vs ground-truth init)
+**Explicitly out of scope for Phase A:**
 
-**Out of scope for Phase 1:** raising N>3 globally, lowering separation thresholds, increasing `max_nfev` everywhere.
+- Phase 1B/C/D (more init strategies, collapse retry, coarse search)
+- Dynamic N
+- Residual-guided splitting loop
 
-## Phase 2 — Dynamic component count
+---
 
-- Evidence-driven progression: 1 → 2 → … up to configured cap (4–5 on complex objects only)
-- Strong stopping rules (BIC plateau, residual structure absent, invalid bounds)
-- False-split benchmark as gate
+## Phase B — Residual-guided splitting ⭐ **NEXT PRIORITY**
 
-## Phase 3 — Residual-driven iterative splitting
+**Status:** ✅ Specification + tests implemented (`PHASE_B_SPEC.md`, `residual_split.py`). **Not wired to production.**
 
-- After each accepted N-component fit, analyze mixture `residual_patch`
-- Test N+1 only when structured positive residual remains
-- Integrate with under-split classification
+**Goal:** Use residual evidence to decide **when** and **where** to add a component — not blind try N=1,2,3.
 
-## Phase 4 — Component-level acceptance diagnostics
+**Current gap:** `residual_peak` init uses single-fit residual only. Mixture `residual_patch` is exported in diagnostics but **not** used for init or N+1 expansion in production.
 
-- Explicit per-component validation fields in exports
-- Determine whether CandidateFilter is too aggressive **after** reasons are visible
-- No threshold tuning until diagnostics justify it
+**Target control flow:**
 
-## Phase 5 — Real-data validation tooling
+```
+1-Gaussian / N-GMM fit
+    ↓
+Compute residual map (observed − predicted)
+    ↓
+Structured residual peak present?
+    ↓ yes
+Identify worst-fit component (highest local error / lowest contribution)
+    ↓
+Seed new center near residual peak (≥ min separation from existing)
+    ↓
+Refit N+1
+    ↓
+Compare: BIC improvement? residual still structured? component physically valid?
+    ↓
+Accept N+1 or keep N
+```
 
-- ROI export, annotation schema, evaluation script
-- 20–50 representative ROIs with count/center metrics
-- Baseline before/after each algorithm phase
+**Key design rules (Pan-inspired):**
 
-## Phase 6 — Runtime optimization
+- Increase N **only when residual evidence supports it** — not enumerate 1..5 on every object
+- Local maxima count may be wrong (too few or too many); residual is the tie-breaker
+- Gate on residual significance (prominence, integrated positive mass), not raw argmax noise
 
-- Staged search and early stopping once accuracy work stabilizes
-- Full multi-start only for hard suspicious objects
+**Primary files:**
+
+| File | Change |
+|------|--------|
+| `gaussian_fitter.py` | Residual map after N-comp fit; split decision |
+| New `residual_analysis.py` (shared) | Structured peak detection, significance gating |
+| `gmm_multi_start.py` | Residual-seeded init for N+1 refit (not just 2-comp multi-start) |
+| `object_processor.py` | Wire iterative split loop |
+
+**Tests before production:**
+
+- Synthetic doublet where detector returns 1 peak → residual split recovers 2
+- Synthetic triple where 2-GMM residual shows third lobe → N=3 only when justified
+- Clean single → no residual-driven split (false-split gate)
+- Mixture residual used (not only single-fit residual)
+
+---
+
+## Phase C — Dynamic model order (gated N)
+
+**Goal:** Replace fixed `single → 2 → maybe 3` with evidence-driven growth.
+
+**Current:** `select_balanced_model()` tries 2, then 3 if peaks ≥ 3 or 2-comp still poor. Caps at `gmm_max_components` (3) or `gmm_max_components_large` (5).
+
+**Target:**
+
+```
+Start N = max(detected maxima, current accepted model)
+    ↓
+Fit N (with bounded multi-start for N=2; direct init for N≥3)
+    ↓
+Phase B residual check → N+1 if evidence strong
+    ↓
+Stop when:
+  - residual improvement below threshold
+  - BIC no longer improves (margin)
+  - new component fails validity (Phase D)
+  - N reaches cap (object-size dependent)
+```
+
+**Runtime guard:** Do **not** run full multi-start for every N increment. Use:
+
+- Multi-start only for N=2 (hardest basin problem)
+- Residual-seeded direct init for N+1 splits
+- BIC comparison between N and N+1 after each step
+
+**Primary files:** `gaussian_fitter.py` (`GaussianModelSelector`), `config.py` (stop thresholds)
+
+---
+
+## Phase D — Stronger component validity (G5M-inspired)
+
+**Goal:** Replace separation-only acceptance with multi-criterion component validation.
+
+**Current CandidateFilter checks:**
+
+- σ bounds, amplitude, R², residual relative, center shift, center inside mask
+- Duplicate distance: `gmm_acceptance_min_separation` (1.5 px) — **too dominant**
+
+**Target validity (all must pass or component rejected):**
+
+| Criterion | Rationale |
+|-----------|-----------|
+| σ in plausible range | Reject hallucinated sharp/diffuse components |
+| Amplitude / integrated intensity sufficient | Reject noise peaks |
+| Local pixel support around center | Component explains real signal, not optimizer artifact |
+| Center inside object / sensible neighborhood | Already partially implemented |
+| Adding component improves BIC or residual enough | Model-level justification |
+| Separation physically resolvable | Not fixed 1.5 px alone — normalized by σ or FWHM |
+
+**Primary files:** `candidate_filter.py`, `types.py` (new diagnostic fields), `export.py`
+
+**Rule:** No threshold tuning until Phase D diagnostics are exported and visible.
+
+---
+
+## Phase E — Merge/refit loop (model refinement)
+
+**Goal:** Upgrade merge from post-fit cleanup to active model refinement.
+
+**Current:** `_merge_close_components()` drops components < 1.5 px or weak amplitude ratio **after** fit. No refit. Collapsed attempts discarded.
+
+**Target:**
+
+```
+Fit N components
+    ↓
+Two components collapsed / too close / one too weak?
+    ↓ yes
+Merge pair → refit N−1
+    ↓
+Compare BIC / residual vs pre-merge N
+    ↓
+Keep better model
+```
+
+Pan-style split/merge/fit/compare loop integrated with Phase B (split) and Phase C (dynamic N).
+
+**Primary files:** `gaussian_fitter.py` (`_merge_close_components`, new `_merge_and_refit`)
+
+---
+
+## Phase F — Runtime optimization
+
+**Goal:** Reduce per-object GMM time without sacrificing accuracy on hard cases.
+
+**Current:** Up to 20 strategies × 3000 nfev each; hard objects 7–14+ s. `staged_early_stop` exists but accuracy not yet validated with it.
+
+**Target:**
+
+```
+Cheap / historically strong strategies first
+  (detector_based, peak_pair_*, residual_peak)
+    ↓
+Valid excellent solution? (BIC beats single + components valid)
+    ↓ yes → early stop
+    ↓ no
+Try expensive backup strategies (symmetric, offset, ...)
+```
+
+Additional (later):
+
+- Parallelize independent objects (embarrassingly parallel per image)
+- Optional Numba / vectorized residual evaluation
+- Per-object complexity routing (skip GMM entirely on clean singles — already partially done)
+
+**Primary files:** `gmm_multi_start.py`, `config.py`, `pipeline.py`
+
+**Rule:** Do not enable aggressive early stop until Phase B–D accuracy is benchmarked.
+
+---
+
+## Phase G — Validation expansion
+
+**Goal:** Measure what matters for the new model, not just sep2–6 recovery.
+
+| Benchmark | Purpose |
+|-----------|---------|
+| Separation (sep2–6, 20 seeds) | Recovery by distance — **aggregate primary metric** |
+| False-split (clean singles) | Over-split regression gate |
+| **Hidden-component synthetic** (new) | 1 detected peak, 2–3 true spots — tests Phase B |
+| **Separation normalized by σ** (new) | Resolvability in σ units, not raw pixels |
+| Exact count / under-split / over-split rates | Per-object count agreement |
+| Manually labeled real ROIs (20–50) | Biological ground truth |
+| Oracle gap | Production init vs ground-truth init (secondary) |
+| Runtime per object | Phase F gate |
+
+**Tools:** `scripts/run_synthetic_benchmarks.py`, `scripts/evaluate_synthetic_puncta.py`, new hidden-component generator
+
+**Do not optimize for one case (e.g. `sep3_seed1010`) in isolation.**
 
 ---
 
@@ -169,7 +365,11 @@ Do **not** use these as primary fixes:
 
 # Immediate next task
 
-**Phase 1 planning review only.** See detailed Phase 1 appendix below and the separate review report in the PR/discussion. **Do not implement Phase 1 until approved.**
+1. **Finish Phase A validation** — run Phase 1A tests + aggregate benchmarks (before/after)
+2. **Design Phase B spec** — residual-guided split loop with tests-first approach
+3. **Do not implement** Phase 1B/C/D (more init strategies) or Phase F aggressive early stop until Phase B accuracy is validated
+
+**Highest-value next implementation:** Residual-guided deterministic split + gated dynamic N (Phases B + C together).
 
 ---
 
@@ -199,31 +399,57 @@ pipeline.run()
 
 ---
 
-# Appendix B — Phase 1 technical plan (for review)
+# Appendix B — Phase A (peak-pair init) — COMPLETE
 
-## B.1 Current initialization strategies
+## B.1 Initialization strategies (current)
 
 **File:** `gmm_multi_start.py`
 
-| Function | Role |
-|----------|------|
-| `generate_two_component_init_sets()` | Builds named 2-comp init peak sets |
-| `ordered_multi_start_strategies()` | Execution order, capped by `gmm_max_multi_starts` |
-| `fit_two_component_multi_start()` | Loop strategies, pick lowest BIC converged fit |
-| `fit_mixture_from_init_peaks()` | Shared optimizer + merge for each attempt |
+| Strategy key | Status | Role |
+|--------------|--------|------|
+| `detector_based` | Existing | Top peaks by intensity |
+| `peak_pair_{i}_{j}` | **Phase 1A ✅** | Ranked peak combinations (intensity primary, separation tie-breaker) |
+| `residual_peak` | Existing | Single-fit residual argmax — often strong in profiling |
+| `major_axis` | Existing | Object geometry endpoints |
+| `symmetric_*`, `offset_*` | Existing | Geometric fallbacks |
 
-**Existing strategy keys:**
+**Execution order:** `detector_based` → `peak_pair_*` → `residual_peak` → `major_axis` → symmetric → offset
 
-- `detector_based` — top peaks by intensity (pads with offset clones if needed)
-- `symmetric_x_sep{N}`, `symmetric_y_sep{N}`, `offset_x_sep{N}`, `offset_y_sep{N}` — anchored on **brightest peak only**
-- `major_axis` — object major axis endpoints
-- `residual_peak` — brightest peak + argmax of **single-fit** residual patch
+**Ranking (`_rank_peak_pairs`):**
 
-**Execution order today:** `detector_based` → `residual_peak` → `major_axis` → symmetric → offset.
+1. Reject pairs below `gmm_acceptance_min_separation`
+2. Rank by combined intensity (descending)
+3. Separation as tie-breaker only
+4. No fallback if all pairs too close — let residual/geometry handle it
 
-**Weak point:** When multiple distinct filtered peaks exist, geometric inits still anchor on `peaks[0]`. Peak combinations are not enumerated.
+**Cap:** `gmm_peak_combination_max = 6`, global `gmm_max_multi_starts = 20`
 
-## B.2 Local maxima → GMM init trace
+## B.2 Cancelled Phase 1 sub-items (do not implement)
+
+| Original plan | Status | Reason |
+|---------------|--------|--------|
+| 1B — More residual init variants | ❌ Cancelled | Superseded by Phase B residual-guided split loop |
+| 1C — Collapse-aware retry | ❌ Cancelled | Superseded by Phase E merge/refit loop |
+| 1D — Coarse combination search | ❌ Cancelled | Init strategy saturation; runtime cost |
+| More peak-pair / triple init | ❌ Cancelled | Experimental clarity; move to dynamic N |
+
+## B.3 Phase 1A validation criteria
+
+See `PHASE1A_IMPLEMENTATION_COMPLETE.md`. Success based on **aggregate** benchmarks:
+
+- False-split rate ≤ baseline + 1%
+- sep3 or sep4 recovery ≥ baseline + 5%
+- Median `multi_start_converged` ≥ baseline
+- Runtime ≤ baseline × 1.5
+- All critical tests (1–11) pass
+
+`sep3_seed1010` is a regression case only, not primary success criterion.
+
+---
+
+# Appendix C — Code reference (current gaps → Phase B/C targets)
+
+## C.1 Local maxima → GMM init trace
 
 | Step | File / function |
 |------|-----------------|
@@ -233,140 +459,54 @@ pipeline.run()
 | Peak source | `object_processor.process_suspicious()`: assigned peaks **or** `MaximaDetector.detect()` |
 | Single fit (feeds residual_peak init) | `EllipticalGaussianFitter.fit_peak(peaks[0])` |
 | Model selection | `GaussianModelSelector.select_balanced_model()` |
-| 2-comp init | `generate_two_component_init_sets(peaks, ..., single_component=single)` |
-| 3-comp init | `GaussianMixtureFitter._initial_peaks()` → top-N peaks only |
+| 2-comp init | `generate_two_component_init_sets()` + `fit_two_component_multi_start()` |
+| 3-comp init | `GaussianMixtureFitter._initial_peaks()` → top-N peaks only, **no multi-start** |
 
-## B.3 Merge / collapse
+## C.2 Merge / collapse (Phase E will upgrade this)
 
 **File:** `gaussian_fitter.py` → `_merge_close_components()`
 
-Called inside `fit_mixture_from_init_peaks()` after every optimizer run.
+- Drop if center distance `< gmm_min_component_separation` (1.5 px)
+- Drop weaker if amplitude ratio `< gmm_merge_amplitude_ratio` (0.12)
+- On collapse: attempt discarded; **no refit**
 
-Rules:
+## C.3 Residual usage gap (Phase B target)
 
-- Drop component if center distance `< gmm_min_component_separation` (default 1.5 px)
-- Drop weaker component if amplitude ratio `< gmm_merge_amplitude_ratio` (default 0.12)
+| Residual source | Used today | Phase B target |
+|-----------------|------------|----------------|
+| Single-fit `GaussianComponent.residual_patch` | `residual_peak` init; GMM trigger | Keep; also feed split decision |
+| Mixture `MixtureFitResult.residual_patch` | Diagnostics only | **Drive N+1 split + new center seed** |
+| `_has_structured_residual()` | Binary GMM trigger | Extend: significance + integrated mass gating |
 
-On collapse: `fit_error = "post_merge_collapsed_{N}_to_{M}"`, attempt treated as non-converged in multi-start loop.
-
-**No retry after collapse in production today.**
-
-## B.4 After collapse
-
-| Location | Behavior |
-|----------|----------|
-| `fit_two_component_multi_start()` | `continue` — attempt not counted as converged |
-| All attempts fail | Re-runs `detector_based` fallback; returns fit with `n_starts_converged=0` |
-| `select_balanced_model()` | If all collapsed → `no_successful_multi_component_fit` or single kept |
-| `under_split_report._classify_failure()` | `gmm_tried_but_components_collapsed` if model_selection contains `collapsed_to_one` |
-| `pipeline.py` gmm_init_diagnostics export | Only if `mixture.init_attempts` non-empty on **best** mixture; all-failed cases may export nothing |
-
-## B.5 Residual peaks today
-
-| Residual source | Used for |
-|-----------------|----------|
-| Single-fit `GaussianComponent.residual_patch` | Init strategy `residual_peak`; GMM trigger `structured_residual_two_lobes` |
-| Mixture `MixtureFitResult.residual_patch` | Exported in diagnostics overlays; **not** used for init or N+1 expansion in production |
-| `_has_structured_residual()` | Binary trigger only — not used to seed missing components after collapse |
-
-## B.6 Proposed Phase 1 changes (pending approval)
-
-### Change 1 — Peak-combination initialization
-
-| | |
-|-|-|
-| **Current** | 2-comp inits use brightest peak + geometric offsets or single+residual pair |
-| **Why it fails** | True second punctum may be P2/P3, not a symmetric offset from P1; optimizer collapses to one basin |
-| **Proposal** | Add `peak_pair_{i}_{j}` (and capped triples for 3-comp later) from filtered peaks, ranked by intensity sum + separation, inserted early in `ordered_multi_start_strategies()` |
-| **Validation** | `sep_benchmark_sep3_seed1010` multi_start_converged > 0; seed101 unchanged; oracle gap shrinks; false-split benchmark over_split_rate stable |
-| **Over-split risk** | Low for 2-comp if merge + CandidateFilter unchanged; pairs from same object may over-init on noise peaks — cap count via `gmm_peak_combination_max` |
-
-**Files:** `gmm_multi_start.py` (`generate_two_component_init_sets`, `ordered_multi_start_strategies`), `config.py` (new cap flag, default conservative)
-
-### Change 2 — Improved residual-based initialization
-
-| | |
-|-|-|
-| **Current** | `residual_peak` uses single-fit residual only; mixture residual unused |
-| **Why it fails** | After partial single-fit, residual may not highlight second punctum; duplicate init at patch center observed in failed cases |
-| **Proposal** | (Phase 1b) Add mixture-residual argmax init when single-fit residual_peak duplicates first center; require min separation from existing init centers |
-| **Validation** | Unit test on synthetic doublet with assigned peaks; failed-case regression; no change on clean singles |
-| **Over-split risk** | Medium if residual noise peaks seed extra components — gate on residual significance + min separation |
-
-**Files:** `gmm_multi_start.py`, possibly helper in new `residual_analysis.py` (shared, read-only heuristics)
-
-### Change 3 — Collapse-aware retry
-
-| | |
-|-|-|
-| **Current** | Collapsed attempt discarded; search continues to next strategy; no targeted retry |
-| **Why it fails** | Optimizer converged but merge removed component — correct basin may exist with different second seed |
-| **Proposal** | After collapse (`pre_merge 2 → post_merge 1`), one bounded retry: alternate peak pair or residual seed ≥ `gmm_min_component_separation` from first center; record as `{strategy}_collapse_retry` |
-| **Validation** | Synthetic close-doublet test; sep3_seed1010; attempt diagnostics show retry; seed101 no regression |
-| **Over-split risk** | Low if retry only on collapse + under-split evidence; avoid retry on clean singles |
-
-**Files:** `gmm_multi_start.py` (`fit_two_component_multi_start`, new helpers), `config.py` (`gmm_collapse_retry_enabled`, `gmm_collapse_retry_max`)
-
-### Change 4 — Coarse search for hard cases (optional Phase 1d)
-
-| | |
-|-|-|
-| **Current** | Only fixed strategy templates |
-| **Why it fails** | Hard 2-comp objects need combinatorial center hypotheses |
-| **Proposal** | For suspicious objects with ≥2 filtered peaks and 0 converged starts after staged pass, score limited center pairs (maxima + residual maxima) by cheap RSS proxy, optimize top-K only |
-| **Validation** | Runtime budget test; separation failures recovered; false-split unchanged |
-| **Over-split risk** | Medium — must be gated to hard objects only |
-
-**Files:** `gmm_multi_start.py`, possibly `object_router.py` metadata (complexity hint)
-
-## B.7 Oracle vs production mismatch
+## C.4 Oracle vs production
 
 | Aspect | Production | Oracle (`validation/gmm_oracle.py`) |
 |--------|------------|--------------------------------------|
-| Init source | Detected peaks + geometric strategies | Ground-truth JSON centers |
-| Fit path | `fit_mixture_from_init_peaks()` | `fit_oracle_mixture_from_init_peaks()` (validation-only copy) |
-| Pre-merge capture | Not retained | Retained for reporting |
-| Optimizer metadata | runtime, nfev | success, status, bounds_hit, cost, etc. |
-| Wired to pipeline | Yes | No |
+| Init source | Detected peaks + strategies | Ground-truth JSON centers |
+| Wired to pipeline | Yes | No (validation only) |
 
-**Rule:** Do not copy oracle ground-truth init into production. Do reuse **ideas** (residual seeding, collapse retry logic) with detected peaks only.
+**Rule:** Do not copy oracle ground-truth init into production. Reuse **ideas** (residual seeding, split/merge logic) with detected peaks only.
 
-## B.8 Existing tests protecting against false splitting
+## C.5 False-split protection tests
 
 | Test | File |
 |------|------|
 | `test_single_gaussian_not_selected_as_two_components` | `test_gmm_multi_start.py` |
 | `test_noisy_single_gaussian_mostly_not_oversplit` | `test_gmm_multi_start.py` |
-| `test_fast_path_unchanged_with_multi_start_enabled` | `test_gmm_multi_start.py` |
-| `test_balanced_mode_skips_gmm_for_clean_single` | `test_puncta_declump.py` |
-| False-split benchmark (script-level) | `scripts/run_synthetic_benchmarks.py --benchmark false_split` |
-
-## B.9 Proposed new tests (before production changes)
-
-1. **`test_peak_pair_init_present_when_multiple_peaks`** — `generate_two_component_init_sets` includes ranked peak pairs; order prioritizes pairs after `detector_based`.
-2. **`test_collapse_retry_records_second_attempt`** — forced collapse init → retry strategy recorded; recovery on close doublet.
-3. **`test_sep3_seed1010_multi_start_converges`** — generated case, production path, `multi_start_converged > 0`.
-4. **`test_sep3_seed101_control_no_regression`** — same harness, still exact-count or ≥1 accepted.
-5. **`test_oracle_gap_metric`** — helper comparing converged count / BIC: production init vs oracle init on same patch (validation module).
-6. **`test_false_split_benchmark_smoke`** — optional CI subset of false_split cases, over_split_rate ≤ baseline + ε.
-
-## B.10 Runtime implications (Phase 1)
-
-| Change | Cost |
-|--------|------|
-| Peak-pair inits | +O(k) optimizer runs, k capped by `gmm_peak_combination_max` and `gmm_max_multi_starts` |
-| Collapse retry | +0–1 run per collapsed attempt, max `gmm_collapse_retry_max` |
-| Coarse search (if added) | Significant — must be gated to hard objects only |
-| Early stop (Phase 6) | Deferred until accuracy validated |
+| `test_peak_pair_*` (Phase 1A) | `test_phase1a_peak_combination_init.py` |
+| False-split benchmark | `scripts/run_synthetic_benchmarks.py --benchmark false_split` |
 
 ---
 
-# Appendix C — Future phase file map (preview)
+# Appendix D — Phase file map
 
 | Phase | Primary files |
 |-------|---------------|
-| 2 Dynamic N | `gaussian_fitter.py`, `object_router.py`, `object_processor.py` |
-| 3 Residual N+1 | `gaussian_fitter.py`, `object_processor.py`, `residual_analysis.py` (new shared heuristics) |
-| 4 Component diagnostics | `candidate_filter.py`, `types.py`, `export.py` |
-| 5 Real validation | `real_validation_data/`, `scripts/evaluate_real_roi.py`, `scripts/annotate_real_roi.py` |
-| 6 Runtime | `gmm_multi_start.py`, `config.py` |
+| A Stabilize | `gmm_multi_start.py`, `config.py`, tests |
+| B Residual split | `gaussian_fitter.py`, `residual_analysis.py` (new), `object_processor.py` |
+| C Dynamic N | `gaussian_fitter.py` (`GaussianModelSelector`), `config.py` |
+| D Component validity | `candidate_filter.py`, `types.py`, `export.py` |
+| E Merge/refit | `gaussian_fitter.py` |
+| F Runtime | `gmm_multi_start.py`, `pipeline.py` |
+| G Validation | `scripts/generate_synthetic_puncta.py`, `scripts/evaluate_synthetic_puncta.py`, real ROI tooling |
+
