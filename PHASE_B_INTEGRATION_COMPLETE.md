@@ -1,5 +1,7 @@
 # Phase B Production Integration Complete
 
+> **2026-08 update:** Phase B is now the **default production mode** (`residual_split_enabled=True`, one N→N+1 step). Phase C iterative dynamic-K remains available via `dynamic_model_order_enabled=True` (default OFF). See `PHASE_B_C_PRODUCTION_MODES.md`.
+
 ## Summary
 
 Phase B residual-guided splitting has been successfully integrated into the production pipeline. The implementation follows your architectural guidance:
@@ -8,7 +10,7 @@ Phase B residual-guided splitting has been successfully integrated into the prod
 2. **Deterministic N+1 refit** - no multi-start for splits (runtime control)
 3. **Strong acceptance criteria** - physical validity + model improvement required
 4. **Safe fallback** - failed splits return original model unchanged
-5. **Phase B disabled by default** - zero impact on existing behavior
+5. **Phase B enabled by default; Phase C optional** - see `PHASE_B_C_PRODUCTION_MODES.md`
 
 ## Implementation Status
 
@@ -56,7 +58,7 @@ Phase B residual-guided splitting has been successfully integrated into the prod
    - Component count <= `max_components`
 
 6. **Integration tests** ✓
-   - 8 tests in `tests/test_phase_b_integration.py`:
+   - 7 tests in `tests/test_phase_b_integration.py`:
      - Phase B disabled → no residual_split in selection_reason
      - Hidden doublet recovers N≥2
      - 2→3 residual split
@@ -77,7 +79,7 @@ Phase B residual-guided splitting has been successfully integrated into the prod
    - `_refit_n_plus_one()`, `_ensure_residual_patch()`, `_single_to_mixture()`
 
 2. `tests/test_phase_b_integration.py` (280 lines)
-   - 8 integration tests
+   - 7 integration tests
    - Helper functions for synthetic patches
 
 3. `PHASE_B_INTEGRATION_SUMMARY.md`
@@ -131,7 +133,7 @@ This verifies:
 python -m pytest tests/test_phase_b_integration.py -v
 ```
 
-**Expected:** All 8 tests pass.
+**Expected:** All 7 tests pass.
 
 **Tests:**
 - `test_phase_b_disabled_preserves_behavior`
@@ -315,7 +317,7 @@ Key changes:
 - Config: residual_split_enabled (default False), residual_split_max_iterations
 - Deterministic N+1 refit (no multi-start) for runtime control
 - Strong acceptance: physical validity + BIC/RMSE improvement required
-- 8 integration tests + all regression tests pass
+- 7 integration tests + all regression tests pass
 
 Phase B is disabled by default; enable with residual_split_enabled=True.
 

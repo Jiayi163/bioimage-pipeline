@@ -1,8 +1,8 @@
-"""Phase B: Residual-guided split refinement for production pipeline.
+"""Phase B/C: Residual-guided refinement for production pipeline.
 
-This module implements the production integration layer for Phase B residual-guided
-splitting. It refines an initial model selection result by iteratively proposing
-and evaluating N+1 splits based on structured residual evidence.
+Phase B (default): one gated N->N+1 residual split after initial model selection.
+Phase C (optional, ``dynamic_model_order_enabled=True``): iterative N->N+1 growth
+up to ``residual_split_max_components`` for dense overlap fallback.
 
 Architecture:
     object_processor → GaussianModelSelector.select_balanced_model()
@@ -24,6 +24,7 @@ from bioimage_pipeline.puncta.residual_split import (
     SplitLoopState,
     SplitProposal,
     evaluate_split_acceptance,
+    mark_ambiguous_if_needed,
     propose_n_plus_one_split,
     should_propose_split,
     should_stop_split_loop,
@@ -56,7 +57,7 @@ class SplitAttemptDiagnostic:
 
 @dataclass
 class RefinementResult:
-    """Result of Phase B residual-guided refinement."""
+    """Result of residual-guided dynamic model-order refinement."""
 
     final_model: MixtureFitResult | GaussianComponent
     split_triggered: bool
@@ -64,14 +65,12 @@ class RefinementResult:
     total_split_runtime_s: float = 0.0
     final_n: int = 1
     initial_n: int = 1
+    stop_reason: str = ""
+    ambiguous: bool = False
 
 
 class ResidualSplitRefiner:
-    """Refine an initial model by iteratively proposing residual-guided N+1 splits.
-    
-    This class encapsulates the Phase B split loop logic, keeping it separate from
-    the core model selection in GaussianModelSelector.
-    """
+    """Refine an initial model via gated iterative N -> N+1 residual splits."""
 
     def __init__(
         self,
@@ -91,17 +90,7 @@ class ResidualSplitRefiner:
         patch: ObjectPatch,
         peaks: list[PeakCandidate],
     ) -> RefinementResult:
-        """Refine initial model using residual-guided splitting.
-        
-        Args:
-            initial_model: Best model from initial selection (single or mixture)
-            patch: Object patch with mask
-            peaks: Detected peaks (for initialization)
-            
-        Returns:
-            RefinementResult with final model and diagnostics
-        """
-        # Convert single to mixture format if needed
+        """Refine initial model using gated dynamic model-order splitting."""
         if isinstance(initial_model, GaussianComponent):
             current_model = self._single_to_mixture(initial_model, patch)
             initial_n = 1
@@ -115,6 +104,7 @@ class ResidualSplitRefiner:
                 split_triggered=False,
                 final_n=initial_n,
                 initial_n=initial_n,
+                stop_reason="initial_model_not_refineable",
             )
 
         state = SplitLoopState(current_n=current_model.n_components)
@@ -124,10 +114,10 @@ class ResidualSplitRefiner:
         while True:
             stop, stop_reason = should_stop_split_loop(state, config=self.split_config)
             if stop:
+                state.stop_reason = stop_reason
                 break
 
-            if current_model.residual_patch is None:
-                current_model = self._ensure_residual_patch(current_model, patch)
+            current_model = self._refresh_residual_patch(current_model, patch)
 
             should_propose, propose_reason = should_propose_split(
                 state=state,
@@ -138,6 +128,7 @@ class ResidualSplitRefiner:
             )
 
             if not should_propose:
+                state.stop_reason = propose_reason
                 break
 
             proposal = propose_n_plus_one_split(
@@ -150,9 +141,10 @@ class ResidualSplitRefiner:
             )
 
             if proposal is None:
+                state.stop_reason = "no_valid_split_proposal"
                 break
 
-            # Attempt N+1 refit
+            state.proposals_made += 1
             attempt_start = time.perf_counter()
             candidate = self._refit_n_plus_one(
                 current_model=current_model,
@@ -162,7 +154,6 @@ class ResidualSplitRefiner:
             attempt_runtime = time.perf_counter() - attempt_start
             total_runtime += attempt_runtime
 
-            # Evaluate acceptance
             acceptance = evaluate_split_acceptance(
                 baseline=current_model,
                 candidate=candidate,
@@ -170,7 +161,6 @@ class ResidualSplitRefiner:
                 config=self.split_config,
             )
 
-            # Record diagnostic
             attempts.append(
                 SplitAttemptDiagnostic(
                     iteration=state.iterations,
@@ -191,13 +181,27 @@ class ResidualSplitRefiner:
             )
 
             if acceptance.accepted:
-                current_model = candidate
-                state.current_n = candidate.n_components
-            else:
-                state.last_rejection_reason = acceptance.reason
-                break
+                current_model = self._refresh_residual_patch(candidate, patch)
+                state.current_n = current_model.n_components
+                state.iterations += 1
+                state.last_rejection_reason = None
+                continue
 
-            state.iterations += 1
+            state.last_rejection_reason = acceptance.reason
+            mark_ambiguous_if_needed(
+                state,
+                rejection_reason=acceptance.reason,
+                residual_patch=current_model.residual_patch,
+                object_mask=patch.object_mask,
+                existing_components=current_model.components,
+                config=self.split_config,
+            )
+            if not state.stop_reason:
+                state.stop_reason = acceptance.reason
+            break
+
+        if not state.stop_reason and not attempts:
+            state.stop_reason = "no_split_needed"
 
         return RefinementResult(
             final_model=current_model,
@@ -206,6 +210,8 @@ class ResidualSplitRefiner:
             total_split_runtime_s=total_runtime,
             final_n=current_model.n_components,
             initial_n=initial_n,
+            stop_reason=state.stop_reason,
+            ambiguous=state.ambiguous,
         )
 
     def _refit_n_plus_one(
@@ -215,11 +221,7 @@ class ResidualSplitRefiner:
         proposal: SplitProposal,
         patch: ObjectPatch,
     ) -> MixtureFitResult:
-        """Refit N+1 components using current centers + proposed residual center.
-        
-        This performs ONE direct deterministic fit (no multi-start).
-        """
-        # Build init peaks: current N centers + new proposed center
+        """Refit N+1 components using current centers + proposed residual center."""
         init_peaks: list[PeakCandidate] = []
         for component in current_model.components:
             init_peaks.append(
@@ -238,10 +240,9 @@ class ResidualSplitRefiner:
             )
         )
 
-        # Direct fit (no multi-start)
         from bioimage_pipeline.puncta.gmm_multi_start import fit_mixture_from_init_peaks
 
-        result = fit_mixture_from_init_peaks(
+        return fit_mixture_from_init_peaks(
             self.mixture_fitter,
             patch,
             init_peaks,
@@ -249,17 +250,12 @@ class ResidualSplitRefiner:
             initialization_method=f"residual_split_iter{proposal.current_n}",
         )
 
-        return result
-
-    def _ensure_residual_patch(
+    def _refresh_residual_patch(
         self,
         model: MixtureFitResult,
         patch: ObjectPatch,
     ) -> MixtureFitResult:
-        """Compute residual_patch if not already present."""
-        if model.residual_patch is not None:
-            return model
-
+        """Always recompute mixture residual for the next split iteration."""
         component_params = [
             (
                 component.amplitude,
@@ -273,7 +269,6 @@ class ResidualSplitRefiner:
 
         residual_patch = self.mixture_fitter._build_residual_patch(patch, component_params)
 
-        # Return updated model (dataclass is frozen, so create new)
         return MixtureFitResult(
             components=model.components,
             n_components=model.n_components,

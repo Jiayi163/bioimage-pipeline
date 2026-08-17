@@ -39,7 +39,7 @@ final ModelComparisonResult
    - `_refit_n_plus_one()`: deterministic N+1 fit wrapper
 
 2. **`tests/test_phase_b_integration.py`**
-   - 8 integration tests covering all Phase B requirements
+   - 7 integration tests covering all Phase B requirements
    - Tests for: disabled behavior, hidden doublet recovery, 2→3 split, clean single rejection, fallback safety, max iterations, no multi-start
 
 ### Modified Files
@@ -227,7 +227,7 @@ Key changes:
 - Config: residual_split_enabled (default False), residual_split_max_iterations
 - Deterministic N+1 refit (no multi-start) for runtime control
 - Strong acceptance: physical validity + BIC improvement required
-- 8 integration tests + all regression tests pass
+- 7 integration tests + all regression tests pass
 
 Phase B is disabled by default; enable with residual_split_enabled=True.
 

@@ -293,7 +293,7 @@ python verify_phase_b.py
 - Modified: 3 (config.py, residual_split.py, gaussian_fitter.py)
 
 **Tests:**
-- Integration tests: 8 new
+- Integration tests: 7 new
 - Spec tests: 13 existing (should still pass)
 - Regression: ~50 existing (should be unchanged)
 

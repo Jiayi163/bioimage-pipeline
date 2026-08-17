@@ -50,17 +50,24 @@ def verify_config():
         config = PunctaDeclumpConfig()
         
         assert hasattr(config, "residual_split_enabled")
-        assert config.residual_split_enabled is False, "Default should be False"
-        print("✓ residual_split_enabled exists (default=False)")
+        assert config.residual_split_enabled is True, "Phase B should be enabled by default"
+        print("✓ residual_split_enabled exists (default=True)")
+        
+        assert hasattr(config, "dynamic_model_order_enabled")
+        assert config.dynamic_model_order_enabled is False, "Phase C should be off by default"
+        print("✓ dynamic_model_order_enabled exists (default=False)")
         
         assert hasattr(config, "residual_split_max_iterations")
-        assert config.residual_split_max_iterations == 2
-        print("✓ residual_split_max_iterations exists (default=2)")
+        assert config.residual_split_max_iterations == 1
+        print("✓ residual_split_max_iterations exists (default=1, Phase B)")
         
-        # Test enabled config
-        enabled_config = PunctaDeclumpConfig(residual_split_enabled=True)
-        assert enabled_config.residual_split_enabled is True
-        print("✓ Can enable Phase B via config")
+        assert config.effective_residual_split_max_iterations == 1
+        print("✓ effective_residual_split_max_iterations resolves to Phase B limit")
+        
+        # Test Phase C opt-in
+        phase_c_config = PunctaDeclumpConfig(dynamic_model_order_enabled=True)
+        assert phase_c_config.effective_residual_split_max_iterations == 3
+        print("✓ Can enable Phase C via dynamic_model_order_enabled")
         
     except Exception as e:
         print(f"✗ Config verification failed: {e}")

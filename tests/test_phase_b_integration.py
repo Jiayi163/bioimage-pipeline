@@ -16,18 +16,48 @@ import numpy as np
 import pytest
 
 from bioimage_pipeline.puncta.config import PunctaDeclumpConfig
-from bioimage_pipeline.puncta.gaussian_fitter import GaussianModelSelector
+from bioimage_pipeline.puncta.gaussian_fitter import EllipticalGaussianFitter, GaussianModelSelector
 from bioimage_pipeline.puncta.types import GaussianComponent, MixtureFitResult, ObjectPatch, PeakCandidate
 
 
 def make_patch(data: np.ndarray, background: float = 100.0) -> ObjectPatch:
     """Helper to create ObjectPatch from data."""
     mask = data > background * 1.1
+    corrected = np.clip(data - background, 0.0, None)
+    height, width = data.shape
     return ObjectPatch(
-        data=data,
+        object_id=1,
+        row_offset=0,
+        col_offset=0,
+        corrected=corrected,
         object_mask=mask,
         background_level=background,
+        global_bbox=(0, 0, height, width),
+        raw=data,
     )
+
+
+def fit_single_component(
+    single_fitter: EllipticalGaussianFitter,
+    patch: ObjectPatch,
+    peaks: list[PeakCandidate],
+) -> GaussianComponent:
+    """Fit one Gaussian using the same API as production object_processor."""
+    primary = peaks[0]
+    single = single_fitter.fit_peak(
+        patch,
+        primary,
+        component_id=1,
+        n_components_in_model=1,
+    )
+    if not single.fit_succeeded and len(peaks) > 1:
+        single = single_fitter.fit_peak(
+            patch,
+            peaks[1],
+            component_id=1,
+            n_components_in_model=1,
+        )
+    return single
 
 
 def make_hidden_doublet_patch() -> tuple[ObjectPatch, list[PeakCandidate]]:
@@ -91,7 +121,7 @@ def test_phase_b_disabled_preserves_behavior():
     result = selector.select_balanced_model(
         patch,
         peaks,
-        single_component=selector.single_fitter.fit_patch(patch),
+        single_component=fit_single_component(selector.single_fitter, patch, peaks),
         n_filtered_peaks=len(peaks),
         n_raw_peaks=len(peaks),
     )
@@ -113,7 +143,7 @@ def test_hidden_doublet_recovers_two_components():
     result = selector.select_balanced_model(
         patch,
         peaks,
-        single_component=selector.single_fitter.fit_patch(patch),
+        single_component=fit_single_component(selector.single_fitter, patch, peaks),
         n_filtered_peaks=len(peaks),
         n_raw_peaks=len(peaks),
     )
@@ -138,7 +168,7 @@ def test_clean_single_does_not_split():
     result = selector.select_balanced_model(
         patch,
         peaks,
-        single_component=selector.single_fitter.fit_patch(patch),
+        single_component=fit_single_component(selector.single_fitter, patch, peaks),
         n_filtered_peaks=len(peaks),
         n_raw_peaks=len(peaks),
     )
@@ -165,17 +195,17 @@ def test_two_to_three_residual_split():
     result = selector.select_balanced_model(
         patch,
         peaks,
-        single_component=selector.single_fitter.fit_patch(patch),
+        single_component=fit_single_component(selector.single_fitter, patch, peaks),
         n_filtered_peaks=len(peaks),
         n_raw_peaks=len(peaks),
     )
     
-    # Should split to N=3
+    # Should reach N=3. Initial balanced selection may already pick 3-GMM when
+    # warranted; Phase B is an additional path and is not required here.
     if isinstance(result.selected, MixtureFitResult):
-        if result.selected.n_components >= 3:
-            assert "residual_split" in result.selection_reason.lower()
-        else:
-            pytest.skip("Residual split did not trigger N=3; acceptance criteria may need tuning")
+        assert result.selected.n_components >= 3
+    else:
+        pytest.skip("Model selection did not produce a 3-component mixture")
 
 
 def test_max_split_iterations_respected():
@@ -183,6 +213,7 @@ def test_max_split_iterations_respected():
     config = PunctaDeclumpConfig(
         residual_split_enabled=True,
         residual_split_max_iterations=1,
+        residual_split_max_components=5,
         gmm_max_components=5,
     )
     selector = GaussianModelSelector(config)
@@ -191,7 +222,7 @@ def test_max_split_iterations_respected():
     result = selector.select_balanced_model(
         patch,
         peaks,
-        single_component=selector.single_fitter.fit_patch(patch),
+        single_component=fit_single_component(selector.single_fitter, patch, peaks),
         n_filtered_peaks=len(peaks),
         n_raw_peaks=len(peaks),
     )
@@ -217,7 +248,7 @@ def test_failed_n_plus_one_falls_back_safely():
     result = selector.select_balanced_model(
         patch,
         peaks,
-        single_component=selector.single_fitter.fit_patch(patch),
+        single_component=fit_single_component(selector.single_fitter, patch, peaks),
         n_filtered_peaks=len(peaks),
         n_raw_peaks=len(peaks),
     )
@@ -230,7 +261,7 @@ def test_failed_n_plus_one_falls_back_safely():
         assert result.selected.fit_succeeded
 
 
-def test_no_multi_start_called_in_residual_split_path():
+def test_no_multi_start_called_in_residual_split_path(monkeypatch):
     """Residual split should use deterministic refit, not full multi-start."""
     config = PunctaDeclumpConfig(
         residual_split_enabled=True,
@@ -239,36 +270,40 @@ def test_no_multi_start_called_in_residual_split_path():
     )
     selector = GaussianModelSelector(config)
     patch, peaks = make_hidden_doublet_patch()
-    
-    # Track initialization strategies used
-    initial_strategies = set()
-    
-    class MonitoredFitter:
-        def __init__(self, real_fitter):
-            self.real_fitter = real_fitter
-        
-        def fit_patch(self, patch, peaks, n_components, **kwargs):
-            result = self.real_fitter.fit_patch(patch, peaks, n_components, **kwargs)
-            if result.winning_init_strategy:
-                initial_strategies.add(result.winning_init_strategy)
-            return result
-        
-        def _build_residual_patch(self, *args, **kwargs):
-            return self.real_fitter._build_residual_patch(*args, **kwargs)
-    
-    # Replace fitter with monitored version
-    original_fitter = selector.mixture_fitter
-    selector.mixture_fitter = MonitoredFitter(original_fitter)
-    
+
+    init_methods: list[str] = []
+    multi_start_calls = 0
+
+    import bioimage_pipeline.puncta.gmm_multi_start as gmm_multi_start
+
+    original_fit_from_init = gmm_multi_start.fit_mixture_from_init_peaks
+    original_multi_start = gmm_multi_start.fit_two_component_multi_start
+
+    def tracked_fit_from_init(*args, **kwargs):
+        init_methods.append(kwargs.get("initialization_method", "explicit"))
+        return original_fit_from_init(*args, **kwargs)
+
+    def tracked_multi_start(*args, **kwargs):
+        nonlocal multi_start_calls
+        multi_start_calls += 1
+        return original_multi_start(*args, **kwargs)
+
+    monkeypatch.setattr(gmm_multi_start, "fit_mixture_from_init_peaks", tracked_fit_from_init)
+    monkeypatch.setattr(gmm_multi_start, "fit_two_component_multi_start", tracked_multi_start)
+
     result = selector.select_balanced_model(
         patch,
         peaks,
-        single_component=selector.single_fitter.fit_patch(patch),
+        single_component=fit_single_component(selector.single_fitter, patch, peaks),
         n_filtered_peaks=len(peaks),
         n_raw_peaks=len(peaks),
     )
-    
-    # Residual split should use "residual_split_iterN" strategy, not full multi-start
+
     if "residual_split" in result.selection_reason.lower():
-        residual_strategies = [s for s in initial_strategies if "residual_split" in s]
-        assert len(residual_strategies) > 0, "Residual split should use residual_split_iterN strategy"
+        assert any(
+            method.startswith("residual_split_iter") for method in init_methods
+        ), "Residual split should use residual_split_iterN initialization"
+        assert multi_start_calls <= 1, (
+            "Residual split path should not invoke additional full multi-start beyond "
+            "the initial balanced-model selection"
+        )

@@ -1,10 +1,12 @@
-"""Phase B: residual-guided split proposal and acceptance logic.
+"""Phase B/C: residual-guided split proposal and dynamic model-order logic.
 
-This module defines the Phase B specification as testable pure functions.
-It is NOT wired into production fitting (``gaussian_fitter``, ``object_processor``)
-until Phase B integration is approved.
+Phase B (default production): one gated N->N+1 residual split after initial model
+selection. Configured via ``residual_split_enabled=True`` and
+``dynamic_model_order_enabled=False``.
 
-See ``PHASE_B_SPEC.md`` for the full specification.
+Phase C (optional fallback): iterative N -> N+1 growth up to
+``residual_split_max_components``, enabled only when
+``dynamic_model_order_enabled=True``.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from bioimage_pipeline.puncta.types import GaussianComponent, MixtureFitResult
 
 @dataclass(frozen=True)
 class ResidualSplitConfig:
-    """Phase B thresholds. Defaults align with ``PunctaDeclumpConfig`` where possible."""
+    """Phase B/C thresholds. Defaults align with ``PunctaDeclumpConfig`` where possible."""
 
     # --- Residual significance (Section 1) ---
     min_peak_fraction_of_max: float = 0.35
@@ -58,14 +60,22 @@ class ResidualSplitConfig:
 
     @classmethod
     def from_puncta_config(cls, config: PunctaDeclumpConfig) -> ResidualSplitConfig:
+        """Build split config from puncta settings.
+
+        Phase B (default): one N->N+1 step via ``effective_residual_split_max_iterations``
+        and ``gmm_max_components + 1`` component cap.
+
+        Phase C (``dynamic_model_order_enabled=True``): iterative growth up to
+        ``residual_split_max_components`` using ``dynamic_model_order_max_iterations``.
+        """
         return cls(
             bic_improvement_margin=config.gmm_bic_improvement_margin,
             min_sigma=config.min_sigma,
             max_sigma=config.max_sigma,
             min_amplitude=config.min_amplitude,
-            max_components=config.gmm_max_components,
+            max_components=config.effective_residual_split_max_components,
             exclusion_radius_px=config.gmm_acceptance_min_separation,
-            max_split_iterations=config.residual_split_max_iterations,
+            max_split_iterations=config.effective_residual_split_max_iterations,
         )
 
 
@@ -118,6 +128,8 @@ class SplitLoopState:
     iterations: int = 0
     last_rejection_reason: str | None = None
     proposals_made: int = 0
+    ambiguous: bool = False
+    stop_reason: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -508,6 +520,66 @@ def should_stop_split_loop(
     if state.iterations >= config.max_split_iterations:
         return True, "max_split_iterations_reached"
     return False, ""
+
+
+def mark_ambiguous_if_needed(
+    state: SplitLoopState,
+    *,
+    rejection_reason: str | None,
+    residual_patch: np.ndarray | None,
+    object_mask: np.ndarray,
+    existing_components: Sequence[GaussianComponent],
+    config: ResidualSplitConfig,
+) -> None:
+    """Mark loop ambiguous when residual evidence remains but growth is blocked."""
+    if rejection_reason == "not_resolvable":
+        state.ambiguous = True
+        state.stop_reason = "ambiguous_unresolvable_component"
+        return
+
+    if state.current_n >= config.max_components and residual_patch is not None:
+        if is_positive_residual_structured(residual_patch, object_mask, config=config):
+            state.ambiguous = True
+            state.stop_reason = "ambiguous_max_components_with_residual"
+            return
+
+    if rejection_reason == "insufficient_model_improvement" and residual_patch is not None:
+        if is_positive_residual_structured(residual_patch, object_mask, config=config):
+            state.ambiguous = True
+            state.stop_reason = "ambiguous_insufficient_improvement_with_residual"
+            return
+
+    if rejection_reason and rejection_reason not in {"accepted", "candidate_fit_failed"}:
+        if residual_patch is not None and is_positive_residual_structured(
+            residual_patch,
+            object_mask,
+            config=config,
+        ):
+            existing_centers = [(c.fitted_col, c.fitted_row) for c in existing_components]
+            peaks = find_structured_residual_peaks(
+                residual_patch,
+                object_mask,
+                existing_centers,
+                config=config,
+            )
+            if peaks and rejection_reason in {
+                "invalid_sigma",
+                "amplitude_too_low",
+                "insufficient_local_support",
+                "not_resolvable",
+            }:
+                state.ambiguous = True
+                state.stop_reason = f"ambiguous_{rejection_reason}"
+
+
+def remaining_component_budget(state: SplitLoopState, config: ResidualSplitConfig) -> int:
+    """How many more components may still be added in this loop."""
+    return max(0, config.max_components - state.current_n)
+
+
+def remaining_iteration_budget(state: SplitLoopState, config: ResidualSplitConfig) -> int:
+    """How many more split iterations are allowed."""
+    return max(0, config.max_split_iterations - state.iterations)
 
 
 def should_propose_split(

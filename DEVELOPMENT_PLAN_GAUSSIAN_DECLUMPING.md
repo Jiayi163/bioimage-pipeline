@@ -2,7 +2,9 @@
 
 This document summarizes the current state of the puncta declumping pipeline, confirmed limitations, and a phased roadmap for improving robustness on complex overlapping puncta and dense cloud-like objects.
 
-**Status:** Phase A (peak-pair init) implemented. **Next priority: Phase B — residual-guided splitting + dynamic N.** Do not add more initialization strategies until Phases B–E are evaluated.
+**Status:** Phase A (peak-pair init) implemented. **Phase B is default production behavior.** Phase C (iterative dynamic K) is implemented but **disabled by default** as an optional dense-overlap fallback. Do not start Phase D until Phase B/C routing is stable in production.
+
+See `PHASE_B_C_PRODUCTION_MODES.md` for config, validation conclusion, and routing details.
 
 ---
 
@@ -145,11 +147,21 @@ Synthetic benchmarks and oracle tooling exist, but there is no committed real RO
 
 ---
 
-## Phase B — Residual-guided splitting ⭐ **NEXT PRIORITY**
+## Phase B — Residual-guided splitting ✅ **DEFAULT PRODUCTION**
 
-**Status:** ✅ Specification + tests implemented (`PHASE_B_SPEC.md`, `residual_split.py`). **Not wired to production.**
+**Status:** ✅ Implemented and wired to production (`residual_refiner.py`, `gaussian_fitter.py`). **Default production mode** — one gated N→N+1 residual split after `select_balanced_model()`.
 
-**Goal:** Use residual evidence to decide **when** and **where** to add a component — not blind try N=1,2,3.
+**Real-image validation (2026-08):** Phase B improved several difficult objects (example1: objects 260, 574, 642 recovered from 0→2 accepted) and produced overlays that looked more reliable overall than baseline OFF. This conclusion is based on real-image validation, not formal ground-truth accuracy.
+
+**Production config (default):**
+
+```python
+residual_split_enabled = True
+dynamic_model_order_enabled = False
+residual_split_max_iterations = 1
+```
+
+**Goal:** Use residual evidence to decide **when** and **where** to add one component — not blind try N=1,2,3.
 
 **Current gap:** `residual_peak` init uses single-fit residual only. Mixture `residual_patch` is exported in diagnostics but **not** used for init or N+1 expansion in production.
 
@@ -197,9 +209,21 @@ Accept N+1 or keep N
 
 ---
 
-## Phase C — Dynamic model order (gated N)
+## Phase C — Dynamic model order (gated N) ✅ **OPTIONAL / OFF BY DEFAULT**
 
-**Goal:** Replace fixed `single → 2 → maybe 3` with evidence-driven growth.
+**Status:** ✅ Implemented (`residual_refiner.py`, iterative loop in `residual_split.py`). Kept behind `dynamic_model_order_enabled=False` by default.
+
+**Real-image validation (2026-08):** Phase C successfully enabled additional growth (e.g. 3→4 on example2 object 307) and helped some dense objects, but in side-by-side overlay comparisons it did **not consistently** produce better final overlays than Phase B. Phase C remains useful as an experimental / selective dense-overlap fallback.
+
+**Optional config (explicit opt-in):**
+
+```python
+dynamic_model_order_enabled = True
+dynamic_model_order_max_iterations = 3
+residual_split_max_components = 4
+```
+
+**Goal:** Evidence-driven iterative growth beyond Phase B's single step, for especially dense or under-split objects.
 
 **Current:** `select_balanced_model()` tries 2, then 3 if peaks ≥ 3 or 2-comp still poor. Caps at `gmm_max_components` (3) or `gmm_max_components_large` (5).
 

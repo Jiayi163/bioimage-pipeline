@@ -587,7 +587,7 @@ class GaussianModelSelector:
             single_aic=single_aic,
         )
         
-        # Phase B: residual-guided refinement
+        # Phase B/C: residual-guided refinement (Phase B default; Phase C when enabled)
         if self.config.residual_split_enabled:
             result = self._apply_residual_refinement(result, patch, peaks)
         
@@ -599,7 +599,7 @@ class GaussianModelSelector:
         patch: ObjectPatch,
         peaks: list[PeakCandidate],
     ) -> ModelComparisonResult:
-        """Apply Phase B residual-guided refinement to the initial selection."""
+        """Apply residual-guided refinement (Phase B default; Phase C if enabled)."""
         from bioimage_pipeline.puncta.residual_refiner import ResidualSplitRefiner
         
         if self._residual_refiner is None:
@@ -617,14 +617,17 @@ class GaussianModelSelector:
         # If no split occurred or split was rejected, return original result
         if not refinement.split_triggered or refinement.final_n == refinement.initial_n:
             return initial_result
-        
-        # Update result with refined model
+
         refined_model = refinement.final_model
         selection_reason = (
             f"{initial_result.selection_reason}; "
             f"residual_split_applied_n={refinement.initial_n}->{refinement.final_n}_"
             f"attempts={len(refinement.split_attempts)}"
         )
+        if refinement.ambiguous:
+            selection_reason += f"_ambiguous={refinement.stop_reason}"
+        if refinement.stop_reason and not refinement.ambiguous:
+            selection_reason += f"_stop={refinement.stop_reason}"
         
         return ModelComparisonResult(
             selected=refined_model,

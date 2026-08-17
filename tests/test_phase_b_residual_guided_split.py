@@ -465,16 +465,31 @@ def test_split_proposal_is_deterministic() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_residual_split_config_from_puncta_config() -> None:
+def test_residual_split_config_from_puncta_config_phase_b_default() -> None:
     puncta = PunctaDeclumpConfig(
         gmm_bic_improvement_margin=3.0,
         gmm_acceptance_min_separation=2.0,
-        gmm_max_components=4,
+        gmm_max_components=3,
     )
     split_cfg = ResidualSplitConfig.from_puncta_config(puncta)
     assert split_cfg.bic_improvement_margin == 3.0
     assert split_cfg.exclusion_radius_px == 2.0
     assert split_cfg.max_components == 4
+    assert split_cfg.max_split_iterations == 1
+
+
+def test_residual_split_config_from_puncta_config_phase_c_enabled() -> None:
+    puncta = PunctaDeclumpConfig(
+        gmm_bic_improvement_margin=3.0,
+        gmm_acceptance_min_separation=2.0,
+        gmm_max_components=3,
+        dynamic_model_order_enabled=True,
+        dynamic_model_order_max_iterations=3,
+        residual_split_max_components=4,
+    )
+    split_cfg = ResidualSplitConfig.from_puncta_config(puncta)
+    assert split_cfg.max_components == 4
+    assert split_cfg.max_split_iterations == 3
 
 
 # ---------------------------------------------------------------------------

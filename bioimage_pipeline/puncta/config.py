@@ -100,9 +100,13 @@ class PunctaDeclumpConfig:
     gmm_multi_start_early_stop_bic_agreement: float = 15.0
     gmm_peak_combination_max: int = 6
 
-    # Phase B: Residual-guided splitting
-    residual_split_enabled: bool = False
-    residual_split_max_iterations: int = 2
+    # Phase B (default production): one residual-guided N->N+1 refinement step.
+    # Phase C (optional): iterative dynamic model order up to K=4 for dense overlap.
+    residual_split_enabled: bool = True
+    dynamic_model_order_enabled: bool = False
+    residual_split_max_iterations: int = 1
+    dynamic_model_order_max_iterations: int = 3
+    residual_split_max_components: int = 4
 
     # Selective routing / detectors
     enable_selective_routing: bool = True
@@ -190,6 +194,19 @@ class PunctaDeclumpConfig:
             raise ValueError("gmm_multi_start_separations must not be empty")
         if self.gmm_peak_combination_max < 0:
             raise ValueError("gmm_peak_combination_max must be non-negative")
+        if self.residual_split_max_iterations < 1:
+            raise ValueError("residual_split_max_iterations must be at least 1")
+        if self.dynamic_model_order_max_iterations < 1:
+            raise ValueError("dynamic_model_order_max_iterations must be at least 1")
+        if self.residual_split_max_components < 2:
+            raise ValueError("residual_split_max_components must be at least 2")
+        if self.dynamic_model_order_enabled and (
+            self.residual_split_max_components < self.gmm_max_components
+        ):
+            raise ValueError(
+                "residual_split_max_components must be >= gmm_max_components "
+                "when dynamic_model_order_enabled is True"
+            )
 
         # Backward compatibility for legacy boolean flags.
         if self.export_diagnostics is False and self.diagnostic_mode in (
@@ -207,3 +224,17 @@ class PunctaDeclumpConfig:
     def expected_single_spot_area(self) -> float:
         radius = self.expected_single_spot_diameter / 2.0
         return float(3.141592653589793 * radius * radius)
+
+    @property
+    def effective_residual_split_max_iterations(self) -> int:
+        """Phase B uses ``residual_split_max_iterations``; Phase C uses ``dynamic_model_order_max_iterations``."""
+        if self.dynamic_model_order_enabled:
+            return self.dynamic_model_order_max_iterations
+        return self.residual_split_max_iterations
+
+    @property
+    def effective_residual_split_max_components(self) -> int:
+        """Phase B allows at most one growth step beyond initial GMM cap; Phase C uses ``residual_split_max_components``."""
+        if self.dynamic_model_order_enabled:
+            return self.residual_split_max_components
+        return self.gmm_max_components + 1
