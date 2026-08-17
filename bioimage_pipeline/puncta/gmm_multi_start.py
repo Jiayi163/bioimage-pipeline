@@ -58,6 +58,54 @@ def _detector_based_init_peaks(
     return init
 
 
+def _rank_peak_pairs(
+    peaks: list[PeakCandidate],
+    *,
+    n_components: int,
+    min_separation: float,
+) -> list[tuple[int, ...]]:
+    """Return peak index combinations ranked by intensity, filtered by separation.
+    
+    Ranking strategy:
+    1. Reject pairs below min_separation threshold
+    2. Rank remaining pairs primarily by combined peak intensity
+    3. Use separation as tie-breaker (prefer well-separated over close)
+    4. Return empty list if no valid pairs exist
+    
+    Returns empty list if len(peaks) < n_components or no pairs meet separation.
+    """
+    if len(peaks) < n_components:
+        return []
+    
+    if n_components != 2:
+        return []
+    
+    valid_pairs: list[tuple[int, int]] = []
+    for i in range(len(peaks)):
+        for j in range(i + 1, len(peaks)):
+            separation = math.hypot(
+                peaks[i].col - peaks[j].col,
+                peaks[i].row - peaks[j].row,
+            )
+            if separation >= min_separation:
+                valid_pairs.append((i, j))
+    
+    if not valid_pairs:
+        return []
+    
+    # Sort by: intensity sum (descending), then separation (descending as tie-breaker)
+    def sort_key(indices: tuple[int, int]) -> tuple[float, float]:
+        i, j = indices
+        peak_i, peak_j = peaks[i], peaks[j]
+        intensity_sum = peak_i.intensity + peak_j.intensity
+        separation = math.hypot(peak_i.col - peak_j.col, peak_i.row - peak_j.row)
+        return (-intensity_sum, -separation)
+    
+    ranked_pairs = sorted(valid_pairs, key=sort_key)
+    
+    return ranked_pairs
+
+
 @dataclass(frozen=True)
 class MultiStartFitResult:
     """Best converged two-component mixture from multi-start search."""
@@ -86,6 +134,21 @@ def generate_two_component_init_sets(
 
     if not peaks:
         return strategies
+
+    # Phase 1A: Peak-combination initialization
+    if len(peaks) >= 2 and config.gmm_peak_combination_max > 0:
+        ranked_pairs = _rank_peak_pairs(
+            peaks,
+            n_components=2,
+            min_separation=config.gmm_acceptance_min_separation,
+        )
+        for pair_index, (i, j) in enumerate(ranked_pairs[:config.gmm_peak_combination_max]):
+            peak_i = peaks[i]
+            peak_j = peaks[j]
+            strategies[f"peak_pair_{i}_{j}"] = [
+                PeakCandidate(row=peak_i.row, col=peak_i.col, intensity=peak_i.intensity),
+                PeakCandidate(row=peak_j.row, col=peak_j.col, intensity=peak_j.intensity),
+            ]
 
     base = peaks[0]
     center_row = base.row
@@ -160,19 +223,49 @@ def ordered_multi_start_strategies(
     *,
     config: PunctaDeclumpConfig,
 ) -> list[str]:
-    """Return strategy execution order: staged priority, then symmetric, then offset."""
+    """Return strategy execution order: detector-based, peak-pairs, then others.
+    
+    Priority order:
+    1. detector_based (top peaks by intensity)
+    2. peak_pair_* (ranked combinations of detected peaks) [Phase 1A]
+    3. residual_peak (single fit residual maximum)
+    4. major_axis (object geometry)
+    5. symmetric_* (geometric offsets)
+    6. offset_* (geometric offsets)
+    """
     available = set(init_sets.keys())
     ordered: list[str] = []
-    for key in ("detector_based", "residual_peak", "major_axis"):
+    
+    # Stage 1: detector-based (existing)
+    if "detector_based" in available:
+        ordered.append("detector_based")
+    
+    # Stage 2: peak-pair combinations (Phase 1A - NEW)
+    # Preserve ranking from _rank_peak_pairs by maintaining dict insertion order
+    peak_pair_names = sorted(
+        [name for name in available if name.startswith("peak_pair_")],
+        key=lambda name: list(init_sets.keys()).index(name),
+    )
+    ordered.extend(peak_pair_names)
+    
+    # Stage 3: residual and geometry-based
+    for key in ("residual_peak", "major_axis"):
         if key in available:
             ordered.append(key)
+    
+    # Stage 4: symmetric and offset strategies
     ordered.extend(sorted(name for name in available if name.startswith("symmetric_")))
     ordered.extend(sorted(name for name in available if name.startswith("offset_")))
+    
+    # Stage 5: any remaining strategies
     for name in sorted(available):
         if name not in ordered:
             ordered.append(name)
+    
+    # Global cap
     if config.gmm_max_multi_starts > 0:
         ordered = ordered[: config.gmm_max_multi_starts]
+    
     return ordered
 
 
