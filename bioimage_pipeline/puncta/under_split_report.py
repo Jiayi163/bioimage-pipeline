@@ -67,6 +67,11 @@ def _object_rows(result: DeclumpResult) -> pd.DataFrame:
                 "r_squared": primary.r_squared,
                 "residual_relative": primary.residual_relative,
                 "failure_category": _classify_failure(primary, len(accepted)),
+                "local_peak_recovery_attempted": primary.local_peak_recovery_attempted,
+                "local_peak_recovery_success": primary.local_peak_recovery_success,
+                "local_peak_recovery_raw_count": primary.local_peak_recovery_raw_count,
+                "local_peak_recovery_filtered_count": primary.local_peak_recovery_filtered_count,
+                "peak_source": primary.peak_source,
             }
         )
     return pd.DataFrame(rows)

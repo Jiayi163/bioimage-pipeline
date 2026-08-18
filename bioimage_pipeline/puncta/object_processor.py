@@ -11,6 +11,12 @@ from bioimage_pipeline.puncta.background import build_object_patch
 from bioimage_pipeline.puncta.candidate_filter import CandidateFilter
 from bioimage_pipeline.puncta.config import PunctaDeclumpConfig
 from bioimage_pipeline.puncta.gaussian_fitter import GaussianModelSelector, ModelComparisonResult
+from bioimage_pipeline.puncta.local_peak_recovery import (
+    LocalPeakRecoveryAttempt,
+    PeakSource,
+    apply_recovery_to_debug,
+    finalize_recovery,
+)
 from bioimage_pipeline.puncta.maxima_detector import MaximaDetector
 from bioimage_pipeline.puncta.object_router import RouteDecision
 from bioimage_pipeline.puncta.phase_c_fallback import evaluate_phase_c_fallback
@@ -73,14 +79,19 @@ class ObjectProcessor:
         *,
         candidate_id_start: int,
         route: RouteDecision,
+        recovery: LocalPeakRecoveryAttempt | None = None,
     ) -> ObjectProcessResult:
         """Fast path: no patch extraction, no Gaussian fitting."""
+        peak_source: PeakSource = "assigned_global" if assigned_peaks else "fallback"
         debug = ModelSelectionDebug(
             n_raw_local_maxima=len(assigned_peaks),
             n_filtered_local_maxima=len(assigned_peaks),
             model_selection_reason=f"fast_path:{','.join(route.reasons)}",
             single_path_reason="fast_path_no_fit",
+            peak_source=peak_source,
         )
+        if recovery is not None:
+            apply_recovery_to_debug(debug, recovery, peak_source=peak_source)
 
         if len(assigned_peaks) == 1:
             candidate = self.filter.accept_fast_peak(
@@ -104,6 +115,7 @@ class ObjectProcessor:
                     prior_rejection=candidate.rejection_reason,
                 )
                 path = "fallback"
+                debug.peak_source = "fallback"
         else:
             peak = PeakCandidate(
                 row=obj.brightest_row,
@@ -120,6 +132,7 @@ class ObjectProcessor:
             )
             path = "fallback"
             debug.model_selection_reason = "fast_path_brightest_fallback"
+            debug.peak_source = "fallback"
 
         self._attach_debug(candidate, obj, debug)
         return ObjectProcessResult(
@@ -133,6 +146,88 @@ class ObjectProcessor:
             ),
         )
 
+    def recover_local_peaks(
+        self,
+        image: np.ndarray,
+        object_mask: np.ndarray,
+        obj: ObjectInfo,
+    ) -> LocalPeakRecoveryAttempt:
+        """Cheap object-level MaximaDetector recovery; no GMM."""
+        patch = build_object_patch(image, object_mask, obj, self.config)
+        detection = self._detect_peaks(patch, obj)
+        return finalize_recovery(detection, patch, obj, self.config)
+
+    def process_recovered_single(
+        self,
+        obj: ObjectInfo,
+        recovery: LocalPeakRecoveryAttempt,
+        *,
+        candidate_id_start: int,
+        route: RouteDecision,
+    ) -> ObjectProcessResult:
+        """Fast-single path for one recovered peak; no Gaussian fitting."""
+        peaks = list(recovery.peaks)
+        if len(peaks) != 1:
+            raise ValueError("process_recovered_single requires exactly one recovered peak")
+
+        peak_detection = recovery.detection or PeakDetectionResult(
+            raw_peaks=list(peaks),
+            filtered_peaks=list(peaks),
+            method=recovery.peak_source,
+        )
+        primary = peaks[0]
+        
+        # Build debug with recovery provenance; no Gaussian fit metrics
+        debug = ModelSelectionDebug(
+            n_raw_local_maxima=len(peak_detection.raw_peaks),
+            n_filtered_local_maxima=len(peak_detection.filtered_peaks),
+            tried_gmm=False,
+            model_selection_reason="local_peak_recovery_fast_single",
+            single_path_reason="recovered_local_single_no_fit",
+            peak_source=recovery.peak_source,
+        )
+        apply_recovery_to_debug(debug, recovery, peak_source=recovery.peak_source)
+        if route.reasons:
+            debug.model_selection_reason = (
+                f"local_peak_recovery_fast_single:{','.join(route.reasons)}"
+            )
+
+        # Accept as fast peak, analogous to ordinary fast_single with assigned global peak
+        candidate = self.filter.accept_fast_peak(
+            obj,
+            primary,
+            candidate_id=candidate_id_start,
+            route_reason=",".join(route.reasons),
+        )
+        path: DetectionPath = "fast_single" if candidate.accepted else "fallback"
+        
+        # If fast peak validation failed, apply brightest fallback if configured
+        if not candidate.accepted and self.config.accept_brightest_on_fit_failure:
+            candidate = self.filter.accept_fallback(
+                obj,
+                PeakCandidate(
+                    row=obj.brightest_row,
+                    col=obj.brightest_col,
+                    intensity=obj.brightest_intensity,
+                ),
+                candidate_id=candidate_id_start,
+                component_id=1,
+                path="fallback",
+                prior_rejection=candidate.rejection_reason,
+            )
+            path = "fallback"
+            debug.peak_source = "fallback"
+            debug.model_selection_reason = "local_peak_recovery_fast_validation_failed_fallback"
+
+        self._attach_debug(candidate, obj, debug)
+        return ObjectProcessResult(
+            candidates=[candidate],
+            path=path,
+            debug=debug,
+            patch=recovery.patch,
+            peak_detection=peak_detection,
+        )
+
     def process_suspicious(
         self,
         image: np.ndarray,
@@ -141,13 +236,24 @@ class ObjectProcessor:
         *,
         assigned_peaks: list[PeakCandidate],
         candidate_id_start: int,
+        peak_source: PeakSource | None = None,
+        recovery: LocalPeakRecoveryAttempt | None = None,
     ) -> ObjectProcessResult:
-        patch = build_object_patch(image, object_mask, obj, self.config)
+        patch = (
+            recovery.patch
+            if recovery is not None and recovery.patch is not None
+            else build_object_patch(image, object_mask, obj, self.config)
+        )
+        assigned_method = "image_level_assigned"
+        if peak_source == "recovered_local_detector":
+            assigned_method = "recovered_local_detector"
+        elif peak_source == "recovered_masked_argmax":
+            assigned_method = "recovered_masked_argmax"
         if assigned_peaks:
             peak_detection = PeakDetectionResult(
                 raw_peaks=list(assigned_peaks),
                 filtered_peaks=list(assigned_peaks),
-                method="image_level_assigned",
+                method=assigned_method,
             )
             peaks = list(assigned_peaks)
         else:
@@ -165,7 +271,12 @@ class ObjectProcessor:
         debug = ModelSelectionDebug(
             n_raw_local_maxima=len(peak_detection.raw_peaks),
             n_filtered_local_maxima=len(peak_detection.filtered_peaks),
+            peak_source=peak_source or ("assigned_global" if assigned_peaks else None),
         )
+        if recovery is not None:
+            apply_recovery_to_debug(
+                debug, recovery, peak_source=peak_source or recovery.peak_source
+            )
 
         # Fit one Gaussian initialized from assigned peaks.
         primary = peaks[0]
@@ -621,6 +732,11 @@ class ObjectProcessor:
         candidate.gmm_spurious_split_rejected = debug.gmm_spurious_split_rejected
         candidate.gmm_multi_start_attempts = debug.gmm_multi_start_attempts
         candidate.gmm_multi_start_converged = debug.gmm_multi_start_converged
+        candidate.local_peak_recovery_attempted = debug.local_peak_recovery_attempted
+        candidate.local_peak_recovery_success = debug.local_peak_recovery_success
+        candidate.local_peak_recovery_raw_count = debug.local_peak_recovery_raw_count
+        candidate.local_peak_recovery_filtered_count = debug.local_peak_recovery_filtered_count
+        candidate.peak_source = debug.peak_source
         return candidate
 
     def _from_mixture(

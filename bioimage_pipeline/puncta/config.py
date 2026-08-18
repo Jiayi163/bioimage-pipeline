@@ -68,7 +68,7 @@ class PunctaDeclumpConfig:
     max_fit_residual_relative: float = 0.25
     min_r_squared: float = 0.3
 
-    # Balanced GMM triage thresholds (strong warnings — any one triggers GMM)
+    # Balanced GMM triage thresholds (strong warnings ? any one triggers GMM)
     gmm_trigger_r_squared: float = 0.6
     gmm_trigger_residual_relative: float = 0.18
     gmm_trigger_sigma_factor: float = 1.4
@@ -119,6 +119,12 @@ class PunctaDeclumpConfig:
     saturation_near_clip_fraction: float = 0.005
     saturation_near_clip_margin: float = 0.02
     saturation_exclude_from_local_residual: bool = True
+
+    # Local peak recovery for fast-path objects with no assigned global peak.
+    # Only runs on ordinary/fast-path objects when assigned_peaks is empty.
+    local_peak_recovery_enabled: bool = True
+    local_peak_recovery_tiny_max_area: float = 9.0
+    local_peak_recovery_tiny_max_diameter: float = 3.5
 
     # Selective routing / detectors
     enable_selective_routing: bool = True
@@ -226,6 +232,10 @@ class PunctaDeclumpConfig:
             raise ValueError("saturation_near_clip_fraction must be in [0, 1]")
         if not 0.0 <= self.saturation_near_clip_margin < 1.0:
             raise ValueError("saturation_near_clip_margin must be in [0, 1)")
+        if self.local_peak_recovery_tiny_max_area <= 0:
+            raise ValueError("local_peak_recovery_tiny_max_area must be positive")
+        if self.local_peak_recovery_tiny_max_diameter <= 0:
+            raise ValueError("local_peak_recovery_tiny_max_diameter must be positive")
         if self.dynamic_model_order_enabled and (
             self.residual_split_max_components < self.gmm_max_components
         ):

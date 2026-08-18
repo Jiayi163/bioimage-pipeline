@@ -29,16 +29,29 @@ def main() -> None:
     print(f"Total runtime: {summary.total_runtime_seconds:.1f}s")
     if result.timing:
         print("Timing breakdown:")
-        for key in (
+        timing = result.timing
+        time_keys = (
             "preprocessing_time",
             "connected_component_time",
             "candidate_detection_time",
             "gaussian_fit_time",
             "watershed_time",
             "diagnostic_export_time",
-        ):
-            if key in result.timing:
-                print(f"  {key}: {result.timing[key]:.3f}s")
+            "local_peak_recovery_time",
+            "local_peak_recovery_mean_time",
+        )
+        count_keys = (
+            "local_peak_recovery_attempts",
+            "local_peak_recovery_success",
+            "local_peak_recovery_one_peak",
+            "local_peak_recovery_multi_peak",
+        )
+        for key in time_keys:
+            if key in timing:
+                print(f"  {key}: {timing[key]:.3f}s")
+        for key in count_keys:
+            if key in timing:
+                print(f"  {key}: {int(timing[key])}")
     if result.peak_table is not None:
         print(
             f"Detector: {result.peak_table.detector_name} "

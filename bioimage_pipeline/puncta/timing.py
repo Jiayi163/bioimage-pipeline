@@ -22,6 +22,12 @@ class PunctaTimingMetrics:
     number_of_fast_path_objects: int = 0
     detector_name: str = "python_log"
     cache_hit: bool = False
+    local_peak_recovery_attempts: int = 0
+    local_peak_recovery_success: int = 0
+    local_peak_recovery_one_peak: int = 0
+    local_peak_recovery_multi_peak: int = 0
+    local_peak_recovery_time: float = 0.0
+    local_peak_recovery_mean_time: float = 0.0
     extra: dict[str, object] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:

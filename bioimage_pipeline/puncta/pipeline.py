@@ -20,8 +20,9 @@ from bioimage_pipeline.puncta.diagnostics import (
     export_object_diagnostic,
     export_under_split_diagnostic,
 )
+from bioimage_pipeline.puncta.local_peak_recovery import LocalPeakRecoveryStats
 from bioimage_pipeline.puncta.object_processor import ObjectProcessResult, ObjectProcessor
-from bioimage_pipeline.puncta.object_router import ObjectRouter
+from bioimage_pipeline.puncta.object_router import ObjectRouter, RouteDecision
 from bioimage_pipeline.puncta.peak_assignment import assign_peaks_to_objects
 from bioimage_pipeline.puncta.threshold_mask import ThresholdMaskGenerator
 from bioimage_pipeline.puncta.timing import PunctaTimingMetrics
@@ -29,6 +30,7 @@ from bioimage_pipeline.puncta.types import (
     DeclumpResult,
     DeclumpSummary,
     ObjectInfo,
+    PeakCandidate,
     PunctumCandidate,
 )
 from bioimage_pipeline.puncta.under_split_report import build_under_split_report
@@ -124,6 +126,7 @@ class PunctaDeclumpPipeline:
         run_start = time.perf_counter()
         object_times: list[float] = []
         fit_start = time.perf_counter()
+        recovery_stats = LocalPeakRecoveryStats()
 
         for index, obj in enumerate(objects, start=1):
             object_start = time.perf_counter()
@@ -134,12 +137,17 @@ class PunctaDeclumpPipeline:
             if self.config.enable_selective_routing:
                 route = self.router.classify(obj, obj_peaks)
                 if route.route == "ordinary_single":
-                    result = self.processor.process_fast(
+                    result, extra_suspicious, extra_fitted = self._process_ordinary_object(
+                        image_arr,
+                        object_mask,
                         obj,
-                        obj_peaks,
+                        obj_peaks=obj_peaks,
                         candidate_id_start=candidate_counter,
                         route=route,
+                        recovery_stats=recovery_stats,
                     )
+                    suspicious_count += extra_suspicious
+                    fitted_count += extra_fitted
                 else:
                     suspicious_count += 1
                     result = self.processor.process_suspicious(
@@ -205,6 +213,12 @@ class PunctaDeclumpPipeline:
         timing.number_of_suspicious_objects = suspicious_count
         timing.number_of_fitted_objects = fitted_count
         timing.number_of_fast_path_objects = fast_count
+        timing.local_peak_recovery_attempts = recovery_stats.attempts
+        timing.local_peak_recovery_success = recovery_stats.success
+        timing.local_peak_recovery_one_peak = recovery_stats.one_peak
+        timing.local_peak_recovery_multi_peak = recovery_stats.multi_peak
+        timing.local_peak_recovery_time = recovery_stats.total_time
+        timing.local_peak_recovery_mean_time = recovery_stats.mean_time
 
         ws_start = time.perf_counter()
         if self.config.enable_watershed_declump:
@@ -237,6 +251,10 @@ class PunctaDeclumpPipeline:
             fast_path_objects=fast_count,
             suspicious_objects=suspicious_count,
             fitted_objects=fitted_count,
+            local_peak_recovery_attempts=recovery_stats.attempts,
+            local_peak_recovery_success=recovery_stats.success,
+            local_peak_recovery_one_peak=recovery_stats.one_peak,
+            local_peak_recovery_multi_peak=recovery_stats.multi_peak,
         )
 
         gmm_init_diagnostics: list[dict[str, object]] = []
@@ -320,6 +338,7 @@ class PunctaDeclumpPipeline:
             "diagnostics_exported": diagnostics_exported,
             "candidate_detector": self.config.candidate_detector,
             "detector_cache_hit": peak_table.cache_hit,
+            **recovery_stats.to_dict(),
         }
         threshold_metadata["timing"] = timing.to_dict()
         threshold_metadata["diagnostics"] = {
@@ -334,6 +353,73 @@ class PunctaDeclumpPipeline:
             self._log_runtime_summary(summary, timing)
 
         return declump_result
+
+    def _process_ordinary_object(
+        self,
+        image: np.ndarray,
+        object_mask: np.ndarray,
+        obj: ObjectInfo,
+        *,
+        obj_peaks: list[PeakCandidate],
+        candidate_id_start: int,
+        route: RouteDecision,
+        recovery_stats: LocalPeakRecoveryStats,
+    ) -> tuple[ObjectProcessResult, int, int]:
+        """Fast path, with local recovery only when assigned_peaks is empty.
+
+        Returns (result, extra_suspicious, extra_fitted).
+        """
+        if obj_peaks or not self.config.local_peak_recovery_enabled:
+            return (
+                self.processor.process_fast(
+                    obj,
+                    obj_peaks,
+                    candidate_id_start=candidate_id_start,
+                    route=route,
+                ),
+                0,
+                0,
+            )
+
+        rec_start = time.perf_counter()
+        recovery = self.processor.recover_local_peaks(image, object_mask, obj)
+        recovery_stats.attempts += 1
+        recovery_stats.total_time += time.perf_counter() - rec_start
+
+        if recovery.success and len(recovery.peaks) >= 2:
+            recovery_stats.success += 1
+            recovery_stats.multi_peak += 1
+            result = self.processor.process_suspicious(
+                image,
+                object_mask,
+                obj,
+                assigned_peaks=recovery.peaks,
+                candidate_id_start=candidate_id_start,
+                peak_source="recovered_local_detector",
+                recovery=recovery,
+            )
+            return result, 1, 1
+
+        if recovery.success and len(recovery.peaks) == 1:
+            recovery_stats.success += 1
+            recovery_stats.one_peak += 1
+            result = self.processor.process_recovered_single(
+                obj,
+                recovery,
+                candidate_id_start=candidate_id_start,
+                route=route,
+            )
+            # No Gaussian fit for single-peak fast recovery
+            return result, 0, 0
+
+        result = self.processor.process_fast(
+            obj,
+            obj_peaks,
+            candidate_id_start=candidate_id_start,
+            route=route,
+            recovery=recovery,
+        )
+        return result, 0, 0
 
     def _resolve_cache_dir(self, output_dir: str | Path | None) -> str | None:
         if self.config.detector_cache_dir is not None:
@@ -382,6 +468,10 @@ class PunctaDeclumpPipeline:
             f"fallback={summary.fallback_objects} "
             f"rejected={summary.total_rejected} "
             f"diagnostics={summary.diagnostics_exported} | "
+            f"local_recovery={timing.local_peak_recovery_success}/{timing.local_peak_recovery_attempts} "
+            f"(1pk={timing.local_peak_recovery_one_peak} "
+            f">1pk={timing.local_peak_recovery_multi_peak} "
+            f"t={timing.local_peak_recovery_time:.3f}s) | "
             f"detect={timing.candidate_detection_time:.1f}s "
             f"fit={timing.gaussian_fit_time:.1f}s "
             f"watershed={timing.watershed_time:.1f}s",

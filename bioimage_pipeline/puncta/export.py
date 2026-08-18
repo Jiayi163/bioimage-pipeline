@@ -225,4 +225,9 @@ class ResultExporter:
             "gmm_spurious_split_rejected": candidate.gmm_spurious_split_rejected,
             "gmm_multi_start_attempts": candidate.gmm_multi_start_attempts,
             "gmm_multi_start_converged": candidate.gmm_multi_start_converged,
+            "local_peak_recovery_attempted": candidate.local_peak_recovery_attempted,
+            "local_peak_recovery_success": candidate.local_peak_recovery_success,
+            "local_peak_recovery_raw_count": candidate.local_peak_recovery_raw_count,
+            "local_peak_recovery_filtered_count": candidate.local_peak_recovery_filtered_count,
+            "peak_source": candidate.peak_source,
         }

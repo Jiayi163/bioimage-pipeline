@@ -202,6 +202,11 @@ class ModelSelectionDebug:
     single_path_reason: str | None = None
     under_split_suspect: bool = False
     under_split_reasons: list[str] = field(default_factory=list)
+    local_peak_recovery_attempted: bool = False
+    local_peak_recovery_success: bool = False
+    local_peak_recovery_raw_count: int = 0
+    local_peak_recovery_filtered_count: int = 0
+    peak_source: str | None = None
 
 
 @dataclass
@@ -282,6 +287,11 @@ class PunctumCandidate:
     gmm_spurious_split_rejected: bool | None = None
     gmm_multi_start_attempts: int | None = None
     gmm_multi_start_converged: int | None = None
+    local_peak_recovery_attempted: bool | None = None
+    local_peak_recovery_success: bool | None = None
+    local_peak_recovery_raw_count: int | None = None
+    local_peak_recovery_filtered_count: int | None = None
+    peak_source: str | None = None
 
     @property
     def has_gaussian_fit(self) -> bool:
@@ -321,6 +331,10 @@ class DeclumpSummary:
     fitted_objects: int = 0
     diagnostics_exported: int = 0
     total_runtime_seconds: float = 0.0
+    local_peak_recovery_attempts: int = 0
+    local_peak_recovery_success: int = 0
+    local_peak_recovery_one_peak: int = 0
+    local_peak_recovery_multi_peak: int = 0
 
     @property
     def small_single_objects(self) -> int:
