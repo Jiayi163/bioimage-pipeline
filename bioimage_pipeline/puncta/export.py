@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from bioimage_pipeline.export import (
+    export_intensity_tiff,
     export_label_tiff,
     export_mask_tiff,
     export_measurements_csv,
@@ -72,6 +73,9 @@ class ResultExporter:
                 output_path / f"{stem}_labels.tif",
                 result.labels,
             )
+
+        if result.image_only_diagnostics is not None:
+            paths.update(self._export_image_only_diagnostics(output_path, result, stem=stem))
 
         undersplit_paths = export_under_split_report(
             output_path,
@@ -145,6 +149,63 @@ class ResultExporter:
         }
         output_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         return output_path
+
+    def _export_image_only_diagnostics(
+        self,
+        output_path: Path,
+        result: DeclumpResult,
+        *,
+        stem: str,
+    ) -> dict[str, Path]:
+        """Export image-only intermediate maps and peak/group JSON."""
+        paths: dict[str, Path] = {}
+        diag = result.image_only_diagnostics
+        if diag is None:
+            return paths
+
+        if diag.background is not None:
+            paths["background"] = export_intensity_tiff(
+                output_path / f"{stem}_background.tif",
+                diag.background.astype(np.float32),
+            )
+        if diag.corrected is not None:
+            paths["corrected"] = export_intensity_tiff(
+                output_path / f"{stem}_corrected.tif",
+                diag.corrected.astype(np.float32),
+            )
+        if diag.signal_support is not None:
+            paths["signal_support"] = export_mask_tiff(
+                output_path / f"{stem}_signal_support.tif",
+                diag.signal_support.astype(np.uint8) * 255,
+            )
+
+        peaks_payload = {
+            "raw_peaks": [asdict(p) for p in diag.raw_peaks],
+            "validated_peaks": [asdict(p) for p in diag.validated_peaks],
+            "rejected_peaks": [asdict(p) for p in diag.rejected_peaks],
+        }
+        peaks_path = output_path / f"{stem}_image_only_peaks.json"
+        peaks_path.write_text(json.dumps(peaks_payload, indent=2), encoding="utf-8")
+        paths["image_only_peaks"] = peaks_path
+
+        groups_payload = {
+            "groups": [
+                {
+                    "group_id": group.group_id,
+                    "route": group.route,
+                    "bbox": group.bbox,
+                    "peak_indices": list(group.peak_indices),
+                    "peaks": [asdict(p) for p in group.peaks],
+                    "min_pairwise_separation": group.min_pairwise_separation,
+                }
+                for group in diag.peak_groups
+            ],
+            "group_routes": diag.group_routes,
+        }
+        groups_path = output_path / f"{stem}_peak_groups.json"
+        groups_path.write_text(json.dumps(groups_payload, indent=2), encoding="utf-8")
+        paths["peak_groups"] = groups_path
+        return paths
 
     def export_seed_image(
         self,
@@ -230,4 +291,5 @@ class ResultExporter:
             "local_peak_recovery_raw_count": candidate.local_peak_recovery_raw_count,
             "local_peak_recovery_filtered_count": candidate.local_peak_recovery_filtered_count,
             "peak_source": candidate.peak_source,
+            "detection_provenance": candidate.detection_provenance,
         }

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 ThresholdMethod = Literal["otsu", "manual", "adaptive", "sauvola", "external_mask"]
+DetectionMaskMode = Literal["external", "image_only"]
 DiagnosticMode = Literal[
     "off",
     "summary",
@@ -22,6 +23,9 @@ FijiBatchMode = Literal["per_image", "batch"]
 class PunctaDeclumpConfig:
     """Tunable parameters for Gaussian / GMM puncta declumping."""
 
+    # Detection mode: external mask (default) or experimental image-only path.
+    detection_mask_mode: DetectionMaskMode = "external"
+
     # Mask generation
     threshold_method: ThresholdMethod = "otsu"
     manual_threshold_value: float = 100.0
@@ -33,6 +37,15 @@ class PunctaDeclumpConfig:
     max_object_area: int = 10_000
     fill_holes: bool = True
     clear_border: bool = True
+
+    # Image-only mode (ignored when detection_mask_mode == "external")
+    image_only_rolling_ball_radius: int | None = None
+    image_only_support_mad_multiplier: float = 2.5
+    image_only_support_min_object_area: int = 2
+    image_only_min_snr: float = 3.0
+    image_only_group_link_distance: float = 7.5
+    image_only_patch_margin: int = 6
+    image_only_peak_disk_radius: float = 2.0
 
     # Size gate / expected spot geometry
     expected_single_spot_diameter: float = 5.0
@@ -236,6 +249,18 @@ class PunctaDeclumpConfig:
             raise ValueError("local_peak_recovery_tiny_max_area must be positive")
         if self.local_peak_recovery_tiny_max_diameter <= 0:
             raise ValueError("local_peak_recovery_tiny_max_diameter must be positive")
+        if self.detection_mask_mode not in ("external", "image_only"):
+            raise ValueError(f"Invalid detection_mask_mode: {self.detection_mask_mode}")
+        if self.image_only_support_mad_multiplier <= 0:
+            raise ValueError("image_only_support_mad_multiplier must be positive")
+        if self.image_only_min_snr <= 0:
+            raise ValueError("image_only_min_snr must be positive")
+        if self.image_only_group_link_distance <= 0:
+            raise ValueError("image_only_group_link_distance must be positive")
+        if self.image_only_patch_margin < 0:
+            raise ValueError("image_only_patch_margin must be non-negative")
+        if self.image_only_peak_disk_radius <= 0:
+            raise ValueError("image_only_peak_disk_radius must be positive")
         if self.dynamic_model_order_enabled and (
             self.residual_split_max_components < self.gmm_max_components
         ):

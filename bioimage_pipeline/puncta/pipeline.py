@@ -61,6 +61,17 @@ class PunctaDeclumpPipeline:
         if image_arr.ndim != 2:
             raise ValueError("Only 2D grayscale images are supported")
 
+        if self.config.detection_mask_mode == "image_only":
+            from bioimage_pipeline.puncta.image_only_pipeline import run_image_only
+
+            return run_image_only(
+                image_arr,
+                self.config,
+                diagnostics_dir=diagnostics_dir,
+                output_dir=str(output_dir) if output_dir is not None else None,
+                stem=stem,
+            )
+
         timing = PunctaTimingMetrics(detector_name=self.config.candidate_detector)
         total_start = time.perf_counter()
 

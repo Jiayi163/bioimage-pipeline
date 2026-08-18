@@ -79,6 +79,62 @@ class OverlayRenderer:
 
         return np.clip(overlay, 0, 255).astype(np.uint8)
 
+    def render_image_only_diagnostic(
+        self,
+        image: np.ndarray,
+        result: DeclumpResult,
+        *,
+        show_rejected: bool = False,
+    ) -> np.ndarray:
+        """Diagnostic overlay for image-only mode."""
+        base = normalize_for_display(image)
+        overlay = np.stack([base, base, base], axis=-1).astype(np.float32)
+        diag = result.image_only_diagnostics
+
+        if diag is not None and diag.signal_support is not None:
+            self._draw_support_contour(overlay, diag.signal_support)
+
+        if diag is not None:
+            for peak in diag.validated_peaks:
+                self._draw_peak_marker(
+                    overlay,
+                    int(round(peak.row)),
+                    int(round(peak.col)),
+                    color=(255, 255, 0),
+                )
+            for group in diag.peak_groups:
+                if group.route == "gmm":
+                    self._draw_group_bbox(overlay, group.bbox, color=(255, 128, 0))
+
+        for candidate in result.accepted:
+            color = (0, 255, 0) if candidate.fit_status == "fit_ok" else (255, 220, 0)
+            self._draw_cross(overlay, candidate, color=color)
+
+        if show_rejected:
+            for candidate in result.rejected:
+                self._draw_cross(overlay, candidate, color=(255, 0, 0))
+
+        return np.clip(overlay, 0, 255).astype(np.uint8)
+
+    def save_image_only_diagnostic(
+        self,
+        path: str | Path,
+        image: np.ndarray,
+        result: DeclumpResult,
+        *,
+        show_rejected: bool = False,
+    ) -> Path:
+        """Save image-only diagnostic overlay."""
+        output_path = Path(path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        figure = self.render_image_only_diagnostic(
+            image,
+            result,
+            show_rejected=show_rejected,
+        )
+        skio.imsave(output_path, figure, check_contrast=False)
+        return output_path
+
     def save(
         self,
         path: str | Path,
@@ -163,3 +219,60 @@ class OverlayRenderer:
         valid = (rr >= 0) & (rr < height) & (cc >= 0) & (cc < width)
         color_arr = np.array(color, dtype=np.float32)
         overlay[rr[valid], cc[valid]] = color_arr
+
+    def _draw_peak_marker(
+        self,
+        overlay: np.ndarray,
+        row: int,
+        col: int,
+        *,
+        color: tuple[int, int, int],
+        half: int = 2,
+    ) -> None:
+        height, width = overlay.shape[:2]
+        color_arr = np.array(color, dtype=np.float32)
+        for delta in range(-half, half + 1):
+            r = row + delta
+            c = col + delta
+            if 0 <= r < height and 0 <= col < width:
+                overlay[r, col] = color_arr
+            if 0 <= row < height and 0 <= c < width:
+                overlay[row, c] = color_arr
+
+    def _draw_support_contour(
+        self,
+        overlay: np.ndarray,
+        support: np.ndarray,
+        *,
+        color: tuple[int, int, int] = (0, 255, 255),
+    ) -> None:
+        from skimage import measure
+
+        contours = measure.find_contours(support.astype(float), 0.5)
+        color_arr = np.array(color, dtype=np.float32)
+        height, width = overlay.shape[:2]
+        for contour in contours:
+            rows = np.clip(contour[:, 0].astype(int), 0, height - 1)
+            cols = np.clip(contour[:, 1].astype(int), 0, width - 1)
+            overlay[rows, cols] = color_arr
+
+    def _draw_group_bbox(
+        self,
+        overlay: np.ndarray,
+        bbox: tuple[int, int, int, int],
+        *,
+        color: tuple[int, int, int],
+    ) -> None:
+        min_row, min_col, max_row, max_col = bbox
+        height, width = overlay.shape[:2]
+        color_arr = np.array(color, dtype=np.float32)
+        for col in range(min_col, max_col):
+            if 0 <= min_row < height and 0 <= col < width:
+                overlay[min_row, col] = color_arr
+            if 0 <= max_row - 1 < height and 0 <= col < width:
+                overlay[max_row - 1, col] = color_arr
+        for row in range(min_row, max_row):
+            if 0 <= row < height and 0 <= min_col < width:
+                overlay[row, min_col] = color_arr
+            if 0 <= row < height and 0 <= max_col - 1 < width:
+                overlay[row, max_col - 1] = color_arr

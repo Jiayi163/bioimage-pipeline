@@ -249,6 +249,8 @@ class ObjectProcessor:
             assigned_method = "recovered_local_detector"
         elif peak_source == "recovered_masked_argmax":
             assigned_method = "recovered_masked_argmax"
+        elif peak_source in ("image_only_group", "image_only_gmm"):
+            assigned_method = peak_source
         if assigned_peaks:
             peak_detection = PeakDetectionResult(
                 raw_peaks=list(assigned_peaks),
@@ -737,6 +739,8 @@ class ObjectProcessor:
         candidate.local_peak_recovery_raw_count = debug.local_peak_recovery_raw_count
         candidate.local_peak_recovery_filtered_count = debug.local_peak_recovery_filtered_count
         candidate.peak_source = debug.peak_source
+        if debug.peak_source in ("image_only_peak", "image_only_group", "image_only_gmm"):
+            candidate.detection_provenance = debug.peak_source  # type: ignore[assignment]
         return candidate
 
     def _from_mixture(

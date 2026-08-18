@@ -21,6 +21,9 @@ PeakSource = Literal[
     "recovered_local_detector",
     "recovered_masked_argmax",
     "fallback",
+    "image_only_peak",
+    "image_only_group",
+    "image_only_gmm",
 ]
 
 

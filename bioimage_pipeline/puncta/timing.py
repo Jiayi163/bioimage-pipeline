@@ -28,6 +28,15 @@ class PunctaTimingMetrics:
     local_peak_recovery_multi_peak: int = 0
     local_peak_recovery_time: float = 0.0
     local_peak_recovery_mean_time: float = 0.0
+    image_only_background_time: float = 0.0
+    image_only_support_time: float = 0.0
+    image_only_peak_detection_time: float = 0.0
+    image_only_peak_filter_time: float = 0.0
+    image_only_grouping_time: float = 0.0
+    image_only_direct_peaks: int = 0
+    image_only_ambiguous_groups: int = 0
+    image_only_gmm_groups: int = 0
+    image_only_export_time: float = 0.0
     extra: dict[str, object] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:

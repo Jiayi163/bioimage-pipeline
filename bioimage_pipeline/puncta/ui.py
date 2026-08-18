@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import sys
+import time
 from pathlib import Path
 
 import numpy as np
 
 from bioimage_pipeline.io import extract_2d_plane, read_tiff
-from bioimage_pipeline.puncta.config import PunctaDeclumpConfig, ThresholdMethod
+from bioimage_pipeline.puncta.config import DetectionMaskMode, PunctaDeclumpConfig, ThresholdMethod
 from bioimage_pipeline.puncta.export import ResultExporter
 from bioimage_pipeline.puncta.overlay import OverlayRenderer
+from bioimage_pipeline.puncta.image_only_pipeline import format_image_only_done_message
 from bioimage_pipeline.puncta.pipeline import run_puncta_declump
 
 
@@ -121,6 +124,13 @@ def build_config_from_args(args: argparse.Namespace) -> PunctaDeclumpConfig:
         large_object_diameter_threshold=getattr(args, "large_object_diameter_threshold", 10.0),
         gmm_bic_improvement_margin=getattr(args, "gmm_bic_improvement_margin", 2.0),
         gmm_aic_improvement_margin=getattr(args, "gmm_aic_improvement_margin", 2.0),
+        detection_mask_mode=getattr(args, "detection_mask_mode", "external"),
+        image_only_rolling_ball_radius=getattr(args, "image_only_rolling_ball_radius", None),
+        image_only_support_mad_multiplier=getattr(
+            args, "image_only_support_mad_multiplier", 2.5
+        ),
+        image_only_min_snr=getattr(args, "image_only_min_snr", 3.0),
+        image_only_group_link_distance=getattr(args, "image_only_group_link_distance", 7.5),
     )
 
 
@@ -287,6 +297,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Disable GMM mixture fitting on suspicious objects (single Gaussian only).",
     )
     parser.add_argument("--large-object-diameter-threshold", type=float, default=10.0)
+    parser.add_argument(
+        "--detection-mask-mode",
+        choices=("external", "image_only"),
+        default="external",
+        help=(
+            "Detection mode: external (mask/threshold segmentation, default) or "
+            "image_only (experimental peak-first path without external mask)."
+        ),
+    )
+    parser.add_argument(
+        "--image-only-rolling-ball-radius",
+        type=int,
+        default=None,
+        help="Rolling-ball radius for image-only background (default: auto from image size).",
+    )
+    parser.add_argument(
+        "--image-only-support-mad-multiplier",
+        type=float,
+        default=2.5,
+        help="MAD multiplier for permissive signal-support threshold in image-only mode.",
+    )
+    parser.add_argument(
+        "--image-only-min-snr",
+        type=float,
+        default=3.0,
+        help="Minimum local SNR for validated peaks in image-only mode.",
+    )
+    parser.add_argument(
+        "--image-only-group-link-distance",
+        type=float,
+        default=7.5,
+        help="Single-linkage distance for grouping nearby peaks in image-only mode.",
+    )
     parser.add_argument("--gmm-bic-improvement-margin", type=float, default=2.0)
     parser.add_argument("--gmm-aic-improvement-margin", type=float, default=2.0)
     return parser
@@ -314,6 +357,12 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
     if args.input is None:
         raise ValueError("Either --input or --input-dir is required.")
 
+    detection_mask_mode: DetectionMaskMode = getattr(args, "detection_mask_mode", "external")
+    config_preview = build_config_from_args(args)
+    config_preview.detection_mask_mode = detection_mask_mode
+    if detection_mask_mode == "image_only" and config_preview.log_progress:
+        print("[image_only] loading image...", flush=True, file=sys.stderr)
+
     raw_image = read_tiff(args.input)
     image, image_plane_metadata = load_grayscale_plane(
         raw_image,
@@ -324,7 +373,15 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
     external_mask = None
     mask_plane_metadata: dict[str, object] | None = None
     threshold_method: ThresholdMethod = args.threshold_method
-    if args.mask is not None:
+
+    if detection_mask_mode == "image_only" and args.mask is not None:
+        import warnings
+
+        warnings.warn(
+            "--mask is ignored when --detection-mask-mode image_only",
+            stacklevel=1,
+        )
+    elif args.mask is not None:
         mask_frame_index = (
             args.mask_frame_index
             if args.mask_frame_index is not None
@@ -345,6 +402,7 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
 
     config = build_config_from_args(args)
     config.threshold_method = threshold_method
+    config.detection_mask_mode = detection_mask_mode
 
     diagnostics_dir: str | None = None
     if config.diagnostic_mode not in ("off", "summary"):
@@ -363,6 +421,10 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
     if mask_plane_metadata is not None:
         result.threshold_metadata["mask_plane"] = mask_plane_metadata
 
+    if config.detection_mask_mode == "image_only" and config.log_progress:
+        print("[image_only] exporting...", flush=True, file=sys.stderr)
+
+    export_start = time.perf_counter()
     exporter = ResultExporter()
     paths = exporter.export_all(
         args.output_dir,
@@ -375,13 +437,34 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
     )
 
     overlay_renderer = OverlayRenderer(cross_half_size=max(2, config.fit_roi_radius // 2))
-    overlay_path = overlay_renderer.save(
-        args.output_dir / f"{args.stem}_overlay.png",
-        image,
-        result,
-        show_rejected=args.show_rejected,
-    )
+    if config.detection_mask_mode == "image_only" and config.diagnostic_mode != "off":
+        overlay_path = overlay_renderer.save_image_only_diagnostic(
+            args.output_dir / f"{args.stem}_image_only_diagnostic.png",
+            image,
+            result,
+            show_rejected=args.show_rejected,
+        )
+    else:
+        overlay_path = overlay_renderer.save(
+            args.output_dir / f"{args.stem}_overlay.png",
+            image,
+            result,
+            show_rejected=args.show_rejected,
+        )
     paths["overlay"] = overlay_path
+    export_elapsed = time.perf_counter() - export_start
+
+    if config.detection_mask_mode == "image_only":
+        result.timing["image_only_export_time"] = export_elapsed
+        result.threshold_metadata.setdefault("timing", {})
+        if isinstance(result.threshold_metadata["timing"], dict):
+            result.threshold_metadata["timing"]["image_only_export_time"] = export_elapsed
+        if config.log_progress:
+            print(
+                format_image_only_done_message(result.timing, export_time=export_elapsed),
+                flush=True,
+                file=sys.stderr,
+            )
 
     gaussian_count = sum(1 for c in result.accepted if c.fit_status == "fit_ok")
     fallback_count = sum(1 for c in result.accepted if c.fit_status == "fit_failed_fallback")

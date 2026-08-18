@@ -8,6 +8,13 @@ from typing import Literal
 import numpy as np
 
 DetectionPath = Literal["single", "fast_single", "declump", "gmm", "fallback"]
+DetectionProvenance = Literal[
+    "external_mask",
+    "image_only_peak",
+    "image_only_group",
+    "image_only_gmm",
+    "fallback",
+]
 FitStatus = Literal[
     "fit_ok",
     "fit_failed_fallback",
@@ -292,6 +299,7 @@ class PunctumCandidate:
     local_peak_recovery_raw_count: int | None = None
     local_peak_recovery_filtered_count: int | None = None
     peak_source: str | None = None
+    detection_provenance: DetectionProvenance | None = None
 
     @property
     def has_gaussian_fit(self) -> bool:
@@ -346,6 +354,42 @@ class DeclumpSummary:
 
 
 @dataclass
+class RejectedPeak:
+    """One peak rejected during image-only validation."""
+
+    row: float
+    col: float
+    intensity: float
+    reason: str
+
+
+@dataclass
+class PeakGroup:
+    """A spatial cluster of validated peaks in image-only mode."""
+
+    group_id: int
+    peak_indices: tuple[int, ...]
+    peaks: list[PeakCandidate]
+    route: Literal["direct", "gmm"]
+    bbox: tuple[int, int, int, int]
+    min_pairwise_separation: float | None = None
+
+
+@dataclass
+class ImageOnlyDiagnostics:
+    """Diagnostics for image-only puncta detection."""
+
+    background: np.ndarray | None = None
+    corrected: np.ndarray | None = None
+    signal_support: np.ndarray | None = None
+    raw_peaks: list[PeakCandidate] = field(default_factory=list)
+    validated_peaks: list[PeakCandidate] = field(default_factory=list)
+    rejected_peaks: list[RejectedPeak] = field(default_factory=list)
+    peak_groups: list[PeakGroup] = field(default_factory=list)
+    group_routes: dict[int, str] = field(default_factory=dict)
+
+
+@dataclass
 class DeclumpResult:
     """Full output of puncta declumping."""
 
@@ -359,6 +403,7 @@ class DeclumpResult:
     under_split_report: list[dict[str, object]] = field(default_factory=list)
     timing: dict[str, object] = field(default_factory=dict)
     peak_table: ImagePeakTable | None = None
+    image_only_diagnostics: ImageOnlyDiagnostics | None = None
 
     @property
     def accepted(self) -> list[PunctumCandidate]:
