@@ -13,7 +13,14 @@ DetectionProvenance = Literal[
     "image_only_peak",
     "image_only_group",
     "image_only_gmm",
+    "direct_resolved_multi_peak",
+    "gmm_unresolved_multi_peak",
     "fallback",
+]
+ImageOnlyRoutingReason = Literal[
+    "direct_single",
+    "direct_resolved_multi_peak",
+    "gmm_unresolved_multi_peak",
 ]
 FitStatus = Literal[
     "fit_ok",
@@ -373,6 +380,7 @@ class PeakGroup:
     route: Literal["direct", "gmm"]
     bbox: tuple[int, int, int, int]
     min_pairwise_separation: float | None = None
+    routing_reason: ImageOnlyRoutingReason = "direct_single"
 
 
 @dataclass
@@ -387,6 +395,7 @@ class ImageOnlyDiagnostics:
     rejected_peaks: list[RejectedPeak] = field(default_factory=list)
     peak_groups: list[PeakGroup] = field(default_factory=list)
     group_routes: dict[int, str] = field(default_factory=dict)
+    group_routing_reasons: dict[int, str] = field(default_factory=dict)
 
 
 @dataclass

@@ -8,7 +8,7 @@ import numpy as np
 
 from bioimage_pipeline.puncta.background import expand_bbox
 from bioimage_pipeline.puncta.config import PunctaDeclumpConfig
-from bioimage_pipeline.puncta.types import PeakCandidate, PeakGroup
+from bioimage_pipeline.puncta.types import ImageOnlyRoutingReason, PeakCandidate, PeakGroup
 
 
 def _min_pairwise_separation(peaks: list[PeakCandidate]) -> float | None:
@@ -68,21 +68,32 @@ def _group_bbox(
     return expand_bbox(raw_bbox, image_shape, margin)
 
 
+def _peaks_pass_direct_quality_gate(
+    peaks: list[PeakCandidate],
+    config: PunctaDeclumpConfig,
+) -> bool:
+    """Conservative gate: validated peaks must look plausible for direct acceptance."""
+    min_amplitude = float(config.min_amplitude)
+    return all(float(peak.intensity) >= min_amplitude for peak in peaks)
+
+
 def _route_group(
     peaks: list[PeakCandidate],
     config: PunctaDeclumpConfig,
-) -> Literal["direct", "gmm"]:
+) -> tuple[Literal["direct", "gmm"], ImageOnlyRoutingReason]:
+    """Route a validated peak cluster using separation, not peak count alone."""
     n = len(peaks)
-    if n == 0:
-        return "direct"
-    if n >= config.min_reliable_peaks_for_routing:
-        return "gmm"
+    if n <= 1:
+        return "direct", "direct_single"
+
+    if not _peaks_pass_direct_quality_gate(peaks, config):
+        return "gmm", "gmm_unresolved_multi_peak"
+
     min_sep = _min_pairwise_separation(peaks)
-    if n == 1:
-        return "direct"
     if min_sep is not None and min_sep >= config.min_center_separation:
-        return "direct"
-    return "gmm"
+        return "direct", "direct_resolved_multi_peak"
+
+    return "gmm", "gmm_unresolved_multi_peak"
 
 
 def group_peaks(
@@ -101,7 +112,7 @@ def group_peaks(
     groups: list[PeakGroup] = []
     for group_id, indices in enumerate(cluster_indices, start=1):
         group_peaks = [peaks[i] for i in indices]
-        route = _route_group(group_peaks, config)
+        route, routing_reason = _route_group(group_peaks, config)
         bbox = _group_bbox(group_peaks, image_shape, config.image_only_patch_margin)
         groups.append(
             PeakGroup(
@@ -111,6 +122,7 @@ def group_peaks(
                 route=route,
                 bbox=bbox,
                 min_pairwise_separation=_min_pairwise_separation(group_peaks),
+                routing_reason=routing_reason,
             )
         )
     return groups

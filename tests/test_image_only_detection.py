@@ -6,7 +6,9 @@ import numpy as np
 import pytest
 
 from bioimage_pipeline.puncta.config import PunctaDeclumpConfig
+from bioimage_pipeline.puncta.peak_grouping import group_peaks
 from bioimage_pipeline.puncta.pipeline import run_puncta_declump
+from bioimage_pipeline.puncta.types import PeakCandidate
 from tests.test_puncta_declump import default_config, make_binary_disk, make_gaussian_spot
 
 
@@ -51,27 +53,25 @@ def test_two_separated_puncta_no_gmm() -> None:
 
 
 def test_two_close_ambiguous_puncta_routed_to_gmm() -> None:
-    """Two peaks in one group routed to GMM when peak count triggers mixture fitting."""
+    """Two unresolved peaks in one group route to GMM when separation is below threshold."""
     image = np.full((64, 64), 40.0, dtype=np.float64)
-    image += make_gaussian_spot((64, 64), (28.0, 32.0), sigma=1.0, amplitude=500.0, background=0.0)
-    image += make_gaussian_spot((64, 64), (34.0, 32.0), sigma=1.0, amplitude=500.0, background=0.0)
+    image += make_gaussian_spot((64, 64), (32.0, 28.0), sigma=0.85, amplitude=600.0, background=0.0)
+    image += make_gaussian_spot((64, 64), (32.0, 30.2), sigma=0.85, amplitude=600.0, background=0.0)
 
     result = run_puncta_declump(
         image,
         image_only_config(
             image_only_rolling_ball_radius=4,
-            min_reliable_peaks_for_routing=2,
             image_only_group_link_distance=10.0,
-            min_peak_distance=2,
+            min_peak_distance=1,
+            min_center_separation=2.5,
         ),
     )
 
     assert len(result.image_only_diagnostics.validated_peaks) >= 2
     assert result.threshold_metadata["image_only_counts"]["ambiguous_groups"] >= 1
     gmm_candidates = [
-        c
-        for c in result.candidates
-        if c.detection_provenance in ("image_only_group", "image_only_gmm")
+        c for c in result.candidates if c.detection_provenance == "gmm_unresolved_multi_peak"
     ]
     assert gmm_candidates
     assert any(c.tried_gmm for c in gmm_candidates)
@@ -181,3 +181,126 @@ def test_external_mask_mode_unchanged() -> None:
     assert external.threshold_metadata.get("method") == "external_mask"
     assert len(external.accepted) == len(baseline.accepted)
     assert external.accepted[0].path == baseline.accepted[0].path
+
+
+def routing_config(**overrides: object) -> PunctaDeclumpConfig:
+    params = {
+        "detection_mask_mode": "image_only",
+        "min_center_separation": 2.5,
+        "min_amplitude": 5.0,
+        "image_only_group_link_distance": 20.0,
+    }
+    params.update(overrides)
+    return PunctaDeclumpConfig(**params)
+
+
+def test_three_well_separated_validated_peaks_route_direct() -> None:
+    peaks = [
+        PeakCandidate(10.0, 10.0, 100.0),
+        PeakCandidate(10.0, 20.0, 100.0),
+        PeakCandidate(10.0, 30.0, 100.0),
+    ]
+    groups = group_peaks(peaks, (64, 64), routing_config())
+
+    assert len(groups) == 1
+    assert groups[0].route == "direct"
+    assert groups[0].routing_reason == "direct_resolved_multi_peak"
+
+
+def test_five_well_separated_validated_peaks_route_direct() -> None:
+    peaks = [PeakCandidate(10.0, 10.0 + 8.0 * i, 100.0) for i in range(5)]
+    groups = group_peaks(peaks, (64, 64), routing_config())
+
+    assert len(groups) == 1
+    assert groups[0].route == "direct"
+    assert groups[0].routing_reason == "direct_resolved_multi_peak"
+
+
+def test_three_close_overlapping_peaks_route_gmm() -> None:
+    peaks = [
+        PeakCandidate(10.0, 10.0, 100.0),
+        PeakCandidate(10.0, 12.0, 100.0),
+        PeakCandidate(10.0, 14.0, 100.0),
+    ]
+    groups = group_peaks(peaks, (64, 64), routing_config())
+
+    assert len(groups) == 1
+    assert groups[0].route == "gmm"
+    assert groups[0].routing_reason == "gmm_unresolved_multi_peak"
+
+
+def test_mixed_ambiguous_separation_routes_gmm() -> None:
+    peaks = [
+        PeakCandidate(10.0, 10.0, 100.0),
+        PeakCandidate(10.0, 12.0, 100.0),
+        PeakCandidate(10.0, 30.0, 100.0),
+    ]
+    groups = group_peaks(
+        peaks,
+        (64, 64),
+        routing_config(image_only_group_link_distance=25.0),
+    )
+
+    assert len(groups) == 1
+    assert groups[0].route == "gmm"
+    assert groups[0].routing_reason == "gmm_unresolved_multi_peak"
+
+
+def test_single_and_two_peak_direct_routing_unchanged() -> None:
+    single = group_peaks([PeakCandidate(10.0, 10.0, 100.0)], (64, 64), routing_config())
+    assert single[0].route == "direct"
+    assert single[0].routing_reason == "direct_single"
+
+    pair = group_peaks(
+        [PeakCandidate(10.0, 10.0, 100.0), PeakCandidate(10.0, 20.0, 100.0)],
+        (64, 64),
+        routing_config(),
+    )
+    assert pair[0].route == "direct"
+    assert pair[0].routing_reason == "direct_resolved_multi_peak"
+
+    close_pair = group_peaks(
+        [PeakCandidate(10.0, 10.0, 100.0), PeakCandidate(10.0, 12.0, 100.0)],
+        (64, 64),
+        routing_config(),
+    )
+    assert close_pair[0].route == "gmm"
+    assert close_pair[0].routing_reason == "gmm_unresolved_multi_peak"
+
+
+def test_low_amplitude_multi_peak_group_routes_gmm() -> None:
+    peaks = [
+        PeakCandidate(10.0, 10.0, 100.0),
+        PeakCandidate(10.0, 20.0, 1.0),
+        PeakCandidate(10.0, 30.0, 100.0),
+    ]
+    groups = group_peaks(peaks, (64, 64), routing_config(min_amplitude=5.0))
+
+    assert groups[0].route == "gmm"
+    assert groups[0].routing_reason == "gmm_unresolved_multi_peak"
+
+
+def test_three_separated_puncta_cluster_routes_direct_with_provenance() -> None:
+    image = np.full((80, 80), 40.0, dtype=np.float64)
+    for col in (20.0, 30.0, 40.0):
+        image += make_gaussian_spot(
+            (80, 80),
+            (40.0, col),
+            sigma=1.0,
+            amplitude=400.0,
+            background=0.0,
+        )
+
+    result = run_puncta_declump(
+        image,
+        image_only_config(
+            image_only_group_link_distance=15.0,
+            min_center_separation=2.5,
+        ),
+    )
+
+    assert result.threshold_metadata["image_only_counts"]["gmm_groups"] == 0
+    assert len(result.accepted) >= 3
+    assert all(
+        c.detection_provenance == "direct_resolved_multi_peak" for c in result.accepted
+    )

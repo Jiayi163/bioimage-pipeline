@@ -129,6 +129,7 @@ def run_image_only(
         rejected_peaks=peak_result.rejected_peaks,
         peak_groups=peak_groups,
         group_routes={group.group_id: group.route for group in peak_groups},
+        group_routing_reasons={group.group_id: group.routing_reason for group in peak_groups},
     )
 
     processor.filter.reset()
@@ -155,6 +156,11 @@ def run_image_only(
     peak_label = 1
     for group in peak_groups:
         if group.route == "direct":
+            direct_provenance = (
+                "direct_resolved_multi_peak"
+                if group.routing_reason == "direct_resolved_multi_peak"
+                else "image_only_peak"
+            )
             for peak in group.peaks:
                 candidate_counter += 1
                 obj = make_peak_object_info(
@@ -169,10 +175,10 @@ def run_image_only(
                     obj,
                     peak,
                     candidate_id=candidate_counter,
-                    route_reason="image_only_direct",
+                    route_reason=group.routing_reason,
                 )
                 candidate.peak_source = "image_only_peak"
-                candidate.detection_provenance = "image_only_peak"
+                candidate.detection_provenance = direct_provenance
                 candidate.object_area = obj.area
                 candidate.object_equivalent_diameter = obj.equivalent_diameter
                 candidates.append(candidate)
@@ -209,7 +215,7 @@ def run_image_only(
             provenance = "image_only_gmm" if result.debug.tried_gmm else "image_only_group"
             for candidate in result.candidates:
                 candidate.peak_source = provenance
-                candidate.detection_provenance = provenance
+                candidate.detection_provenance = "gmm_unresolved_multi_peak"
             if result.path == "gmm":
                 gmm_count += 1
             elif result.path == "fallback":

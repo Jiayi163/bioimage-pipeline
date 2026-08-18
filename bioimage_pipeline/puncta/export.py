@@ -193,6 +193,7 @@ class ResultExporter:
                 {
                     "group_id": group.group_id,
                     "route": group.route,
+                    "routing_reason": group.routing_reason,
                     "bbox": group.bbox,
                     "peak_indices": list(group.peak_indices),
                     "peaks": [asdict(p) for p in group.peaks],
@@ -201,6 +202,7 @@ class ResultExporter:
                 for group in diag.peak_groups
             ],
             "group_routes": diag.group_routes,
+            "group_routing_reasons": diag.group_routing_reasons,
         }
         groups_path = output_path / f"{stem}_peak_groups.json"
         groups_path.write_text(json.dumps(groups_payload, indent=2), encoding="utf-8")
